@@ -7,7 +7,7 @@
 
 - ADR 0001 は、判定を 3 つの軸(起動できる人、許した道具、権限と秘密情報)の重なりで行うと決め、ADR 0003 は、最初の版の規則を 5 個ほどにすると決めた
 - 各社の既定は次のとおり(2026-11-08 に読んだ文書による。版は ADR 0003 の表と、Gemini CLI の 62bab5b)
-  - claude-code-action は、書き込み権限のある人だけが起動できる。シェル(Bash)は、`claude_args` の `--allowedTools` で許さない限り使えない
+  - claude-code-action は、書き込み権限のある人だけが起動できる。シェル(Bash)は、`claude_args` の `--allowedTools` か `settings` の `permissions.allow` で許さない限り使えない
   - codex-action は、書き込み権限のある人だけが起動できる。`safety-strategy` の既定は `drop-sudo`、`sandbox` の既定は作業場所に書ける `workspace-write`
   - run-gemini-cli は、Gemini CLI を常に `--yolo`(道具の使用を全て自動で承認)で動かす。Gemini CLI の `tools.core`(組み込みの道具の許可リスト)は既定で未設定で、未設定なら組み込みの道具に制限はかからない。公式の例は `tools.core` を空にし、GitHub の MCP の道具のうち、読み取りとコメントの追加(`add_issue_comment`)だけを `includeTools` で許している。Action の入力に起動できる人を絞る項目は無く、公式の例はワークフローの `if:` に書く `author_association` の条件で絞っている
 - 既定のままなら、claude-code-action と codex-action は起動できる人と道具が絞られている。危なくなるのは、使う側が制限を外したときと、run-gemini-cli で道具や起動できる人を絞り忘れたとき
