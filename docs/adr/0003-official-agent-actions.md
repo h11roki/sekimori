@@ -19,9 +19,9 @@
 
 - 既定では、書き込み権限のある人だけが起動できる。issue、PR、コメント、レビュー、`workflow_run` で確かめる
 - `allowed_non_write_users` は、書き込み権限のない人にも起動を許す。文書は「重大なリスク」とし、権限を最小にしたワークフロー(issue のラベル付けなど)に限るよう書く。使うときは `github_token` に `GITHUB_TOKEN` を渡し、個人のアクセストークンは渡さない(期限が無く、指示の注入で少しずつ盗まれうる)。`claude_args` の `--allowedTools` で道具を最小に絞るよう勧める
-- `allowed_bots` に `'*'` を入れると、bot についてはリポジトリの権限を確かめないので、公開リポジトリでは誰が作った GitHub App でも、その App が書いた指示で起動できる
+- `allowed_bots`(既定は空で、bot は起動できない)に載せた bot は、リポジトリの権限を確かめない。`'*'` にすると、公開リポジトリでは誰が作った GitHub App でも、その App が書いた指示で起動できる
 - `pull_request_target` と `workflow_run` は、基のリポジトリの秘密情報で動く。PR の head を作業場所の根に checkout してから Action を動かしてはいけない
-- `show_full_output` は、秘密情報を含みうる全ての出力を公開のログに出す。`display_report` は、信頼できる入力だけのときに使う
+- `show_full_output`(既定は `false`)を `true` にすると、秘密情報を含みうる全ての出力を公開のログに出す。`display_report`(既定は `false`)を `true` にすると、エージェントが書いた内容を Step Summary に出すので、信頼できる入力だけのときに限る
 - `include_comments_by_actor` と `exclude_comments_by_actor` で、エージェントに渡すコメントの書き手を絞れる
 
 ### openai/codex-action
