@@ -6,7 +6,7 @@
 ## 文脈
 
 - ADR 0001 は、設定が 1 つだけなら使い方しだいで、3 つの軸が重なると 2026 年の事件と同じ形になるとした。ADR 0006 は、どの規則がどの軸を満たすかを決めた
-- SARIF の結果の重さ(level)には、`error`、`warning`、`note` がある
+- SARIF の結果の重さ(level)は、`none`、`note`、`warning`、`error` の 4 つ
 - claude-code-action と codex-action は、既定で起動できる人を書き込み権限のある人に絞る。ただし絞っているのは起動した人で、エージェントが読む文面の書き手ではない。メンテナーが外部の人の issue で `@claude` と呼べば、その issue の本文はエージェントに届く。claude-code-action には、届けるコメントの書き手を絞る `include_comments_by_actor` がある
 
 ## 検討した選択肢
