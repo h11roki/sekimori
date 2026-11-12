@@ -46,3 +46,4 @@
 | [0005](0005-workflow-parsing.md) | ワークフローの YAML は zizmor の github-actions-models と yamlpath で読む | 承認 |
 | [0006](0006-first-rules.md) | 最初の版の規則は、起動の制限を外した、広い道具、期限の無いトークン、PR の head の checkout、他の秘密情報の 5 つにする | 承認 |
 | [0007](0007-severity.md) | 指摘の重さは満たした軸の数で決め、外部の人の文面が届くだけのときは起動できる人の軸を半分に数える | 承認 |
+| [0008](0008-ci-pinning.md) | CI は Rust の版と Action を固定し、Dependabot で週に 1 回上げる | 承認 |
