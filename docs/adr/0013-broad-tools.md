@@ -24,13 +24,14 @@
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。各社で次のどれかに当たれば、広い道具とする。
 
 - claude-code-action
-  - `claude_args` の `--allowedTools` か `--allowed-tools`(`=` でつないだ形も含む)の値に、範囲を絞らない `Bash` がある。`Bash` だけか、括弧の中が `*` と `:` だけのもの(`Bash(*)` など)
-  - `claude_args` に `--dangerously-skip-permissions` か、`--permission-mode bypassPermissions` がある
-  - `settings` が JSON として読め、`permissions.allow` に範囲を絞らない `Bash` があるか、`permissions.defaultMode` が `bypassPermissions`
+  - 許可の一覧は、`claude_args` の `--allowedTools` か `--allowed-tools`(`=` でつないだ形も含む)の値、`settings` と `claude_args` の `--settings` の JSON の `permissions.allow`、`@beta` や `@v0` の入力の `allowed_tools`。値はカンマか空白で区切る。括弧の中では区切らない(base-action はカンマで分けた値を SDK に渡し、Claude Code の CLI は空白でも区切るため)
+  - 許可の一覧に、どのコマンドでも動かせる `Bash` がある。`Bash` だけ、括弧の中が `*` と `:` だけのもの(`Bash(*)` など)、ワイルドカードの前がインタプリタの名前と `-` で始まるフラグだけのもの(`Bash(bash:*)`、`Bash(bash -c:*)`、`Bash(python *)` など)。`Bash(bun test:*)` や `Bash(python -m pytest:*)` のように、プログラムや部分コマンドまで決めたものは範囲を絞った許可とする
+  - ただし、`--disallowedTools`、`--disallowed-tools`、`permissions.deny`、`disallowed_tools` のどれかで `Bash` を丸ごと禁じていれば当てない。Claude Code では禁止が許可より先に効くため
+  - `claude_args` に `--dangerously-skip-permissions` か `--permission-mode bypassPermissions` がある、または `permissions.defaultMode` が `bypassPermissions`。禁止の一覧とは組み合わせずに当てる
 - codex-action: `sandbox: danger-full-access`、`permission-profile: ":danger-full-access"`、`safety-strategy: unsafe` のどれか
-- run-gemini-cli: `settings` が無い、または JSON として読めて `tools.core` が無い。または `tools.core` に範囲を絞らない `run_shell_command` か `ShellTool` がある
-- 1 つのステップで複数に当たっても、指摘は最初の 1 つの設定を指す。理由にはその設定を書く
-- 値が式(`${{ vars.SETTINGS }}`)、パス、JSON として読めない文字列のときは、当てない
+- run-gemini-cli: `settings` が無い、または JSON として読めて `tools.core` が無い。または `tools.core` に、範囲を絞らない `run_shell_command` か `ShellTool`、またはインタプリタの名前と `-` で始まるフラグだけに絞ったもの(`run_shell_command(bash)` など)がある。Gemini CLI は前置きで照らすので、インタプリタの名前だけなら何でも渡せる。`settings` は、Gemini CLI と同じくコメントを除いてから読む
+- 1 つのステップで複数に当たっても、指摘は 1 つの設定を指し、理由にはその設定を書く。claude は権限の確認を外す設定、次に `claude_args`、`settings`、`allowed_tools` の順で最初に `Bash` を許した設定。codex は `sandbox`、`permission-profile`、`safety-strategy` の順
+- 値が式(`${{ vars.SETTINGS }}`)、パス、JSON として読めない文字列のとき、`with:` 全体が式のときは、当てない
 
 ## 理由
 
@@ -44,6 +45,8 @@
 - codex-action の名前付きの独自の profile は、`config.toml` を読まないので見ない
 - `--permission-mode auto` は、許可リストの外の道具を Claude Code の安全の確認で通すが、確認があるので広い道具とはみなさない
 - Gemini CLI の `tools.exclude` でシェルを外していても、`tools.core` が無ければ他の組み込みの道具が全て使えるので、広い道具とみなす
+- `Bash(npm:*)`、`Bash(npx:*)`、`Bash(git:*)` のようなパッケージの管理やバージョン管理の道具も、使い方しだいで任意のコードを動かせるが、範囲を絞った許可とみなす。インタプリタは、何でも渡すための道具なので広い道具に含める
+- `@v1` で使われない `allowed_tools` を残していると、効かない設定を指摘することになる
 
 ## 再検討する条件
 
