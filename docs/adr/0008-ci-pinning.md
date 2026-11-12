@@ -41,7 +41,8 @@ Action とクレートの更新
 - CI は rustup でこのファイルの版を入れ、`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked` を流す。外部の toolchain の Action は使わない。Cargo.lock はリポジトリに含める
 - Dependabot で `github-actions`、`cargo`、`rust-toolchain` を週に 1 回見て、`cooldown` を 7 日にする
 - 選択肢を出した時点では Rust の版は手で上げるつもりだったが、Dependabot が rust-toolchain.toml に対応していると分かったので、3 つ目として含めた
-- `cargo` では github-actions-models と yamlpath を 1 つのグループにまとめ、1 つの PR で同じ版に上げる。ADR 0005 の固定はそのまま保ち、PR が来たら zizmor の変更点を読んでからマージする
+- `cargo` では github-actions-models と yamlpath を 1 つのグループにまとめ、同じ回に見つかった 2 つの更新を 1 つの PR にする。グループは版をそろえるものではなく、security updates はグループの外でクレートごとに PR になる。片方だけが上がる PR は、もう片方を手でそろえてからマージする。ADR 0005 の固定はそのまま保ち、zizmor の変更点を読んでからマージする
+- Action の SHA の横には `# v7.0.1` の形で版を書く。Dependabot は SHA と一緒にこの版も書き換える。コードにコメントを書かない方針の、この形だけの例外とする
 - リポジトリの設定で alerts と security updates を有効にした
 
 ## 理由
@@ -54,6 +55,7 @@ Action とクレートの更新
 ## 受け入れたトレードオフ
 
 - 版を上げる PR が週に何本か来る。zizmor のクレートは版が頻繁に出るので、`cargo` の PR は多めになる
+- 2 つのクレートの版がずれた PR が来うるので、マージの前に版がそろっているかを見る手間が残る
 - 新しい Rust の lint や改善に気づくのが、Dependabot の PR が来るまで遅れる
 - 脆弱性として登録されていない修正は、`cooldown` の 7 日のあいだ上がらない
 - ビルドのキャッシュは持たない。依存がまだ無いので効かず、キャッシュの Action も増える
