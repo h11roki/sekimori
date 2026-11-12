@@ -63,31 +63,25 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
             match step {
                 Step::Uses(step) => found.extend(AgentStep::find(job_id, step, route)),
                 Step::Parallel { parallel } => {
-                    found.extend(parallel_agent_steps(job_id, parallel, &route))
+                    found.extend(parallel.iter().enumerate().filter_map(
+                        |(inner, step)| match step {
+                            ParallelStep::Uses(step) => AgentStep::find(
+                                job_id,
+                                step,
+                                route.with_keys([
+                                    Component::from("parallel"),
+                                    Component::from(inner),
+                                ]),
+                            ),
+                            ParallelStep::Run(_) => None,
+                        },
+                    ))
                 }
                 Step::Run(_) | Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
             }
         }
     }
     found
-}
-
-fn parallel_agent_steps<'w>(
-    job_id: &'w str,
-    parallel: &'w [ParallelStep],
-    route: &Route<'w>,
-) -> impl Iterator<Item = AgentStep<'w>> {
-    parallel
-        .iter()
-        .enumerate()
-        .filter_map(move |(index, step)| match step {
-            ParallelStep::Uses(step) => AgentStep::find(
-                job_id,
-                step,
-                route.with_keys([Component::from("parallel"), Component::from(index)]),
-            ),
-            ParallelStep::Run(_) => None,
-        })
 }
 
 #[cfg(test)]
