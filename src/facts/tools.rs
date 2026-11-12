@@ -11,6 +11,7 @@ const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
 const CLAUDE_PERMISSION_MODE_FLAG: &str = "--permission-mode";
 const CLAUDE_SETTINGS_FLAG: &str = "--settings";
 const CLAUDE_BYPASS_MODE: &str = "bypassPermissions";
+const CLAUDE_BYPASS_DISABLED: &str = "disable";
 const CLAUDE_SHELL_TOOL: &str = "Bash";
 const CLAUDE_LEGACY_ALLOWED_INPUT: &str = "allowed_tools";
 const CLAUDE_LEGACY_DISALLOWED_INPUT: &str = "disallowed_tools";
@@ -20,9 +21,10 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
-const INTERPRETERS: [&str; 16] = [
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "python", "python3", "node", "deno", "bun",
-    "perl", "ruby", "env", "eval",
+const PROGRAM_RUNNERS: [&str; 25] = [
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "python", "node", "deno", "bun", "perl",
+    "ruby", "env", "eval", "exec", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "command",
+    "busybox", "time",
 ];
 
 #[derive(Debug)]
@@ -47,27 +49,27 @@ pub fn broad_tool<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
 
 #[derive(Default)]
 struct ClaudePermissions<'w> {
-    bypass: Option<BroadTool<'w>>,
-    shell: Option<BroadTool<'w>>,
-    shell_denied: bool,
+    skip_permissions: Option<BroadTool<'w>>,
+    cli_mode: Option<(String, BroadTool<'w>)>,
+    settings_mode: Option<(String, BroadTool<'w>)>,
+    bypass_disabled: bool,
+    shell_allows: Vec<(String, BroadTool<'w>)>,
+    denied: Vec<String>,
 }
 
 impl<'w> ClaudePermissions<'w> {
     fn of(step: &AgentStep<'w>) -> Self {
         let mut permissions = Self::default();
         if let Some((key, value)) = input(step, "claude_args") {
-            permissions.read_args(key, value, input_route(step, key));
+            permissions.read_args(key, value, &input_route(step, key));
         }
         if let Some((key, value)) = input(step, "settings") {
             permissions.read_settings(key, value, &input_route(step, key));
         }
         if let Some((key, value)) = input(step, CLAUDE_LEGACY_ALLOWED_INPUT) {
+            let route = input_route(step, key);
             for tool in tool_list(value) {
-                permissions.allow(
-                    tool,
-                    format!("{key} allows `{tool}`"),
-                    &input_route(step, key),
-                );
+                permissions.allow(tool, format!("{key} allows `{tool}`"), &route);
             }
         }
         if let Some((_, value)) = input(step, CLAUDE_LEGACY_DISALLOWED_INPUT) {
@@ -77,17 +79,35 @@ impl<'w> ClaudePermissions<'w> {
     }
 
     fn broad_tool(self) -> Option<BroadTool<'w>> {
-        let shell_denied = self.shell_denied;
-        self.bypass.or_else(|| self.shell.filter(|_| !shell_denied))
+        if !self.bypass_disabled {
+            if let Some(skip) = self.skip_permissions {
+                return Some(skip);
+            }
+            if let Some((mode, setting)) = self.cli_mode.or(self.settings_mode)
+                && mode == CLAUDE_BYPASS_MODE
+            {
+                return Some(setting);
+            }
+        }
+        let denied = self.denied;
+        self.shell_allows
+            .into_iter()
+            .find(|(tool, _)| {
+                !denied.iter().any(|deny| {
+                    deny == tool
+                        || pattern_of(deny, CLAUDE_SHELL_TOOL).is_some_and(matches_every_command)
+                })
+            })
+            .map(|(_, setting)| setting)
     }
 
-    fn read_args(&mut self, key: &str, value: &str, route: Route<'w>) {
-        let without_comments = value
+    fn read_args(&mut self, key: &str, value: &str, route: &Route<'w>) {
+        let without_comment_lines = value
             .lines()
             .filter(|line| !line.trim_start().starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
-        let Some(args) = shlex::split(&without_comments) else {
+        let Some(args) = shlex::split(before_comment(&without_comment_lines)) else {
             return;
         };
         let mut args = args.iter().peekable();
@@ -97,25 +117,28 @@ impl<'w> ClaudePermissions<'w> {
                 None => (arg.as_str(), None),
             };
             if flag == CLAUDE_SKIP_PERMISSIONS_FLAG {
-                self.set_bypass(format!("{key} has {flag}"), &route);
+                self.skip_permissions.get_or_insert_with(|| BroadTool {
+                    setting: format!("{key} has {flag}"),
+                    route: route.clone(),
+                });
             } else if flag == CLAUDE_PERMISSION_MODE_FLAG {
-                let mode = inline_value.or_else(|| args.peek().map(|next| next.as_str()));
-                if mode == Some(CLAUDE_BYPASS_MODE) {
-                    self.set_bypass(format!("{key} has {flag} {CLAUDE_BYPASS_MODE}"), &route);
+                let mode = inline_value.or_else(|| args.next().map(String::as_str));
+                if let Some(mode) = mode {
+                    let setting = BroadTool {
+                        setting: format!("{key} has {flag} {mode}"),
+                        route: route.clone(),
+                    };
+                    self.cli_mode = Some((mode.to_string(), setting));
                 }
             } else if flag == CLAUDE_SETTINGS_FLAG {
                 let settings = inline_value.or_else(|| args.next().map(String::as_str));
                 if let Some(settings) = settings {
-                    self.read_settings(&format!("{key} {flag}"), settings, &route);
+                    self.read_settings(&format!("{key} {flag}"), settings, route);
                 }
             } else if CLAUDE_ALLOWED_TOOLS_FLAGS.contains(&flag) {
                 for value in inline_value.into_iter().chain(flag_values(&mut args)) {
                     for tool in tool_list(value) {
-                        self.allow(
-                            tool,
-                            format!("{key} allows `{tool}` through {flag}"),
-                            &route,
-                        );
+                        self.allow(tool, format!("{key} allows `{tool}` through {flag}"), route);
                     }
                 }
             } else if CLAUDE_DISALLOWED_TOOLS_FLAGS.contains(&flag) {
@@ -133,12 +156,17 @@ impl<'w> ClaudePermissions<'w> {
         let Some(permissions) = settings.get("permissions") else {
             return;
         };
-        if permissions.get("defaultMode").and_then(Value::as_str) == Some(CLAUDE_BYPASS_MODE) {
-            self.set_bypass(
-                format!("{origin} sets permissions.defaultMode to {CLAUDE_BYPASS_MODE}"),
-                route,
-            );
+        if let Some(mode) = permissions.get("defaultMode").and_then(Value::as_str) {
+            let setting = BroadTool {
+                setting: format!("{origin} sets permissions.defaultMode to {mode}"),
+                route: route.clone(),
+            };
+            self.settings_mode = Some((mode.to_string(), setting));
         }
+        self.bypass_disabled |= permissions
+            .get("disableBypassPermissionsMode")
+            .and_then(Value::as_str)
+            == Some(CLAUDE_BYPASS_DISABLED);
         for tool in string_array(permissions.get("allow")) {
             self.allow(
                 tool,
@@ -149,25 +177,44 @@ impl<'w> ClaudePermissions<'w> {
         string_array(permissions.get("deny")).for_each(|tool| self.deny(tool));
     }
 
-    fn set_bypass(&mut self, setting: String, route: &Route<'w>) {
-        self.bypass.get_or_insert_with(|| BroadTool {
-            setting,
-            route: route.clone(),
-        });
-    }
-
     fn allow(&mut self, tool: &str, setting: String, route: &Route<'w>) {
-        if self.shell.is_none() && claude_allows_any_command(tool) {
-            self.shell = Some(BroadTool {
-                setting,
-                route: route.clone(),
-            });
+        let any_command = pattern_of(tool, CLAUDE_SHELL_TOOL).is_some_and(|pattern| {
+            matches_every_command(pattern)
+                || pattern
+                    .trim()
+                    .strip_suffix('*')
+                    .is_some_and(|prefix| runs_any_program(prefix.trim_end_matches([':', ' '])))
+        });
+        if any_command {
+            self.shell_allows.push((
+                tool.trim().to_string(),
+                BroadTool {
+                    setting,
+                    route: route.clone(),
+                },
+            ));
         }
     }
 
     fn deny(&mut self, tool: &str) {
-        self.shell_denied |= pattern_of(tool, CLAUDE_SHELL_TOOL).is_some_and(matches_every_command);
+        self.denied.push(tool.trim().to_string());
     }
+}
+
+fn before_comment(text: &str) -> &str {
+    let mut quote = None;
+    let mut previous = ' ';
+    for (index, c) in text.char_indices() {
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c == '#' && previous.is_whitespace() => return &text[..index],
+            None => {}
+        }
+        previous = c;
+    }
+    text
 }
 
 fn flag_values<'a>(args: &mut std::iter::Peekable<std::slice::Iter<'a, String>>) -> Vec<&'a str> {
@@ -211,29 +258,13 @@ fn matches_every_command(pattern: &str) -> bool {
     pattern.chars().all(|c| matches!(c, '*' | ':' | ' '))
 }
 
-fn claude_allows_any_command(entry: &str) -> bool {
-    pattern_of(entry, CLAUDE_SHELL_TOOL).is_some_and(|pattern| {
-        matches_every_command(pattern)
-            || pattern
-                .trim()
-                .strip_suffix('*')
-                .is_some_and(|prefix| runs_any_program(prefix.trim_end_matches([':', ' '])))
-    })
-}
-
-fn gemini_allows_any_command(entry: &str) -> bool {
-    GEMINI_SHELL_TOOLS.iter().any(|shell| {
-        pattern_of(entry, shell)
-            .is_some_and(|pattern| matches_every_command(pattern) || runs_any_program(pattern))
-    })
-}
-
 fn runs_any_program(command: &str) -> bool {
     let mut words = command.split_whitespace();
-    words
-        .next()
-        .is_some_and(|program| INTERPRETERS.contains(&program))
-        && words.all(|word| word.starts_with('-'))
+    words.next().is_some_and(|program| {
+        let name = program.rsplit('/').next().unwrap_or(program);
+        let name = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        PROGRAM_RUNNERS.contains(&name)
+    }) && words.all(|word| word.starts_with('-'))
 }
 
 fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
@@ -260,7 +291,12 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
             route,
         });
     };
-    let tool = string_array(Some(core)).find(|tool| gemini_allows_any_command(tool))?;
+    let tool = string_array(Some(core)).find(|tool| {
+        GEMINI_SHELL_TOOLS.iter().any(|shell| {
+            pattern_of(tool, shell)
+                .is_some_and(|pattern| matches_every_command(pattern) || runs_any_program(pattern))
+        })
+    })?;
     Some(BroadTool {
         setting: format!("{key} allows `{tool}` in tools.core"),
         route,
@@ -543,6 +579,59 @@ jobs:
     fn gemini_inputs_given_by_an_expression_are_not_judged() {
         assert_eq!(
             gemini("        with: ${{ fromJSON(vars.GEMINI_INPUTS) }}\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_args_after_a_comment_are_ignored_like_shell_quote_does() {
+        assert_eq!(
+            claude(
+                "        with:\n          claude_args: |\n            --model claude-opus-5  # pinned\n            --allowedTools Bash\n"
+            ),
+            None
+        );
+        assert_eq!(
+            claude("        with:\n          claude_args: |\n            --append-system-prompt 'see #42' --allowedTools Bash\n")
+                .as_deref(),
+            Some("8: claude_args allows `Bash` through --allowedTools")
+        );
+    }
+
+    #[test]
+    fn claude_program_runners_written_as_paths_versions_or_wrappers_are_broad() {
+        for tool in [
+            "Bash(/bin/bash:*)",
+            "Bash(python3.12:*)",
+            "Bash(sudo:*)",
+            "Bash(xargs *)",
+        ] {
+            let with = format!("        with:\n          claude_args: --allowedTools \"{tool}\"\n");
+            assert_eq!(
+                claude(&with).as_deref(),
+                Some(format!("8: claude_args allows `{tool}` through --allowedTools").as_str()),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_bypass_is_not_broad_when_disabled_or_overridden() {
+        for with in [
+            "        with:\n          claude_args: --dangerously-skip-permissions\n          settings: '{\"permissions\": {\"disableBypassPermissionsMode\": \"disable\"}}'\n",
+            "        with:\n          claude_args: --permission-mode bypassPermissions --model x --permission-mode default\n",
+            "        with:\n          claude_args: --permission-mode acceptEdits\n          settings: '{\"permissions\": {\"defaultMode\": \"bypassPermissions\"}}'\n",
+        ] {
+            assert_eq!(claude(with), None, "{with}");
+        }
+    }
+
+    #[test]
+    fn claude_deny_matching_the_allow_exactly_closes_it() {
+        assert_eq!(
+            claude(
+                "        with:\n          claude_args: --allowedTools \"Bash(bash:*)\" --disallowedTools \"Bash(bash:*)\"\n"
+            ),
             None
         );
     }
