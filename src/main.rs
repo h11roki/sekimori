@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use sekimori::agent::agent_steps;
 use sekimori::report::plain;
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, workflow_paths};
@@ -32,10 +31,7 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        let assessments: Vec<Assessment> = agent_steps(&workflow)
-            .into_iter()
-            .map(|step| assess(&workflow, step))
-            .collect();
+        let assessments = assess(&workflow);
         for finding in assessments.iter().flat_map(Assessment::findings) {
             found = true;
             if let Err(error) = stdout.write_all(plain(&workflow, &finding).as_bytes()) {

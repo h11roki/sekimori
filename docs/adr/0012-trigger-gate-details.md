@@ -23,12 +23,15 @@
 
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
 
-- `if:` は `${{ }}` を外して github-actions-expressions で読み、次のどれかのときだけ、起動した人を絞っているとみなす
-  - 起動した人の文脈(`github.actor`、`github.triggering_actor`、`github.event.*.author_association`)を `==` で比べている
-  - `contains(一覧, 起動した人の文脈)` で、2 つ目の引数に起動した人の文脈がある
+- `if:` は `${{ }}` を外して github-actions-expressions で読み、外部の人が起こせるトリガーのイベントごとに、そのイベントで起動した人を必ず比べているかを見る。全てのイベントで比べているときだけ、起動した人を絞っているとみなす
+  - 起動した人の値は、`github.actor`、`github.triggering_actor`、そのイベントで起動した人が書いたものの `author_association`。issue_comment、pull_request_review_comment、discussion_comment では `github.event.comment`、issues では `github.event.issue`、pull_request_target では `github.event.pull_request`、pull_request_review では `github.event.review`、discussion では `github.event.discussion`。issue_comment で `github.event.issue.author_association` を比べても、issue を書いた人を見ているだけなので絞っていない
+  - `a || b` を値として使うときは、そのイベントで実在する最初の値を取る。issue_comment では issue も comment も実在するので、`github.event.issue.author_association || github.event.comment.author_association` は issue を書いた人の値になる
+  - 起動した人の値を `==` で定数と比べている。相手が `github.event.issue.user.login` のようなイベントの値なら、外部の人が決められるので絞っていない
+  - `contains(fromJSON('[...]'), 起動した人の値)` のように、1 つ目の引数が定数の JSON の一覧。1 つ目が文字列だと部分文字列の判定になり、`contains('alice,bob', github.actor)` は `ali` でも通るので絞っていない
   - `&&` は、どちらかの側が絞っていれば絞っている。`||` は、両側が絞っているときだけ絞っている
   - `false` は、動かないので絞っているとみなす
   - `!=`、`!`、他の関数は、絞っていないとみなす。式を読めないときも、絞っていないとみなす(指摘を出す側に倒す)
+- `if:` で起動した人を絞っていれば、3 社のどれでも、起動の制限を外した設定は当てない。`allow-users: '*'` でも、ジョブの `if:` で 1 人に絞っていれば誰でもは起動できない
 - claude-code-action の `allowed_non_write_users: '*'` は、`github_token` を空でない値で渡しているときだけ当てる。`allowed_bots` は値が丸ごと `*` のときだけ当てる
 - codex-action の `allow-users` は、値が丸ごと `*` のときだけ当てる
 - `with` の入力の名前は、大文字と小文字を区別せずに探す
@@ -45,6 +48,8 @@
 
 - `author_association == 'NONE'` のような、外部の人を通す比較も絞っているとみなす
 - `contains` 以外の関数(`startsWith` など)で起動した人を比べている式は、絞っていないとみなし、誤検知になりうる
+- エージェントのジョブが `needs:` で待つ前のジョブの `if:` で絞る形(dispatch のジョブ)は見ないので、誤検知になる。run-gemini-cli の公式の例はこの形を再利用できるワークフローで書いていて、それは ADR 0006 で追わないと決めている
+- workflow_run には起動した人の `author_association` が無いので、`github.actor` か `github.triggering_actor` の比較でしか絞れない
 - zizmor のクレートが 3 つになり、版を上げる手間が少し増える
 
 ## 再検討する条件

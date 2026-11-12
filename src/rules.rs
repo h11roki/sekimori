@@ -1,12 +1,11 @@
 use std::fmt;
 
 use github_actions_models::common::{BasePermission, Permission, Permissions};
-use github_actions_models::workflow::event::Events;
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
-use crate::agent::AgentStep;
-use crate::facts::{OpenTrigger, open_trigger};
+use crate::agent::{AgentStep, agent_steps};
+use crate::facts::{ExternalEvent, OpenTrigger, external_events, open_trigger};
 use crate::workflow::Workflow;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
@@ -130,10 +129,29 @@ impl<'w> Assessment<'w> {
     }
 }
 
-pub fn assess<'w>(workflow: &'w Workflow, step: AgentStep<'w>) -> Assessment<'w> {
+pub fn assess(workflow: &Workflow) -> Vec<Assessment<'_>> {
+    let events = external_events(&workflow.model.on.events);
+    let event_names = events
+        .iter()
+        .map(|event| event.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    agent_steps(workflow)
+        .into_iter()
+        .map(|step| assess_step(workflow, step, &events, &event_names))
+        .collect()
+}
+
+fn assess_step<'w>(
+    workflow: &'w Workflow,
+    step: AgentStep<'w>,
+    events: &[ExternalEvent],
+    event_names: &str,
+) -> Assessment<'w> {
     let mut hits = Vec::new();
-    let who_can_trigger =
-        external_events(&workflow.model.on.events).map(|events| match open_trigger(&step) {
+    let mut who_can_trigger = None;
+    if !events.is_empty() {
+        who_can_trigger = Some(match open_trigger(&step, events) {
             Some(OpenTrigger { setting, route }) => {
                 hits.push(Hit {
                     rule: Rule::UnrestrictedTrigger,
@@ -141,14 +159,17 @@ pub fn assess<'w>(workflow: &'w Workflow, step: AgentStep<'w>) -> Assessment<'w>
                 });
                 AxisScore {
                     weight: Weight::Full,
-                    reason: format!("{setting}, on {events}"),
+                    reason: format!("{setting}, on {event_names}"),
                 }
             }
             None => AxisScore {
                 weight: Weight::Half,
-                reason: format!("on {events}, text from outside contributors can reach the agent"),
+                reason: format!(
+                    "on {event_names}, text from outside contributors can reach the agent"
+                ),
             },
         });
+    }
     let permissions_and_secrets = write_permission(workflow, step.job).map(|reason| AxisScore {
         weight: Weight::Full,
         reason,
@@ -160,32 +181,6 @@ pub fn assess<'w>(workflow: &'w Workflow, step: AgentStep<'w>) -> Assessment<'w>
         permissions_and_secrets,
         hits,
     }
-}
-
-fn external_events(events: &Events) -> Option<String> {
-    let present: Vec<&str> = [
-        ("issues", events.issues.is_present()),
-        ("issue_comment", events.issue_comment.is_present()),
-        (
-            "pull_request_target",
-            events.pull_request_target.is_present(),
-        ),
-        (
-            "pull_request_review",
-            events.pull_request_review.is_present(),
-        ),
-        (
-            "pull_request_review_comment",
-            events.pull_request_review_comment.is_present(),
-        ),
-        ("discussion", events.discussion.is_present()),
-        ("discussion_comment", events.discussion_comment.is_present()),
-        ("workflow_run", events.workflow_run.is_present()),
-    ]
-    .into_iter()
-    .filter_map(|(name, present)| present.then_some(name))
-    .collect();
-    (!present.is_empty()).then(|| present.join(", "))
 }
 
 fn write_permission(workflow: &Workflow, job: &NormalJob) -> Option<String> {
@@ -214,13 +209,12 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::agent::agent_steps;
 
     fn assessed(source: &str) -> (Option<AxisScore>, Option<AxisScore>, u8, Option<Level>) {
         let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
-        let mut steps = agent_steps(&workflow);
-        assert_eq!(steps.len(), 1);
-        let assessment = assess(&workflow, steps.remove(0));
+        let mut assessments = assess(&workflow);
+        assert_eq!(assessments.len(), 1);
+        let assessment = assessments.remove(0);
         let total = assessment.total_halves();
         let level = assessment.level();
         (

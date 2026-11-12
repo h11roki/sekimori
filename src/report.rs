@@ -53,7 +53,6 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::agent::agent_steps;
     use crate::rules::assess;
 
     #[test]
@@ -73,8 +72,8 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessment = assess(&workflow, agent_steps(&workflow).remove(0));
-        let findings = assessment.findings();
+        let assessments = assess(&workflow);
+        let findings = assessments[0].findings();
         assert_eq!(findings.len(), 1);
         assert_eq!(
             plain(&workflow, &findings[0]),
