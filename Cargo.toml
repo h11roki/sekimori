@@ -8,6 +8,7 @@ repository = "https://github.com/h11roki/sekimori"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
+github-actions-expressions = "=1.32.0"
 github-actions-models = "=1.32.0"
 thiserror = "2"
 yaml_serde = "0.10"

@@ -1,5 +1,3 @@
-use yamlpath::Route;
-
 use crate::rules::{Finding, MAX_TOTAL};
 use crate::workflow::Workflow;
 
@@ -7,7 +5,7 @@ const LABEL_WIDTH: usize = 21;
 const VALUE_WIDTH: usize = 5;
 
 pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
-    let (line, column) = position(workflow, &finding.hit.route);
+    let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));
     let assessment = finding.assessment;
     let mut text = format!(
         "{}:{line}:{column}: {}[{}]: {} in job `{}` {}\n",
@@ -42,16 +40,6 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     text
 }
 
-fn position(workflow: &Workflow, route: &Route) -> (usize, usize) {
-    workflow
-        .document
-        .query_pretty(route)
-        .map_or((1, 1), |feature| {
-            let (row, column) = feature.location.point_span.0;
-            (row + 1, column + 1)
-        })
-}
-
 fn halves_text(halves: u8) -> String {
     if halves.is_multiple_of(2) {
         (halves / 2).to_string()
@@ -79,6 +67,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: '*'
 "
             .to_string(),
@@ -90,7 +79,7 @@ jobs:
         assert_eq!(
             plain(&workflow, &findings[0]),
             "\
-.github/workflows/claude.yml:8:11: warning[unrestricted-trigger]: anthropics/claude-code-action@v1 in job `claude` can be started by anyone
+.github/workflows/claude.yml:9:11: warning[unrestricted-trigger]: anthropics/claude-code-action@v1 in job `claude` can be started without write access
   who can trigger      1    allowed_non_write_users: '*', on issue_comment
   allowed tools        0
   permissions/secrets  1    no permissions are set, so GITHUB_TOKEN gets the repository default

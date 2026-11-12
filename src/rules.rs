@@ -6,14 +6,16 @@ use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
 use crate::agent::AgentStep;
-use crate::facts::{TriggerGate, trigger_gate};
+use crate::facts::{OpenTrigger, open_trigger};
 use crate::workflow::Workflow;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
 pub const MAX_TOTAL: u8 = 3;
-const ERROR_HALVES: u8 = MAX_TOTAL * 2;
-const WARNING_HALVES: u8 = 4;
+const WARNING_TOTAL: u8 = 2;
+const HALVES_PER_POINT: u8 = 2;
+const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
+const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
@@ -29,7 +31,7 @@ impl Rule {
 
     pub fn summary(self) -> &'static str {
         match self {
-            Rule::UnrestrictedTrigger => "can be started by anyone",
+            Rule::UnrestrictedTrigger => "can be started without write access",
         }
     }
 }
@@ -44,7 +46,7 @@ impl Weight {
     pub fn halves(self) -> u8 {
         match self {
             Weight::Half => 1,
-            Weight::Full => 2,
+            Weight::Full => HALVES_PER_POINT,
         }
     }
 }
@@ -131,8 +133,8 @@ impl<'w> Assessment<'w> {
 pub fn assess<'w>(workflow: &'w Workflow, step: AgentStep<'w>) -> Assessment<'w> {
     let mut hits = Vec::new();
     let who_can_trigger =
-        external_events(&workflow.model.on.events).map(|events| match trigger_gate(&step) {
-            TriggerGate::Open { setting, route } => {
+        external_events(&workflow.model.on.events).map(|events| match open_trigger(&step) {
+            Some(OpenTrigger { setting, route }) => {
                 hits.push(Hit {
                     rule: Rule::UnrestrictedTrigger,
                     route,
@@ -142,7 +144,7 @@ pub fn assess<'w>(workflow: &'w Workflow, step: AgentStep<'w>) -> Assessment<'w>
                     reason: format!("{setting}, on {events}"),
                 }
             }
-            TriggerGate::Restricted => AxisScore {
+            None => AxisScore {
                 weight: Weight::Half,
                 reason: format!("on {events}, text from outside contributors can reach the agent"),
             },
@@ -246,6 +248,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: '*'
 ",
         );
