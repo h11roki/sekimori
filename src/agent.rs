@@ -1,6 +1,6 @@
 use github_actions_models::common::Uses;
 use github_actions_models::workflow::Job;
-use github_actions_models::workflow::job::{NormalJob, ParallelStep, Step, UsesStep};
+use github_actions_models::workflow::job::{ParallelStep, Step, UsesStep};
 use yamlpath::{Component, Route, route};
 
 use crate::workflow::Workflow;
@@ -13,26 +13,22 @@ pub enum Agent {
 }
 
 impl Agent {
-    const ALL: [Agent; 3] = [Agent::ClaudeCode, Agent::Codex, Agent::GeminiCli];
-
-    pub fn action(self) -> &'static str {
-        match self {
-            Agent::ClaudeCode => "anthropics/claude-code-action",
-            Agent::Codex => "openai/codex-action",
-            Agent::GeminiCli => "google-github-actions/run-gemini-cli",
-        }
-    }
-
     fn of(uses: &Uses) -> Option<Agent> {
         let Uses::Repository(repository) = uses else {
             return None;
         };
-        if repository.subpath().is_some() {
+        if repository
+            .subpath()
+            .is_some_and(|subpath| !subpath.is_empty())
+        {
             return None;
         }
-        Agent::ALL
-            .into_iter()
-            .find(|agent| agent.action().eq_ignore_ascii_case(repository.slug()))
+        match repository.slug().to_ascii_lowercase().as_str() {
+            "anthropics/claude-code-action" => Some(Agent::ClaudeCode),
+            "openai/codex-action" => Some(Agent::Codex),
+            "google-github-actions/run-gemini-cli" => Some(Agent::GeminiCli),
+            _ => None,
+        }
     }
 }
 
@@ -44,56 +40,54 @@ pub struct AgentStep<'w> {
     pub route: Route<'w>,
 }
 
-pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
-    workflow
-        .model
-        .jobs
-        .iter()
-        .filter_map(|(job_id, job)| match job {
-            Job::NormalJob(job) => Some((job_id.as_str(), job.as_ref())),
-            Job::ReusableWorkflowCallJob(_) => None,
+impl<'w> AgentStep<'w> {
+    fn find(job_id: &'w str, step: &'w UsesStep, route: Route<'w>) -> Option<Self> {
+        Agent::of(&step.uses).map(|agent| AgentStep {
+            agent,
+            job_id,
+            step,
+            route,
         })
-        .flat_map(|(job_id, job)| {
-            uses_steps(job_id, job)
-                .into_iter()
-                .filter_map(move |(route, step)| {
-                    Agent::of(&step.uses).map(|agent| AgentStep {
-                        agent,
-                        job_id,
-                        step,
-                        route,
-                    })
-                })
-        })
-        .collect()
+    }
 }
 
-fn uses_steps<'w>(job_id: &'w str, job: &'w NormalJob) -> Vec<(Route<'w>, &'w UsesStep)> {
-    let steps = route!["jobs", job_id, "steps"];
-    job.steps
-        .iter()
-        .enumerate()
-        .flat_map(|(index, step)| {
+pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
+    let mut found = Vec::new();
+    for (job_id, job) in &workflow.model.jobs {
+        let Job::NormalJob(job) = job else {
+            continue;
+        };
+        let steps = route!["jobs", job_id.as_str(), "steps"];
+        for (index, step) in job.steps.iter().enumerate() {
             let route = steps.with_key(index);
             match step {
-                Step::Uses(step) => vec![(route, step)],
-                Step::Parallel { parallel } => parallel
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(inner, step)| match step {
-                        ParallelStep::Uses(step) => Some((
-                            route.with_keys([Component::from("parallel"), Component::from(inner)]),
-                            step,
-                        )),
-                        ParallelStep::Run(_) => None,
-                    })
-                    .collect(),
-                Step::Run(_) | Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {
-                    Vec::new()
+                Step::Uses(step) => found.extend(AgentStep::find(job_id, step, route)),
+                Step::Parallel { parallel } => {
+                    found.extend(parallel_agent_steps(job_id, parallel, &route))
                 }
+                Step::Run(_) | Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
             }
+        }
+    }
+    found
+}
+
+fn parallel_agent_steps<'w>(
+    job_id: &'w str,
+    parallel: &'w [ParallelStep],
+    route: &Route<'w>,
+) -> impl Iterator<Item = AgentStep<'w>> {
+    parallel
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, step)| match step {
+            ParallelStep::Uses(step) => AgentStep::find(
+                job_id,
+                step,
+                route.with_keys([Component::from("parallel"), Component::from(index)]),
+            ),
+            ParallelStep::Run(_) => None,
         })
-        .collect()
 }
 
 #[cfg(test)]
@@ -168,6 +162,24 @@ jobs:
             .map(|step| step.agent)
             .collect();
         assert_eq!(agents, [Agent::ClaudeCode]);
+    }
+
+    #[test]
+    fn trailing_slash_still_points_at_the_root_action() {
+        let workflow = workflow(
+            "on: issues
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action/@v1
+",
+        );
+        let agents: Vec<_> = agent_steps(&workflow)
+            .iter()
+            .map(|step| step.agent)
+            .collect();
+        assert_eq!(agents, [Agent::Codex]);
     }
 
     #[test]

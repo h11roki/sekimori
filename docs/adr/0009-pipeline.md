@@ -29,7 +29,7 @@
   - 各社の設定を軸の事実に写す段、規則、重さ、出力は、規則を実装する PR で足す
 - エージェントのステップの見つけ方
   - `uses` がリポジトリの形で、owner/repo が `anthropics/claude-code-action`、`openai/codex-action`、`google-github-actions/run-gemini-cli` のどれかと一致する。大文字と小文字は区別せず、ref は問わない
-  - subpath があるもの(`anthropics/claude-code-action/base-action` など)は、入力が違う別の Action なので含めない
+  - subpath があるもの(`anthropics/claude-code-action/base-action` など)は、入力が違う別の Action なので含めない。末尾に `/` があるだけの空の subpath は、元の Action として扱う
   - 通常のジョブのステップと、`parallel:` の中のステップを見る。再利用できるワークフローの呼び出しは追わない(ADR 0006)
   - 見つけたステップは、ジョブの ID と、yamlpath のルート(`jobs.<id>.steps[<i>]`、`parallel:` の中なら `jobs.<id>.steps[<i>].parallel[<j>]`)を持つ。指摘の位置はこのルートから引く
 - エラーは段ごとに意味のある型にし(thiserror)、CLI で表示する
