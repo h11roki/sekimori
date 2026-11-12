@@ -2,11 +2,11 @@ use github_actions_expressions::call::Function;
 use github_actions_expressions::literal::Literal;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
-use github_actions_models::common::expr::LoE;
-use github_actions_models::common::{EnvValue, If};
+use github_actions_models::common::If;
 use github_actions_models::workflow::event::Events;
-use yamlpath::{Component, Route};
+use yamlpath::Route;
 
+use super::{input, input_route};
 use crate::agent::{Agent, AgentStep};
 
 const ACTOR_CONTEXTS: [&str; 3] = [
@@ -181,27 +181,9 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
         .collect()
 }
 
-fn input<'w>(step: &AgentStep<'w>, name: &str) -> Option<(&'w str, &'w str)> {
-    let LoE::Literal(with) = &step.step.with else {
-        return None;
-    };
-    with.iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .and_then(|(key, value)| match value {
-            EnvValue::String(value) => Some((key.as_str(), value.as_str())),
-            EnvValue::Number(_) | EnvValue::Boolean(_) => None,
-        })
-}
-
 fn wildcard<'w>(step: &AgentStep<'w>, name: &str) -> Option<(String, Route<'w>)> {
     let (key, value) = input(step, name)?;
-    (value.trim() == "*").then(|| {
-        (
-            format!("{key}: '*'"),
-            step.route
-                .with_keys([Component::from("with"), Component::from(key)]),
-        )
-    })
+    (value.trim() == "*").then(|| (format!("{key}: '*'"), input_route(step, key)))
 }
 
 fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool {

@@ -5,7 +5,9 @@ use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
-use crate::facts::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
+use crate::facts::{
+    BroadTool, ExternalEvent, OpenTrigger, broad_tool, external_events, never_runs, open_trigger,
+};
 use crate::workflow::Workflow;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
@@ -19,18 +21,21 @@ const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
     UnrestrictedTrigger,
+    BroadTools,
 }
 
 impl Rule {
     pub fn id(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
+            Rule::BroadTools => "broad-tools",
         }
     }
 
     pub fn summary(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => "can be started without write access",
+            Rule::BroadTools => "can run unrestricted tools",
         }
     }
 }
@@ -170,6 +175,17 @@ fn assess_step<'w>(
             },
         });
     }
+    let mut allowed_tools = None;
+    if let Some(BroadTool { setting, route }) = broad_tool(&step) {
+        hits.push(Hit {
+            rule: Rule::BroadTools,
+            route,
+        });
+        allowed_tools = Some(AxisScore {
+            weight: Weight::Full,
+            reason: setting,
+        });
+    }
     let permissions_and_secrets = write_permission(workflow, step.job).map(|reason| AxisScore {
         weight: Weight::Full,
         reason,
@@ -177,7 +193,7 @@ fn assess_step<'w>(
     Assessment {
         step,
         who_can_trigger,
-        allowed_tools: None,
+        allowed_tools,
         permissions_and_secrets,
         hits,
     }
@@ -218,19 +234,26 @@ mod tests {
 
     use super::*;
 
-    fn assessed(source: &str) -> (Option<AxisScore>, Option<AxisScore>, u8, Option<Level>) {
+    struct Scores {
+        trigger: Option<AxisScore>,
+        tools: Option<AxisScore>,
+        permissions: Option<AxisScore>,
+        total: u8,
+        level: Option<Level>,
+    }
+
+    fn assessed(source: &str) -> Scores {
         let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
         let mut assessments = assess(&workflow);
         assert_eq!(assessments.len(), 1);
         let assessment = assessments.remove(0);
-        let total = assessment.total_halves();
-        let level = assessment.level();
-        (
-            assessment.who_can_trigger,
-            assessment.permissions_and_secrets,
-            total,
-            level,
-        )
+        Scores {
+            total: assessment.total_halves(),
+            level: assessment.level(),
+            trigger: assessment.who_can_trigger,
+            tools: assessment.allowed_tools,
+            permissions: assessment.permissions_and_secrets,
+        }
     }
 
     fn score(weight: Weight, reason: &str) -> Option<AxisScore> {
@@ -242,7 +265,13 @@ mod tests {
 
     #[test]
     fn wildcard_users_on_a_comment_without_permissions_is_a_warning() {
-        let (trigger, permissions, total, level) = assessed(
+        let Scores {
+            trigger,
+            permissions,
+            total,
+            level,
+            ..
+        } = assessed(
             "on: [issue_comment, push]
 jobs:
   claude:
@@ -274,7 +303,12 @@ jobs:
 
     #[test]
     fn restricted_trigger_counts_half_and_stays_below_a_warning() {
-        let (trigger, _, total, level) = assessed(
+        let Scores {
+            trigger,
+            total,
+            level,
+            ..
+        } = assessed(
             "on: issues
 jobs:
   claude:
@@ -296,7 +330,12 @@ jobs:
 
     #[test]
     fn no_external_trigger_means_no_one_outside_can_trigger() {
-        let (trigger, _, total, level) = assessed(
+        let Scores {
+            trigger,
+            total,
+            level,
+            ..
+        } = assessed(
             "on:
   push:
   pull_request:
@@ -313,6 +352,81 @@ jobs:
         assert_eq!(trigger, None);
         assert_eq!(total, 2);
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn all_three_axes_together_are_an_error_reported_once_per_rule() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+          sandbox: danger-full-access
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let findings: Vec<_> = assessments[0]
+            .findings()
+            .iter()
+            .map(|finding| (finding.level, finding.hit.rule))
+            .collect();
+        assert_eq!(
+            findings,
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::BroadTools)
+            ]
+        );
+    }
+
+    #[test]
+    fn broad_tools_fill_the_allowed_tools_axis_with_their_setting() {
+        let claude = assessed(
+            "on: push
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: --allowedTools Bash
+",
+        );
+        assert_eq!(
+            claude.tools,
+            score(
+                Weight::Full,
+                "claude_args allows `Bash` through --allowedTools"
+            )
+        );
+        assert_eq!(claude.total, 4);
+
+        let gemini = assessed(
+            "on: push
+permissions:
+  contents: read
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+",
+        );
+        assert_eq!(
+            gemini.tools,
+            score(
+                Weight::Full,
+                "no `settings`, so tools.core is unset and every built-in tool runs under --yolo"
+            )
+        );
+        assert_eq!(gemini.level, None);
     }
 
     #[test]
@@ -335,7 +449,10 @@ jobs:
 
     #[test]
     fn job_permissions_override_the_workflow_and_only_counted_writes_count() {
-        let (_, read_only_job, _, _) = assessed(
+        let Scores {
+            permissions: read_only_job,
+            ..
+        } = assessed(
             "on: issues
 permissions: write-all
 jobs:
@@ -351,7 +468,10 @@ jobs:
         );
         assert_eq!(read_only_job, None);
 
-        let (_, inherited, _, _) = assessed(
+        let Scores {
+            permissions: inherited,
+            ..
+        } = assessed(
             "on: issues
 permissions:
   contents: write
@@ -365,7 +485,10 @@ jobs:
         );
         assert_eq!(inherited, score(Weight::Full, "contents, id-token write"));
 
-        let (_, write_all, _, _) = assessed(
+        let Scores {
+            permissions: write_all,
+            ..
+        } = assessed(
             "on: issues
 jobs:
   claude:
@@ -377,7 +500,10 @@ jobs:
         );
         assert_eq!(write_all, score(Weight::Full, "permissions: write-all"));
 
-        let (_, read_all, _, _) = assessed(
+        let Scores {
+            permissions: read_all,
+            ..
+        } = assessed(
             "on: issues
 permissions: read-all
 jobs:
