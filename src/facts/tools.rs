@@ -1,4 +1,4 @@
-use json_comments::StripComments;
+use json_comments::CommentSettings;
 use serde_json::Value;
 use yamlpath::Route;
 
@@ -21,10 +21,34 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
-const PROGRAM_RUNNERS: [&str; 25] = [
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "python", "node", "deno", "bun", "perl",
-    "ruby", "env", "eval", "exec", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "command",
-    "busybox", "time",
+const INTERPRETERS: [&str; 24] = [
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "python",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "tsx",
+    "ts-node",
+    "perl",
+    "ruby",
+    "php",
+    "lua",
+    "awk",
+    "osascript",
+    "eval",
+    "exec",
+];
+const WRAPPERS: [&str; 10] = [
+    "env", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "command", "busybox", "time",
 ];
 
 #[derive(Debug)]
@@ -107,9 +131,9 @@ impl<'w> ClaudePermissions<'w> {
             .filter(|line| !line.trim_start().starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
-        let Some(args) = shlex::split(before_comment(&without_comment_lines)) else {
-            return;
-        };
+        let text = before_comment(&without_comment_lines);
+        let args = shlex::split(text)
+            .unwrap_or_else(|| text.split_whitespace().map(String::from).collect());
         let mut args = args.iter().peekable();
         while let Some(arg) = args.next() {
             let (flag, inline_value) = match arg.split_once('=') {
@@ -174,16 +198,18 @@ impl<'w> ClaudePermissions<'w> {
                 route,
             );
         }
-        string_array(permissions.get("deny")).for_each(|tool| self.deny(tool));
+        string_array(permissions.get("deny"))
+            .chain(string_array(permissions.get("ask")))
+            .for_each(|tool| self.deny(tool));
     }
 
     fn allow(&mut self, tool: &str, setting: String, route: &Route<'w>) {
         let any_command = pattern_of(tool, CLAUDE_SHELL_TOOL).is_some_and(|pattern| {
-            matches_every_command(pattern)
+            let pattern = pattern.trim();
+            pattern.is_empty()
                 || pattern
-                    .trim()
                     .strip_suffix('*')
-                    .is_some_and(|prefix| runs_any_program(prefix.trim_end_matches([':', ' '])))
+                    .is_some_and(|prefix| opens_any_command(prefix.trim_end_matches([':', ' '])))
         });
         if any_command {
             self.shell_allows.push((
@@ -203,14 +229,21 @@ impl<'w> ClaudePermissions<'w> {
 
 fn before_comment(text: &str) -> &str {
     let mut quote = None;
+    let mut escaped = false;
     let mut previous = ' ';
     for (index, c) in text.char_indices() {
-        match quote {
-            Some(open) if c == open => quote = None,
-            Some(_) => {}
-            None if c == '\'' || c == '"' => quote = Some(c),
-            None if c == '#' && previous.is_whitespace() => return &text[..index],
-            None => {}
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else {
+            match quote {
+                Some(open) if c == open => quote = None,
+                Some(_) => {}
+                None if c == '\'' || c == '"' => quote = Some(c),
+                None if c == '#' && previous.is_whitespace() => return &text[..index],
+                None => {}
+            }
         }
         previous = c;
     }
@@ -258,13 +291,18 @@ fn matches_every_command(pattern: &str) -> bool {
     pattern.chars().all(|c| matches!(c, '*' | ':' | ' '))
 }
 
-fn runs_any_program(command: &str) -> bool {
-    let mut words = command.split_whitespace();
-    words.next().is_some_and(|program| {
-        let name = program.rsplit('/').next().unwrap_or(program);
-        let name = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-        PROGRAM_RUNNERS.contains(&name)
-    }) && words.all(|word| word.starts_with('-'))
+fn opens_any_command(prefix: &str) -> bool {
+    let mut words = prefix.split_whitespace();
+    let Some(program) = words.next() else {
+        return true;
+    };
+    if matches_every_command(program) {
+        return true;
+    }
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let name = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    WRAPPERS.contains(&name)
+        || (INTERPRETERS.contains(&name) && words.all(|word| word.starts_with('-')))
 }
 
 fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
@@ -279,7 +317,9 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
             });
         }
     };
-    let settings: Value = serde_json::from_reader(StripComments::new(value.as_bytes())).ok()?;
+    let settings: Value =
+        serde_json::from_reader(CommentSettings::c_style().strip_comments(value.as_bytes()))
+            .ok()?;
     let route = input_route(step, key);
     let Some(core) = settings
         .get("tools")
@@ -291,10 +331,16 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
             route,
         });
     };
+    let excluded: Vec<&str> =
+        string_array(settings.get("tools").and_then(|tools| tools.get("exclude")))
+            .map(str::trim)
+            .collect();
     let tool = string_array(Some(core)).find(|tool| {
         GEMINI_SHELL_TOOLS.iter().any(|shell| {
-            pattern_of(tool, shell)
-                .is_some_and(|pattern| matches_every_command(pattern) || runs_any_program(pattern))
+            pattern_of(tool, shell).is_some_and(opens_any_command)
+                && !excluded
+                    .iter()
+                    .any(|exclusion| exclusion == shell || exclusion == &tool.trim())
         })
     })?;
     Some(BroadTool {
@@ -631,6 +677,67 @@ jobs:
         assert_eq!(
             claude(
                 "        with:\n          claude_args: --allowedTools \"Bash(bash:*)\" --disallowedTools \"Bash(bash:*)\"\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_wrappers_with_their_own_arguments_before_the_wildcard_are_broad() {
+        for tool in [
+            "Bash(timeout 600:*)",
+            "Bash(sudo -u root:*)",
+            "Bash(env FOO=1:*)",
+            "Bash(powershell:*)",
+        ] {
+            let with = format!("        with:\n          claude_args: --allowedTools \"{tool}\"\n");
+            assert_eq!(
+                claude(&with).as_deref(),
+                Some(format!("8: claude_args allows `{tool}` through --allowedTools").as_str()),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_args_with_unbalanced_quotes_are_still_read_word_by_word() {
+        assert_eq!(
+            claude("        with:\n          claude_args: --dangerously-skip-permissions --append-system-prompt Don't push\n")
+                .as_deref(),
+            Some("8: claude_args has --dangerously-skip-permissions")
+        );
+    }
+
+    #[test]
+    fn claude_escaped_quotes_do_not_end_a_quoted_value() {
+        assert_eq!(
+            claude("        with:\n          claude_args: |\n            --append-system-prompt \"Say \\\" # done\\\"\" --allowedTools Bash\n")
+                .as_deref(),
+            Some("8: claude_args allows `Bash` through --allowedTools")
+        );
+    }
+
+    #[test]
+    fn claude_ask_rules_close_the_shell_in_ci() {
+        assert_eq!(
+            claude(
+                "        with:\n          settings: '{\"permissions\": {\"allow\": [\"Bash\"], \"ask\": [\"Bash\"]}}'\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_excluded_shell_is_not_broad_and_hash_comments_are_not_stripped() {
+        assert_eq!(
+            gemini(
+                "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command\"], \"exclude\": [\"run_shell_command\"]}}'\n"
+            ),
+            None
+        );
+        assert_eq!(
+            gemini(
+                "        with:\n          settings: |\n            {\n              # shell off\n              \"tools\": {\"core\": []}\n            }\n"
             ),
             None
         );
