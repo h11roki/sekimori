@@ -5,14 +5,14 @@ use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
-use crate::facts::{ExternalEvent, OpenTrigger, external_events, open_trigger};
+use crate::facts::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
 use crate::workflow::Workflow;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
 pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
-const HALVES_PER_POINT: u8 = 2;
+pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 
@@ -131,14 +131,10 @@ impl<'w> Assessment<'w> {
 
 pub fn assess(workflow: &Workflow) -> Vec<Assessment<'_>> {
     let events = external_events(&workflow.model.on.events);
-    let event_names = events
-        .iter()
-        .map(|event| event.name())
-        .collect::<Vec<_>>()
-        .join(", ");
     agent_steps(workflow)
         .into_iter()
-        .map(|step| assess_step(workflow, step, &events, &event_names))
+        .filter(|step| !never_runs(step))
+        .map(|step| assess_step(workflow, step, &events))
         .collect()
 }
 
@@ -146,26 +142,30 @@ fn assess_step<'w>(
     workflow: &'w Workflow,
     step: AgentStep<'w>,
     events: &[ExternalEvent],
-    event_names: &str,
 ) -> Assessment<'w> {
     let mut hits = Vec::new();
     let mut who_can_trigger = None;
     if !events.is_empty() {
         who_can_trigger = Some(match open_trigger(&step, events) {
-            Some(OpenTrigger { setting, route }) => {
+            Some(OpenTrigger {
+                setting,
+                route,
+                events: open_events,
+            }) => {
                 hits.push(Hit {
                     rule: Rule::UnrestrictedTrigger,
                     route,
                 });
                 AxisScore {
                     weight: Weight::Full,
-                    reason: format!("{setting}, on {event_names}"),
+                    reason: format!("{setting}, on {}", event_names(&open_events)),
                 }
             }
             None => AxisScore {
                 weight: Weight::Half,
                 reason: format!(
-                    "on {event_names}, text from outside contributors can reach the agent"
+                    "on {}, text from outside contributors can reach the agent",
+                    event_names(events)
                 ),
             },
         });
@@ -181,6 +181,14 @@ fn assess_step<'w>(
         permissions_and_secrets,
         hits,
     }
+}
+
+fn event_names(events: &[ExternalEvent]) -> String {
+    events
+        .iter()
+        .map(|event| event.name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn write_permission(workflow: &Workflow, job: &NormalJob) -> Option<String> {
@@ -305,6 +313,24 @@ jobs:
         assert_eq!(trigger, None);
         assert_eq!(total, 2);
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn a_step_that_never_runs_is_not_assessed() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issues
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+            .to_string(),
+        )
+        .unwrap();
+        assert!(assess(&workflow).is_empty());
     }
 
     #[test]

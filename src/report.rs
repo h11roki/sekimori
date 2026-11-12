@@ -1,4 +1,4 @@
-use crate::rules::{Finding, MAX_TOTAL};
+use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL};
 use crate::workflow::Workflow;
 
 const LABEL_WIDTH: usize = 21;
@@ -41,10 +41,11 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
 }
 
 fn halves_text(halves: u8) -> String {
-    if halves.is_multiple_of(2) {
-        (halves / 2).to_string()
+    let points = halves / HALVES_PER_POINT;
+    if halves.is_multiple_of(HALVES_PER_POINT) {
+        points.to_string()
     } else {
-        format!("{}.5", halves / 2)
+        format!("{points}.5")
     }
 }
 

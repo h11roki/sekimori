@@ -24,14 +24,18 @@
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
 
 - `if:` は `${{ }}` を外して github-actions-expressions で読み、外部の人が起こせるトリガーのイベントごとに、そのイベントで起動した人を必ず比べているかを見る。全てのイベントで比べているときだけ、起動した人を絞っているとみなす
-  - 起動した人の値は、`github.actor`、`github.triggering_actor`、そのイベントで起動した人が書いたものの `author_association`。issue_comment、pull_request_review_comment、discussion_comment では `github.event.comment`、issues では `github.event.issue`、pull_request_target では `github.event.pull_request`、pull_request_review では `github.event.review`、discussion では `github.event.discussion`。issue_comment で `github.event.issue.author_association` を比べても、issue を書いた人を見ているだけなので絞っていない
+  - 起動した人の値は、`github.actor`、`github.triggering_actor`、`github.event.sender.login`、そのイベントで起動した人が書いたものの `author_association`。issue_comment、pull_request_review_comment、discussion_comment では `github.event.comment`、issues では `github.event.issue`、pull_request_target では `github.event.pull_request`、pull_request_review では `github.event.review`、discussion では `github.event.discussion`。issue_comment で `github.event.issue.author_association` を比べても、issue を書いた人を見ているだけなので絞っていない
   - `a || b` を値として使うときは、そのイベントで実在する最初の値を取る。issue_comment では issue も comment も実在するので、`github.event.issue.author_association || github.event.comment.author_association` は issue を書いた人の値になる
   - 起動した人の値を `==` で定数と比べている。相手が `github.event.issue.user.login` のようなイベントの値なら、外部の人が決められるので絞っていない
-  - `contains(fromJSON('[...]'), 起動した人の値)` のように、1 つ目の引数が定数の JSON の一覧。1 つ目が文字列だと部分文字列の判定になり、`contains('alice,bob', github.actor)` は `ali` でも通るので絞っていない
+  - `contains(fromJSON('[...]'), 起動した人の値)` のように、1 つ目の引数が定数の JSON の一覧。1 つ目が文字列や、文字列に読める JSON(`fromJSON('"alice,bob"')`)だと部分文字列の判定になり、`ali` でも通るので絞っていない
+  - 比べる定数か一覧に、外部の人の `author_association`(`NONE`、`FIRST_TIMER`、`FIRST_TIME_CONTRIBUTOR`、`CONTRIBUTOR`、`MANNEQUIN`)があれば絞っていない。GitHub の式の文字列の比較は大文字と小文字を区別しないので、ここでも区別しない
+  - `github.event_name == 'issues'` は、issues 以外のイベントでは成り立たないので、そのイベントでは動かない(絞っている)とみなす。`!=` はその逆。イベントごとに分けて絞る形(`(github.event_name == 'issues' && ...) || (github.event_name == 'issue_comment' && ...)`)を読める
   - `&&` は、どちらかの側が絞っていれば絞っている。`||` は、両側が絞っているときだけ絞っている
   - `false` は、動かないので絞っているとみなす
   - `!=`、`!`、他の関数は、絞っていないとみなす。式を読めないときも、絞っていないとみなす(指摘を出す側に倒す)
 - `if:` で起動した人を絞っていれば、3 社のどれでも、起動の制限を外した設定は当てない。`allow-users: '*'` でも、ジョブの `if:` で 1 人に絞っていれば誰でもは起動できない
+- 指摘の理由には、`if:` で絞れていないイベントだけを書く
+- ジョブかステップの `if:` が定数として偽(`false`、`${{ false }}`)なら、そのステップは動かないので評価しない
 - claude-code-action の `allowed_non_write_users: '*'` は、`github_token` を空でない値で渡しているときだけ当てる。`allowed_bots` は値が丸ごと `*` のときだけ当てる
 - codex-action の `allow-users` は、値が丸ごと `*` のときだけ当てる
 - `with` の入力の名前は、大文字と小文字を区別せずに探す
@@ -46,7 +50,6 @@
 
 ## 受け入れたトレードオフ
 
-- `author_association == 'NONE'` のような、外部の人を通す比較も絞っているとみなす
 - `contains` 以外の関数(`startsWith` など)で起動した人を比べている式は、絞っていないとみなし、誤検知になりうる
 - エージェントのジョブが `needs:` で待つ前のジョブの `if:` で絞る形(dispatch のジョブ)は見ないので、誤検知になる。run-gemini-cli の公式の例はこの形を再利用できるワークフローで書いていて、それは ADR 0006 で追わないと決めている
 - workflow_run には起動した人の `author_association` が無いので、`github.actor` か `github.triggering_actor` の比較でしか絞れない

@@ -2,15 +2,28 @@ use github_actions_expressions::call::Function;
 use github_actions_expressions::literal::Literal;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
-use github_actions_models::common::expr::{ExplicitExpr, LoE};
+use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{EnvValue, If};
 use github_actions_models::workflow::event::Events;
 use yamlpath::{Component, Route};
 
 use crate::agent::{Agent, AgentStep};
 
-const ACTOR_CONTEXTS: [&str; 2] = ["github.actor", "github.triggering_actor"];
+const ACTOR_CONTEXTS: [&str; 3] = [
+    "github.actor",
+    "github.triggering_actor",
+    "github.event.sender.login",
+];
+const EVENT_NAME_CONTEXT: &str = "github.event_name";
 const EVENT_PAYLOAD: &str = "github.event";
+const EVENT_SENDER: &str = "github.event.sender";
+const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
+    "NONE",
+    "FIRST_TIMER",
+    "FIRST_TIME_CONTRIBUTOR",
+    "CONTRIBUTOR",
+    "MANNEQUIN",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalEvent {
@@ -57,18 +70,10 @@ impl ExternalEvent {
         }
     }
 
-    fn author_association(self) -> Option<&'static str> {
+    fn written_by_trigger(self) -> Option<&'static str> {
         match self {
-            ExternalEvent::Issues => Some("github.event.issue.author_association"),
-            ExternalEvent::IssueComment
-            | ExternalEvent::PullRequestReviewComment
-            | ExternalEvent::DiscussionComment => Some("github.event.comment.author_association"),
-            ExternalEvent::PullRequestTarget => {
-                Some("github.event.pull_request.author_association")
-            }
-            ExternalEvent::PullRequestReview => Some("github.event.review.author_association"),
-            ExternalEvent::Discussion => Some("github.event.discussion.author_association"),
             ExternalEvent::WorkflowRun => None,
+            _ => self.payload_objects().last().copied(),
         }
     }
 }
@@ -108,34 +113,72 @@ pub fn external_events(events: &Events) -> Vec<ExternalEvent> {
 pub struct OpenTrigger<'w> {
     pub setting: String,
     pub route: Route<'w>,
+    pub events: Vec<ExternalEvent>,
+}
+
+pub fn never_runs(step: &AgentStep) -> bool {
+    conditions(step).iter().any(|condition| {
+        condition
+            .as_ref()
+            .and_then(|expression| expression.consteval())
+            .is_some_and(|value| !value.as_boolean())
+    })
 }
 
 pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Option<OpenTrigger<'w>> {
-    let conditions = [step.job.r#if.as_ref(), step.step.shared.r#if.as_ref()];
-    let gated_by_if = events.iter().all(|event| {
-        conditions
-            .into_iter()
-            .flatten()
-            .any(|condition| limits_who_runs(condition, *event))
-    });
-    if gated_by_if {
-        return None;
-    }
-    match step.agent {
+    let conditions = conditions(step);
+    let (setting, route) = match step.agent {
         Agent::ClaudeCode => {
             let token_given =
                 input(step, "github_token").is_some_and(|(_, value)| !value.trim().is_empty());
             token_given
                 .then(|| wildcard(step, "allowed_non_write_users"))
                 .flatten()
-                .or_else(|| wildcard(step, "allowed_bots"))
+                .or_else(|| wildcard(step, "allowed_bots"))?
         }
-        Agent::Codex => wildcard(step, "allow-users"),
-        Agent::GeminiCli => Some(OpenTrigger {
-            setting: "no `if:` on the job or step checks who triggered it".to_string(),
-            route: step.route.clone(),
-        }),
-    }
+        Agent::Codex => wildcard(step, "allow-users")?,
+        Agent::GeminiCli => {
+            let setting = if conditions.is_empty() {
+                "no `if:` on the job or step"
+            } else {
+                "the `if:` does not check who triggered it"
+            };
+            (setting.to_string(), step.route.clone())
+        }
+    };
+    let open_events: Vec<ExternalEvent> = events
+        .iter()
+        .copied()
+        .filter(|event| {
+            !conditions
+                .iter()
+                .flatten()
+                .any(|condition| requires_actor_check(condition, *event))
+        })
+        .collect();
+    (!open_events.is_empty()).then_some(OpenTrigger {
+        setting,
+        route,
+        events: open_events,
+    })
+}
+
+fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
+    [step.job.r#if.as_ref(), step.step.shared.r#if.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|condition| match condition {
+            If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
+            If::Expr(raw) => {
+                let trimmed = raw.trim();
+                let bare = trimmed
+                    .strip_prefix("${{")
+                    .and_then(|body| body.strip_suffix("}}"))
+                    .map_or(trimmed, str::trim);
+                Expr::parse(bare).ok()
+            }
+        })
+        .collect()
 }
 
 fn input<'w>(step: &AgentStep<'w>, name: &str) -> Option<(&'w str, &'w str)> {
@@ -150,25 +193,15 @@ fn input<'w>(step: &AgentStep<'w>, name: &str) -> Option<(&'w str, &'w str)> {
         })
 }
 
-fn wildcard<'w>(step: &AgentStep<'w>, name: &str) -> Option<OpenTrigger<'w>> {
+fn wildcard<'w>(step: &AgentStep<'w>, name: &str) -> Option<(String, Route<'w>)> {
     let (key, value) = input(step, name)?;
-    (value.trim() == "*").then(|| OpenTrigger {
-        setting: format!("{key}: '*'"),
-        route: step
-            .route
-            .with_keys([Component::from("with"), Component::from(key)]),
+    (value.trim() == "*").then(|| {
+        (
+            format!("{key}: '*'"),
+            step.route
+                .with_keys([Component::from("with"), Component::from(key)]),
+        )
     })
-}
-
-fn limits_who_runs(condition: &If, event: ExternalEvent) -> bool {
-    match condition {
-        If::Bool(runs) => !runs,
-        If::Expr(raw) => {
-            let curly = ExplicitExpr::from_curly(raw.trim());
-            let bare = curly.as_ref().map_or(raw.as_str(), ExplicitExpr::as_bare);
-            Expr::parse(bare).is_ok_and(|expression| requires_actor_check(&expression, event))
-        }
-    }
 }
 
 fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool {
@@ -184,45 +217,58 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
             rhs,
         }) => requires_actor_check(lhs, event) && requires_actor_check(rhs, event),
         Expr::BinExpr(BinExpr {
-            op: BinOp::Eq,
+            op: op @ (BinOp::Eq | BinOp::Neq),
             lhs,
             rhs,
         }) => {
-            (is_actor_value(lhs, event) && rhs.is_literal())
-                || (is_actor_value(rhs, event) && lhs.is_literal())
+            let (subject, value) = match (&lhs.inner, &rhs.inner) {
+                (_, Expr::Literal(value)) => (lhs, value),
+                (Expr::Literal(value), _) => (rhs, value),
+                _ => return false,
+            };
+            if matches!(&subject.inner, Expr::Context(context) if context.matches(EVENT_NAME_CONTEXT))
+            {
+                let same_event = matches!(value, Literal::String(name) if name.eq_ignore_ascii_case(event.name()));
+                return (*op == BinOp::Eq) != same_event;
+            }
+            *op == BinOp::Eq
+                && is_actor_value(subject, event)
+                && !matches!(value, Literal::String(text) if admits_outsiders(text))
         }
         Expr::Call(call) if matches!(call.func, Function::Contains) => {
-            matches!(call.args.as_slice(), [list, needle] if is_json_list(list) && is_actor_value(needle, event))
+            let [list, needle] = call.args.as_slice() else {
+                return false;
+            };
+            let trusted_list = matches!(&list.inner, Expr::Call(from_json)
+                if matches!(from_json.func, Function::FromJSON)
+                    && matches!(from_json.args.as_slice(), [json]
+                        if matches!(&json.inner, Expr::Literal(Literal::String(text))
+                            if text.trim_start().starts_with('[') && !admits_outsiders(text))));
+            trusted_list && is_actor_value(needle, event)
         }
         Expr::Literal(Literal::Boolean(runs)) => !runs,
         _ => false,
     }
 }
 
-fn is_json_list(expression: &SpannedExpr) -> bool {
-    match &expression.inner {
-        Expr::Call(call) if matches!(call.func, Function::FromJSON) => {
-            matches!(call.args.as_slice(), [json] if matches!(json.inner, Expr::Literal(Literal::String(_))))
-        }
-        _ => false,
-    }
+fn admits_outsiders(text: &str) -> bool {
+    let upper = text.trim().to_ascii_uppercase();
+    OUTSIDER_ASSOCIATIONS
+        .iter()
+        .any(|association| upper == *association || upper.contains(&format!("\"{association}\"")))
 }
 
 fn is_actor_value(expression: &SpannedExpr, event: ExternalEvent) -> bool {
     match &expression.inner {
         Expr::Context(context) => {
-            ACTOR_CONTEXTS
-                .into_iter()
-                .any(|pattern| context.matches(pattern))
-                || event
-                    .author_association()
-                    .is_some_and(|pattern| context.matches(pattern))
+            ACTOR_CONTEXTS.into_iter().any(|pattern| context.matches(pattern))
+                || event.written_by_trigger().is_some_and(|object| {
+                    context.child_of(object)
+                        && matches!(context.parts.as_slice(), [_, _, _, last]
+                            if matches!(&last.inner, Expr::Identifier(name) if name.eq("author_association")))
+                })
         }
-        Expr::BinExpr(BinExpr {
-            op: BinOp::Or,
-            lhs,
-            rhs,
-        }) => {
+        Expr::BinExpr(BinExpr { op: BinOp::Or, lhs, rhs }) => {
             if is_present(lhs, event) {
                 is_actor_value(lhs, event)
             } else {
@@ -235,10 +281,14 @@ fn is_actor_value(expression: &SpannedExpr, event: ExternalEvent) -> bool {
 
 fn is_present(expression: &SpannedExpr, event: ExternalEvent) -> bool {
     match &expression.inner {
-        Expr::Context(context) if context.child_of(EVENT_PAYLOAD) => event
-            .payload_objects()
-            .iter()
-            .any(|object| context.child_of(*object)),
+        Expr::Context(context)
+            if context.child_of(EVENT_PAYLOAD) && !context.child_of(EVENT_SENDER) =>
+        {
+            event
+                .payload_objects()
+                .iter()
+                .any(|object| context.child_of(*object))
+        }
         Expr::BinExpr(BinExpr {
             op: BinOp::Or,
             lhs,
@@ -374,8 +424,66 @@ jobs:
     fn gemini_is_open_at_the_step_when_no_condition_checks_the_actor() {
         assert_eq!(
             gemini_on("issues", "github.event.issue.pull_request == null").as_deref(),
-            Some("7: no `if:` on the job or step checks who triggered it")
+            Some("7: the `if:` does not check who triggered it")
         );
+        let without_if = open_setting(
+            "on: issues
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+",
+        );
+        assert_eq!(
+            without_if.as_deref(),
+            Some("6: no `if:` on the job or step")
+        );
+    }
+
+    #[test]
+    fn open_trigger_names_only_the_events_the_if_does_not_check() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: [issues, issue_comment]
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    if: contains(fromJSON('[\"OWNER\"]'), github.event.comment.author_association)
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+            .to_string(),
+        )
+        .unwrap();
+        let events = external_events(&workflow.model.on.events);
+        let open = open_trigger(&agent_steps(&workflow)[0], &events).unwrap();
+        assert_eq!(open.events, [ExternalEvent::Issues]);
+    }
+
+    #[test]
+    fn a_constant_false_condition_means_the_step_never_runs() {
+        let never = |condition: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issues
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        if: {condition}
+"
+                ),
+            )
+            .unwrap();
+            never_runs(&agent_steps(&workflow)[0])
+        };
+        assert!(never("false"));
+        assert!(never("${{ false }}"));
+        assert!(!never("github.actor == 'octocat'"));
+        assert!(!never("true"));
     }
 
     #[test]
@@ -400,6 +508,19 @@ jobs:
             ),
             ("issues", "false"),
             ("issues", "${{ false }}"),
+            ("issue_comment", "github.event.sender.login == 'octocat'"),
+            (
+                "[issues, issue_comment]",
+                "(github.event_name == 'issues' && contains(fromJSON('[\"OWNER\"]'), github.event.issue.author_association)) || (github.event_name == 'issue_comment' && contains(fromJSON('[\"OWNER\"]'), github.event.comment.author_association))",
+            ),
+            (
+                "[issues, issue_comment]",
+                "github.event_name == 'issue_comment' && contains(fromJSON('[\"OWNER\"]'), github.event.comment.author_association)",
+            ),
+            (
+                "[issues, issue_comment]",
+                "github.event_name != 'issues' && github.actor == 'octocat'",
+            ),
         ] {
             assert_eq!(gemini_on(events, condition), None, "{events} {condition}");
         }
@@ -434,6 +555,19 @@ jobs:
                 "[issues, issue_comment]",
                 "github.event.issue.author_association == 'OWNER'",
             ),
+            (
+                "issues",
+                "contains(fromJSON('\"alice,bob\"'), github.actor)",
+            ),
+            (
+                "issue_comment",
+                "contains(fromJSON('[\"OWNER\", \"NONE\"]'), github.event.comment.author_association)",
+            ),
+            (
+                "issue_comment",
+                "github.event.comment.author_association == 'none'",
+            ),
+            ("issues", "github.event_name == 'issues'"),
         ] {
             assert!(
                 gemini_on(events, condition).is_some(),
