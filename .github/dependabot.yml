@@ -12,6 +12,11 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      zizmor:
+        patterns:
+          - github-actions-models
+          - yamlpath
   - package-ecosystem: rust-toolchain
     directory: /
     schedule:
