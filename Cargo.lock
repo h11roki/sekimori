@@ -175,6 +175,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "github-actions-expressions"
+version = "1.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f34a40a4d1849384a8040a917d41b0c6498d0e00d5a50e62b6c4f6c7a61cdf03"
+dependencies = [
+ "serde_json",
+ "subfeature",
+ "thiserror",
+]
+
+[[package]]
 name = "github-actions-models"
 version = "1.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -358,6 +369,7 @@ name = "sekimori"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "github-actions-expressions",
  "github-actions-models",
  "tempfile",
  "thiserror",
@@ -433,6 +445,18 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "subfeature"
+version = "1.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b629cab8906895d8bd52d01b38c272f0a70ca69a8dbd0ef204742122301bc088"
+dependencies = [
+ "memchr",
+ "regex",
+ "serde",
+ "tracing",
+]
 
 [[package]]
 name = "syn"

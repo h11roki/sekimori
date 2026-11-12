@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use yamlpath::{Document, QueryError};
+use yamlpath::{Document, QueryError, Route};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -51,6 +51,12 @@ impl Workflow {
             model,
             document,
         })
+    }
+
+    pub fn position(&self, route: &Route) -> Option<(usize, usize)> {
+        let feature = self.document.query_pretty(route).ok()?;
+        let (row, column) = feature.location.point_span.0;
+        Some((row + 1, column + 1))
     }
 }
 

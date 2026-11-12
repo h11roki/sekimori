@@ -15,6 +15,7 @@ updates:
     groups:
       zizmor:
         patterns:
+          - github-actions-expressions
           - github-actions-models
           - yamlpath
   - package-ecosystem: rust-toolchain

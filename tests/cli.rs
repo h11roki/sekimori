@@ -55,6 +55,22 @@ fn errors_follow_the_order_of_the_arguments() {
 }
 
 #[test]
+fn a_finding_is_printed_to_stdout_and_exits_with_one() {
+    let output = sekimori(&["../findings/open-claude.yml"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("open-claude.yml:9:11: warning[unrestricted-trigger]"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn an_unreadable_workflow_wins_over_findings_and_exits_with_two() {
+    let output = sekimori(&["../findings/open-claude.yml", "broken.yml"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stdout.is_empty());
+}
+
+#[test]
 fn a_directory_without_workflows_exits_with_two() {
     let output = sekimori(&["../no-workflows"]);
     assert_eq!(output.status.code(), Some(2));
