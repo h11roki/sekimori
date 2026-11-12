@@ -15,7 +15,11 @@ pub enum LoadError {
     },
     #[error("failed to index {}: {source}", path.display())]
     Index { path: PathBuf, source: QueryError },
+    #[error("no .yml or .yaml files directly inside {}", path.display())]
+    NoWorkflows { path: PathBuf },
 }
+
+const WORKFLOW_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
 
 pub struct Workflow {
     pub path: PathBuf,
@@ -60,12 +64,19 @@ pub fn workflow_paths(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(input).map_err(read_error)? {
         let path = entry.map_err(read_error)?.path();
-        let is_yaml = path
-            .extension()
-            .is_some_and(|extension| extension == "yml" || extension == "yaml");
+        let is_yaml = path.extension().is_some_and(|extension| {
+            WORKFLOW_EXTENSIONS
+                .iter()
+                .any(|yaml| extension.eq_ignore_ascii_case(yaml))
+        });
         if is_yaml && path.is_file() {
             paths.push(path);
         }
+    }
+    if paths.is_empty() {
+        return Err(LoadError::NoWorkflows {
+            path: input.to_path_buf(),
+        });
     }
     paths.sort();
     Ok(paths)
@@ -84,7 +95,17 @@ mod tests {
             .iter()
             .map(|path| path.file_name().unwrap().to_str().unwrap())
             .collect();
-        assert_eq!(names, ["broken.yml", "ci.yml", "release.yaml"]);
+        assert_eq!(
+            names,
+            ["Deploy.YML", "broken.yml", "ci.yml", "release.yaml"]
+        );
+    }
+
+    #[test]
+    fn directory_without_yaml_files_is_an_error() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/no-workflows");
+        let result = workflow_paths(&path);
+        assert!(matches!(result, Err(LoadError::NoWorkflows { .. })));
     }
 
     #[test]

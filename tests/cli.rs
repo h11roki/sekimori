@@ -36,3 +36,18 @@ fn a_directory_is_checked_file_by_file() {
     assert_eq!(stderr.lines().count(), 1);
     assert!(stderr.contains("broken.yml"));
 }
+
+#[test]
+fn a_file_reached_twice_is_checked_once() {
+    let output = sekimori(&["broken.yml", ".", "broken.yml"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1);
+}
+
+#[test]
+fn a_directory_without_workflows_exits_with_two() {
+    let output = sekimori(&["../no-workflows"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no .yml or .yaml files directly inside"));
+}

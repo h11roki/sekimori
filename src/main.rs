@@ -16,14 +16,20 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let mut failures: Vec<LoadError> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     for input in &cli.paths {
         match workflow_paths(input) {
-            Ok(paths) => {
-                failures.extend(paths.iter().filter_map(|path| Workflow::load(path).err()))
+            Ok(found) => {
+                for path in found {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
             }
             Err(error) => failures.push(error),
         }
     }
+    failures.extend(paths.iter().filter_map(|path| Workflow::load(path).err()));
     for failure in &failures {
         eprintln!("error: {failure}");
     }
