@@ -69,7 +69,7 @@ pub fn workflow_paths(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
                 .iter()
                 .any(|yaml| extension.eq_ignore_ascii_case(yaml))
         });
-        if is_yaml && path.is_file() {
+        if is_yaml && !path.is_dir() {
             paths.push(path);
         }
     }
@@ -99,6 +99,22 @@ mod tests {
             names,
             ["Deploy.YML", "broken.yml", "ci.yml", "release.yaml"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_listed_so_that_loading_reports_it() {
+        let dir = std::env::temp_dir().join(format!("sekimori-dangling-{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir(&dir).unwrap();
+        let link = dir.join("agent.yml");
+        std::os::unix::fs::symlink(dir.join("missing.yml"), &link).unwrap();
+
+        assert_eq!(workflow_paths(&dir).unwrap(), std::slice::from_ref(&link));
+        assert!(matches!(Workflow::load(&link), Err(LoadError::Read { .. })));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

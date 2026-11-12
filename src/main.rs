@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use sekimori::workflow::{LoadError, Workflow, workflow_paths};
+use sekimori::workflow::{Workflow, workflow_paths};
 
 const EXIT_LOAD_FAILURE: u8 = 2;
 
@@ -15,27 +17,31 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let mut failures: Vec<LoadError> = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut checked = HashSet::new();
+    let mut failed = false;
     for input in &cli.paths {
-        match workflow_paths(input) {
-            Ok(found) => {
-                for path in found {
-                    if !paths.contains(&path) {
-                        paths.push(path);
-                    }
-                }
+        let paths = match workflow_paths(input) {
+            Ok(paths) => paths,
+            Err(error) => {
+                eprintln!("error: {error}");
+                failed = true;
+                continue;
             }
-            Err(error) => failures.push(error),
+        };
+        for path in paths {
+            let identity = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !checked.insert(identity) {
+                continue;
+            }
+            if let Err(error) = Workflow::load(&path) {
+                eprintln!("error: {error}");
+                failed = true;
+            }
         }
     }
-    failures.extend(paths.iter().filter_map(|path| Workflow::load(path).err()));
-    for failure in &failures {
-        eprintln!("error: {failure}");
-    }
-    if failures.is_empty() {
-        ExitCode::SUCCESS
-    } else {
+    if failed {
         ExitCode::from(EXIT_LOAD_FAILURE)
+    } else {
+        ExitCode::SUCCESS
     }
 }

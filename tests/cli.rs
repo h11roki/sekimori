@@ -39,9 +39,19 @@ fn a_directory_is_checked_file_by_file() {
 
 #[test]
 fn a_file_reached_twice_is_checked_once() {
-    let output = sekimori(&["broken.yml", ".", "broken.yml"]);
+    let output = sekimori(&["broken.yml", ".", "nested/../broken.yml"]);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.lines().count(), 1);
+}
+
+#[test]
+fn errors_follow_the_order_of_the_arguments() {
+    let output = sekimori(&["broken.yml", "../no-workflows"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("broken.yml"));
+    assert!(lines[1].contains("no-workflows"));
 }
 
 #[test]
