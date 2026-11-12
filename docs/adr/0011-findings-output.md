@@ -24,7 +24,7 @@
 - 平文の出力は次の形にする。位置は、理由になった設定の行と列(1 から数える)。位置を引けないときは、指摘を落とさずにファイルの先頭(1:1)を指す
 
   ```text
-  .github/workflows/claude.yml:14:11: warning[unrestricted-trigger]: anthropics/claude-code-action@v1 in job `claude` can be started by anyone
+  .github/workflows/claude.yml:14:11: warning[unrestricted-trigger]: anthropics/claude-code-action@v1 in job `claude` can be started without write access
     who can trigger      1    allowed_non_write_users: '*', on issue_comment
     allowed tools        0
     permissions/secrets  1    no permissions are set, so GITHUB_TOKEN gets the repository default
@@ -34,6 +34,7 @@
 - 軸の値は、半分を 1 とした整数で持つ(1 は 2、0.5 は 1)。浮動小数点の足し算と比べを避けるため。表示するときに 0.5 単位に戻す
 - 軸の値と理由は、各社の設定を写した事実から規則の段で決める。各社の入力の名前を知るのは写す段だけで、規則の段は「起動の制限が外れているか」のような 3 社に共通の事実だけを見る
 - 指摘はファイルごとに、エージェントのステップの順、その中では当たった規則の順に出す
+- 指摘を標準出力に書けないとき(`| head` でパイプが閉じたなど)は、標準エラーに出して 2 で終える。結果を全て出せていないので、ADR 0010 の「読めないファイル」と同じく、欠けた結果として扱う
 
 ## 理由
 
