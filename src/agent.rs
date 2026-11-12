@@ -12,6 +12,12 @@ pub enum Agent {
     GeminiCli,
 }
 
+const AGENT_ACTIONS: [(&str, Agent); 3] = [
+    ("anthropics/claude-code-action", Agent::ClaudeCode),
+    ("openai/codex-action", Agent::Codex),
+    ("google-github-actions/run-gemini-cli", Agent::GeminiCli),
+];
+
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
         let Uses::Repository(repository) = uses else {
@@ -23,12 +29,10 @@ impl Agent {
         {
             return None;
         }
-        match repository.slug().to_ascii_lowercase().as_str() {
-            "anthropics/claude-code-action" => Some(Agent::ClaudeCode),
-            "openai/codex-action" => Some(Agent::Codex),
-            "google-github-actions/run-gemini-cli" => Some(Agent::GeminiCli),
-            _ => None,
-        }
+        AGENT_ACTIONS
+            .iter()
+            .find(|(action, _)| action.eq_ignore_ascii_case(repository.slug()))
+            .map(|(_, agent)| *agent)
     }
 }
 
@@ -40,17 +44,6 @@ pub struct AgentStep<'w> {
     pub route: Route<'w>,
 }
 
-impl<'w> AgentStep<'w> {
-    fn find(job_id: &'w str, step: &'w UsesStep, route: Route<'w>) -> Option<Self> {
-        Agent::of(&step.uses).map(|agent| AgentStep {
-            agent,
-            job_id,
-            step,
-            route,
-        })
-    }
-}
-
 pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
     let mut found = Vec::new();
     for (job_id, job) in &workflow.model.jobs {
@@ -59,23 +52,34 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
         };
         let steps = route!["jobs", job_id.as_str(), "steps"];
         for (index, step) in job.steps.iter().enumerate() {
-            let route = steps.with_key(index);
             match step {
-                Step::Uses(step) => found.extend(AgentStep::find(job_id, step, route)),
+                Step::Uses(step) => {
+                    if let Some(agent) = Agent::of(&step.uses) {
+                        found.push(AgentStep {
+                            agent,
+                            job_id,
+                            step,
+                            route: steps.with_key(index),
+                        });
+                    }
+                }
                 Step::Parallel { parallel } => {
-                    found.extend(parallel.iter().enumerate().filter_map(
-                        |(inner, step)| match step {
-                            ParallelStep::Uses(step) => AgentStep::find(
+                    for (inner, step) in parallel.iter().enumerate() {
+                        if let ParallelStep::Uses(step) = step
+                            && let Some(agent) = Agent::of(&step.uses)
+                        {
+                            found.push(AgentStep {
+                                agent,
                                 job_id,
                                 step,
-                                route.with_keys([
+                                route: steps.with_keys([
+                                    Component::from(index),
                                     Component::from("parallel"),
                                     Component::from(inner),
                                 ]),
-                            ),
-                            ParallelStep::Run(_) => None,
-                        },
-                    ))
+                            });
+                        }
+                    }
                 }
                 Step::Run(_) | Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
             }
