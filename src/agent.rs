@@ -102,15 +102,7 @@ mod tests {
     }
 
     fn line_of(workflow: &Workflow, step: &AgentStep) -> usize {
-        workflow
-            .document
-            .query_pretty(&step.route)
-            .unwrap()
-            .location
-            .point_span
-            .0
-            .0
-            + 1
+        workflow.position(&step.route).unwrap().0
     }
 
     #[test]
