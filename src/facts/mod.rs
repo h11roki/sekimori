@@ -1,3 +1,4 @@
+mod tools;
 mod trigger;
 
 use github_actions_models::common::EnvValue;
@@ -6,6 +7,7 @@ use yamlpath::{Component, Route};
 
 use crate::agent::AgentStep;
 
+pub use tools::{BroadTool, broad_tool};
 pub use trigger::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
 
 fn input<'w>(step: &AgentStep<'w>, name: &str) -> Option<(&'w str, &'w str)> {

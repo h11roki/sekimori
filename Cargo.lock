@@ -371,6 +371,8 @@ dependencies = [
  "clap",
  "github-actions-expressions",
  "github-actions-models",
+ "serde_json",
+ "shlex",
  "tempfile",
  "thiserror",
  "yaml_serde",

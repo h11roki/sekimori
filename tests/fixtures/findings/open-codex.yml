@@ -1,0 +1,9 @@
+on: issue_comment
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+          safety-strategy: unsafe

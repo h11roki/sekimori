@@ -5,7 +5,9 @@ use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
-use crate::facts::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
+use crate::facts::{
+    BroadTool, ExternalEvent, OpenTrigger, broad_tool, external_events, never_runs, open_trigger,
+};
 use crate::workflow::Workflow;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
@@ -19,18 +21,21 @@ const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
     UnrestrictedTrigger,
+    BroadTools,
 }
 
 impl Rule {
     pub fn id(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
+            Rule::BroadTools => "broad-tools",
         }
     }
 
     pub fn summary(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => "can be started without write access",
+            Rule::BroadTools => "can run unrestricted tools",
         }
     }
 }
@@ -170,6 +175,17 @@ fn assess_step<'w>(
             },
         });
     }
+    let mut allowed_tools = None;
+    if let Some(BroadTool { setting, route }) = broad_tool(&step) {
+        hits.push(Hit {
+            rule: Rule::BroadTools,
+            route,
+        });
+        allowed_tools = Some(AxisScore {
+            weight: Weight::Full,
+            reason: setting,
+        });
+    }
     let permissions_and_secrets = write_permission(workflow, step.job).map(|reason| AxisScore {
         weight: Weight::Full,
         reason,
@@ -177,7 +193,7 @@ fn assess_step<'w>(
     Assessment {
         step,
         who_can_trigger,
-        allowed_tools: None,
+        allowed_tools,
         permissions_and_secrets,
         hits,
     }
@@ -313,6 +329,38 @@ jobs:
         assert_eq!(trigger, None);
         assert_eq!(total, 2);
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn all_three_axes_together_are_an_error_reported_once_per_rule() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+          sandbox: danger-full-access
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let findings: Vec<_> = assessments[0]
+            .findings()
+            .iter()
+            .map(|finding| (finding.level, finding.hit.rule))
+            .collect();
+        assert_eq!(
+            findings,
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::BroadTools)
+            ]
+        );
     }
 
     #[test]
