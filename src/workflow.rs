@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,24 @@ impl Workflow {
     }
 }
 
-pub fn workflow_paths(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
+pub fn workflow_paths(inputs: &[PathBuf]) -> Vec<Result<PathBuf, LoadError>> {
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    for input in inputs {
+        match paths_in(input) {
+            Ok(paths) => found.extend(
+                paths
+                    .into_iter()
+                    .filter(|path| seen.insert(fs::canonicalize(path).unwrap_or(path.clone())))
+                    .map(Ok),
+            ),
+            Err(error) => found.push(Err(error)),
+        }
+    }
+    found
+}
+
+fn paths_in(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
     if !input.is_dir() {
         return Ok(vec![input.to_path_buf()]);
     }
@@ -69,7 +87,9 @@ pub fn workflow_paths(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
                 .iter()
                 .any(|yaml| extension.eq_ignore_ascii_case(yaml))
         });
-        if is_yaml && !path.is_dir() {
+        let is_file_or_unresolvable =
+            fs::metadata(&path).map_or(true, |metadata| metadata.is_file());
+        if is_yaml && is_file_or_unresolvable {
             paths.push(path);
         }
     }
@@ -90,7 +110,7 @@ mod tests {
 
     #[test]
     fn directory_lists_only_yaml_files_directly_inside_in_name_order() {
-        let paths = workflow_paths(Path::new(FIXTURES)).unwrap();
+        let paths = paths_in(Path::new(FIXTURES)).unwrap();
         let names: Vec<_> = paths
             .iter()
             .map(|path| path.file_name().unwrap().to_str().unwrap())
@@ -104,30 +124,81 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dangling_symlink_is_listed_so_that_loading_reports_it() {
-        let dir = std::env::temp_dir().join(format!("sekimori-dangling-{}", std::process::id()));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir(&dir).unwrap();
-        let link = dir.join("agent.yml");
-        std::os::unix::fs::symlink(dir.join("missing.yml"), &link).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("agent.yml");
+        std::os::unix::fs::symlink(dir.path().join("missing.yml"), &link).unwrap();
 
-        assert_eq!(workflow_paths(&dir).unwrap(), std::slice::from_ref(&link));
+        assert_eq!(paths_in(dir.path()).unwrap(), std::slice::from_ref(&link));
         assert!(matches!(Workflow::load(&link), Err(LoadError::Read { .. })));
-        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_pipe_is_not_listed_so_that_reading_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("ci.yml"), "").unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe.yml"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert_eq!(paths_in(dir.path()).unwrap(), [dir.path().join("ci.yml")]);
     }
 
     #[test]
     fn directory_without_yaml_files_is_an_error() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/no-workflows");
-        let result = workflow_paths(&path);
-        assert!(matches!(result, Err(LoadError::NoWorkflows { .. })));
+        assert!(matches!(
+            paths_in(&path),
+            Err(LoadError::NoWorkflows { .. })
+        ));
     }
 
     #[test]
     fn file_path_is_returned_as_is_whatever_its_extension() {
         let path = Path::new(FIXTURES).join("notes.txt");
-        assert_eq!(workflow_paths(&path).unwrap(), [path]);
+        assert_eq!(paths_in(&path).unwrap(), [path]);
+    }
+
+    #[test]
+    fn inputs_are_expanded_in_order_and_a_file_reached_twice_comes_once() {
+        let fixtures = Path::new(FIXTURES);
+        let inputs = [
+            fixtures.join("release.yaml"),
+            fixtures.join("nested/../ci.yml"),
+            fixtures.to_path_buf(),
+        ];
+        let names: Vec<_> = workflow_paths(&inputs)
+            .into_iter()
+            .map(|path| {
+                path.unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["release.yaml", "ci.yml", "Deploy.YML", "broken.yml"]
+        );
+    }
+
+    #[test]
+    fn an_input_that_cannot_be_expanded_keeps_its_place_among_the_results() {
+        let fixtures = Path::new(FIXTURES);
+        let inputs = [
+            fixtures.join("ci.yml"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/no-workflows"),
+            fixtures.join("release.yaml"),
+        ];
+        let results = workflow_paths(&inputs);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(matches!(results[1], Err(LoadError::NoWorkflows { .. })));
+        assert!(results[2].is_ok());
     }
 
     #[test]

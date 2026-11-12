@@ -12,3 +12,6 @@ github-actions-models = "=1.32.0"
 thiserror = "2"
 yaml_serde = "0.10"
 yamlpath = "=1.32.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
