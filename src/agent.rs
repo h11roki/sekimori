@@ -1,6 +1,6 @@
 use github_actions_models::common::Uses;
 use github_actions_models::workflow::Job;
-use github_actions_models::workflow::job::{ParallelStep, Step, UsesStep};
+use github_actions_models::workflow::job::{NormalJob, ParallelStep, Step, UsesStep};
 use yamlpath::{Component, Route, route};
 
 use crate::workflow::Workflow;
@@ -40,6 +40,7 @@ impl Agent {
 pub struct AgentStep<'w> {
     pub agent: Agent,
     pub job_id: &'w str,
+    pub job: &'w NormalJob,
     pub step: &'w UsesStep,
     pub route: Route<'w>,
 }
@@ -58,6 +59,7 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
                         found.push(AgentStep {
                             agent,
                             job_id,
+                            job,
                             step,
                             route: steps.with_key(index),
                         });
@@ -71,6 +73,7 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
                             found.push(AgentStep {
                                 agent,
                                 job_id,
+                                job,
                                 step,
                                 route: steps.with_keys([
                                     Component::from(index),
