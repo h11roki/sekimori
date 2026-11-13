@@ -1,0 +1,65 @@
+name: sekimori
+description: Check GitHub Actions workflows that run AI coding agents
+author: h11roki
+
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  paths:
+    description: Whitespace-separated workflow files or directories to check.
+    required: false
+    default: .github/workflows
+  token:
+    description: Token used to download the sekimori release and verify its attestation.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  sarif-file:
+    description: Path to the findings in SARIF format.
+    value: ${{ steps.check.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SEKIMORI_REPOSITORY: h11roki/sekimori
+      run: |
+        version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -n 1)
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) asset=sekimori-x86_64-unknown-linux-musl ;;
+          Linux/ARM64) asset=sekimori-aarch64-unknown-linux-musl ;;
+          macOS/ARM64) asset=sekimori-aarch64-apple-darwin ;;
+          Windows/X64) asset=sekimori-x86_64-pc-windows-msvc.exe ;;
+          *)
+            echo "::error::sekimori has no release binary for $RUNNER_OS $RUNNER_ARCH"
+            exit 1
+            ;;
+        esac
+        directory="$RUNNER_TEMP/sekimori-$version"
+        gh release download "v$version" --repo "$SEKIMORI_REPOSITORY" --pattern "$asset" --dir "$directory" --clobber
+        gh attestation verify "$directory/$asset" \
+          --repo "$SEKIMORI_REPOSITORY" \
+          --signer-workflow "$SEKIMORI_REPOSITORY/.github/workflows/release.yml" \
+          --source-ref "refs/tags/v$version"
+        chmod +x "$directory/$asset"
+        echo "binary=$directory/$asset" >> "$GITHUB_OUTPUT"
+    - id: check
+      shell: bash
+      env:
+        SEKIMORI: ${{ steps.install.outputs.binary }}
+        SEKIMORI_PATHS: ${{ inputs.paths }}
+      run: |
+        set -f
+        read -r -a paths <<< "$SEKIMORI_PATHS"
+        sarif="$RUNNER_TEMP/sekimori.sarif"
+        status=0
+        "$SEKIMORI" "${paths[@]}" || status=$?
+        "$SEKIMORI" --format sarif "${paths[@]}" > "$sarif" || true
+        echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
+        exit "$status"
