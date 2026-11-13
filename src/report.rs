@@ -1,6 +1,8 @@
+use std::cmp::Reverse;
+
 use serde_json::{Value, json};
 
-use crate::rules::{Finding, HALVES_PER_POINT, Level, MAX_TOTAL, Rule};
+use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
 const LABEL_WIDTH: usize = 21;
@@ -33,62 +35,69 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     )
 }
 
-struct SarifPlace {
+struct SamePlace<'f, 'a, 'w> {
     rule: Rule,
-    position: (usize, usize),
-    level: Level,
-    breakdowns: Vec<String>,
+    position: Option<(usize, usize)>,
+    findings: Vec<&'f Finding<'a, 'w>>,
 }
 
 pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Vec<Value> {
-    let mut places: Vec<SarifPlace> = Vec::new();
+    let mut places: Vec<SamePlace> = Vec::new();
     for finding in findings {
-        let position = workflow.position(&finding.hit.route).unwrap_or((1, 1));
-        let breakdown = sarif_breakdown(finding);
-        match places
-            .iter_mut()
-            .find(|place| place.rule == finding.hit.rule && place.position == position)
-        {
-            Some(place) => {
-                place.level = place.level.max(finding.level);
-                place.breakdowns.push(breakdown);
-            }
-            None => places.push(SarifPlace {
+        let position = workflow.position(&finding.hit.route);
+        let same_place = places.iter_mut().find(|place| {
+            place.rule == finding.hit.rule && position.is_some() && place.position == position
+        });
+        match same_place {
+            Some(place) => place.findings.push(finding),
+            None => places.push(SamePlace {
                 rule: finding.hit.rule,
                 position,
-                level: finding.level,
-                breakdowns: vec![breakdown],
+                findings: vec![finding],
             }),
         }
     }
     places
         .into_iter()
-        .map(|place| {
-            let (line, column) = place.position;
-            json!({
-                "ruleId": place.rule.id(),
-                "level": place.level.to_string(),
-                "message": { "text": place.breakdowns.join("\n\n") },
-                "locations": [{
-                    "physicalLocation": {
-                        "artifactLocation": { "uri": uri },
-                        "region": { "startLine": line, "startColumn": column },
-                    },
-                }],
-            })
-        })
+        .map(
+            |SamePlace {
+                 rule,
+                 position,
+                 findings: mut merged,
+             }| {
+                merged.sort_by_key(|finding| Reverse(finding.level));
+                let level = merged[0].level;
+                let breakdowns: Vec<String> = merged
+                    .iter()
+                    .map(|finding| {
+                        let mut lines = vec![headline(finding)];
+                        if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
+                            lines.push(format!("agent step: line {line}"));
+                        }
+                        lines.extend(axis_rows(finding).into_iter().map(
+                            |(label, value, reason)| match reason {
+                                Some(reason) => format!("{label}: {value} ({reason})"),
+                                None => format!("{label}: {value}"),
+                            },
+                        ));
+                        lines.join("\n")
+                    })
+                    .collect();
+                let (line, column) = position.unwrap_or((1, 1));
+                json!({
+                    "ruleId": rule.id(),
+                    "level": level.to_string(),
+                    "message": { "text": breakdowns.join("\n\n") },
+                    "locations": [{
+                        "physicalLocation": {
+                            "artifactLocation": { "uri": uri },
+                            "region": { "startLine": line, "startColumn": column },
+                        },
+                    }],
+                })
+            },
+        )
         .collect()
-}
-
-fn sarif_breakdown(finding: &Finding) -> String {
-    let rows: Vec<String> = axis_rows(finding)
-        .into_iter()
-        .map(|(label, value, reason)| match reason {
-            Some(reason) => format!("{label}: {value} ({reason})"),
-            None => format!("{label}: {value}"),
-        })
-        .collect();
-    format!("{}\n{}", headline(finding), rows.join("\n"))
 }
 
 pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
@@ -291,6 +300,7 @@ jobs:
         assert_eq!(
             result["message"]["text"],
             "anthropics/claude-code-action@v1 in job `claude` can be started without write access
+agent step: line 6
 who can trigger: 1 (allowed_non_write_users: '*', on issue_comment)
 allowed tools: 0
 permissions/secrets: 1 (no permissions are set, so GITHUB_TOKEN gets the repository default)
@@ -348,8 +358,10 @@ jobs:
         let merged = results[1]["message"]["text"].as_str().unwrap();
         let breakdowns: Vec<&str> = merged.split("\n\n").collect();
         assert_eq!(breakdowns.len(), 2);
-        assert!(breakdowns[0].ends_with("total: 2.5 of 3"));
-        assert!(breakdowns[1].ends_with("total: 3 of 3"));
+        assert!(breakdowns[0].contains("agent step: line 11\n"));
+        assert!(breakdowns[0].ends_with("total: 3 of 3"));
+        assert!(breakdowns[1].contains("agent step: line 8\n"));
+        assert!(breakdowns[1].ends_with("total: 2.5 of 3"));
     }
 
     #[test]

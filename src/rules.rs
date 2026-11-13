@@ -322,6 +322,11 @@ mod tests {
     }
 
     #[test]
+    fn an_error_is_heavier_than_a_warning() {
+        assert!(Level::Error > Level::Warning);
+    }
+
+    #[test]
     fn wildcard_users_on_a_comment_without_permissions_is_a_warning() {
         let Scores {
             trigger,
