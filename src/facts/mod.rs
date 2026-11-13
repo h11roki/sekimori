@@ -14,12 +14,12 @@ use yamlpath::{Component, Route, route};
 use crate::agent::AgentStep;
 use crate::workflow::Workflow;
 
-pub use checkout::{HeadCheckout, head_checkout};
+pub use checkout::{HeadCheckout, head_checkout, pr_head_before};
 pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{
     ExternalEvent, OpenTrigger, UpstreamOrigin, Upstreams, condition_origin, external_events,
-    never_runs, open_trigger, outside_events,
+    has_fixed_prompt, never_runs, open_trigger, outside_events,
 };
 
 const EXPRESSION_START: &str = "${{";

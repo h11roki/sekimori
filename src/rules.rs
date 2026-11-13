@@ -7,8 +7,9 @@ use yamlpath::Route;
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
     BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, Upstreams,
-    broad_tool, condition_origin, external_events, head_checkout, long_lived_token, never_runs,
-    open_trigger, other_secret, outside_events, secret_env,
+    broad_tool, condition_origin, external_events, has_fixed_prompt, head_checkout,
+    long_lived_token, never_runs, open_trigger, other_secret, outside_events, pr_head_before,
+    secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -61,7 +62,7 @@ impl Rule {
     pub fn description(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => {
-                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Fills the who-can-trigger axis."
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only its fixed default prompt, so it does not fill this axis unless an earlier step checks out the PR head. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
@@ -199,7 +200,9 @@ fn assess_step<'w>(
 ) -> Assessment<'w> {
     let mut hits = Vec::new();
     let mut who_can_trigger = None;
-    if !events.is_empty() {
+    if !events.is_empty()
+        && (!has_fixed_prompt(&step) || pr_head_before(workflow, &step, events).is_some())
+    {
         who_can_trigger = Some(match open_trigger(&step, events, upstream) {
             Some(OpenTrigger {
                 setting,
@@ -421,6 +424,82 @@ jobs:
         assert_eq!(trigger, None);
         assert_eq!(total, 2);
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn gemini_without_a_prompt_input_gets_no_outside_text() {
+        let gemini = |with: &str| {
+            assessed(&format!(
+                "on: issues
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: google-github-actions/run-gemini-cli@v0
+{with}"
+            ))
+        };
+        let open = score(Weight::Full, "no `if:` on the job or step, on issues");
+
+        let missing = gemini("");
+        assert_eq!(missing.trigger, None);
+        assert_eq!(missing.total, 4);
+        assert_eq!(missing.level, Some(Level::Warning));
+
+        let misnamed = gemini(
+            "        with:
+          custom_prompt: ${{ github.event.issue.body }}
+",
+        );
+        assert_eq!(misnamed.trigger, None);
+
+        let given = gemini(
+            "        with:
+          PROMPT: ${{ github.event.issue.body }}
+",
+        );
+        assert_eq!(given.trigger, open);
+        assert_eq!(given.level, Some(Level::Error));
+
+        let empty = gemini(
+            "        with:
+          prompt: ''
+",
+        );
+        assert_eq!(empty.trigger, open);
+
+        let unreadable = gemini(
+            "        with: ${{ fromJSON(vars.GEMINI_INPUTS) }}
+",
+        );
+        assert_eq!(unreadable.trigger, open);
+    }
+
+    #[test]
+    fn gemini_without_a_prompt_still_reads_a_checked_out_pr_head() {
+        let Scores { trigger, tools, .. } = assessed(
+            "on: pull_request_target
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          settings: '{\"tools\": {\"core\": [\"read_file\"]}}'
+",
+        );
+        assert_eq!(
+            trigger,
+            score(
+                Weight::Full,
+                "no `if:` on the job or step, on pull_request_target"
+            )
+        );
+        assert_eq!(tools, None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
-use super::{input, input_route, parse_expression};
+use super::{Input, input, input_route, lookup, parse_expression};
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
 
@@ -53,6 +53,7 @@ const UPSTREAM_EVENTS: [(&str, UpstreamOrigin, EventPresent); 8] = [
 ];
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const LABEL_NAME: &str = "github.event.label.name";
+const PROMPT_INPUT: &str = "prompt";
 const GLOB_CHARACTERS: [char; 6] = ['*', '?', '+', '!', '[', '\\'];
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
@@ -170,6 +171,10 @@ pub fn never_runs(step: &AgentStep) -> bool {
             .and_then(|expression| expression.consteval())
             .is_some_and(|value| !value.as_boolean())
     })
+}
+
+pub fn has_fixed_prompt(step: &AgentStep) -> bool {
+    step.agent == Agent::GeminiCli && matches!(lookup(step, PROMPT_INPUT), Input::Missing)
 }
 
 pub fn open_trigger<'w>(
