@@ -115,3 +115,29 @@ fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
     );
     assert_eq!(run["invocations"][0]["executionSuccessful"], false);
 }
+
+#[test]
+fn sarif_merges_steps_that_share_a_place_but_plain_lists_each_step() {
+    let path = Path::new(FIXTURES).join("../findings/shared-token.yml");
+    let plain = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(plain.stdout).unwrap();
+    assert_eq!(stdout.matches("[long-lived-token]").count(), 2);
+    let sarif = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "sarif"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(sarif.status.code(), Some(1));
+    let log: serde_json::Value = serde_json::from_slice(&sarif.stdout).unwrap();
+    let tokens: Vec<&serde_json::Value> = log["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|result| result["ruleId"] == "long-lived-token")
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["level"], "error");
+}

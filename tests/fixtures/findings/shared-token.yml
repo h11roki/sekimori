@@ -1,0 +1,14 @@
+on: issue_comment
+env:
+  GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          safety-strategy: unsafe
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+          safety-strategy: unsafe
