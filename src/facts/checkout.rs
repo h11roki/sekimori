@@ -1,29 +1,29 @@
+use github_actions_models::common::Env;
 use github_actions_models::common::expr::LoE;
-use github_actions_models::workflow::job::{ParallelStep, RunStep, Step, UsesStep};
-use yamlpath::{Component, Route, route};
+use github_actions_models::workflow::job::{RunStep, UsesStep};
+use yamlpath::{Component, Route};
 
 use super::{ExternalEvent, Input, lookup, lookup_in};
-use crate::agent::{Agent, AgentStep, is_root_action};
+use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
 const CHECKOUT_ACTION: &str = "actions/checkout";
 const CHECKOUT_TARGETS: [&str; 2] = ["ref", "repository"];
-const ROOT_PATHS: [&str; 3] = ["", ".", "./"];
-const HEAD_CONTEXTS: [&str; 3] = [
+const WORKSPACE_EXPRESSION: &str = "${{github.workspace}}";
+const HEAD_CONTEXTS: [&str; 4] = [
     "github.event.pull_request.head.",
+    "github.event.pull_request.merge_commit_sha",
     "github.head_ref",
     "github.event.workflow_run.head_",
 ];
+const WORKFLOW_RUN_PULL_REQUESTS: &str = "github.event.workflow_run.pull_requests[";
 const PULL_REFSPEC: &str = "pull/";
 const PULL_REFSPEC_HEADS: [&str; 2] = ["head", "merge"];
-const GH_PR_CHECKOUT: &str = "gh pr checkout";
-const GIT_COMMANDS: [&str; 5] = [
-    "git checkout",
-    "git switch",
-    "git fetch",
-    "git pull",
-    "git reset",
-];
+const GIT: &str = "git";
+const GIT_OPTIONS_WITH_VALUE: [&str; 2] = ["-C", "-c"];
+const GIT_SUBCOMMANDS: [&str; 5] = ["checkout", "switch", "fetch", "pull", "reset"];
+const GH_PR_CHECKOUT: [&str; 3] = ["gh", "pr", "checkout"];
+const SHELL_SEPARATORS: &str = ";&|()`";
 const GEMINI_TRUST_VARIABLE: &str = "GEMINI_CLI_TRUST_WORKSPACE";
 
 #[derive(Debug)]
@@ -57,66 +57,51 @@ pub fn head_checkout<'w>(
         ),
         Agent::Codex => None,
     }?;
-    earlier_steps(step)
-        .into_iter()
-        .find_map(|(route, earlier)| match earlier {
-            Earlier::Uses(uses) => checkout_action(route, uses),
-            Earlier::Run(run) => checkout_command(route, run),
-        })
-        .map(|(checkout, route)| HeadCheckout {
-            setting: format!("{checkout}, and {loads}"),
-            route,
-        })
-}
-
-enum Earlier<'w> {
-    Uses(&'w UsesStep),
-    Run(&'w RunStep),
-}
-
-fn earlier_steps<'w>(agent: &AgentStep<'w>) -> Vec<(Route<'w>, Earlier<'w>)> {
-    let steps = route!["jobs", agent.job_id, "steps"];
-    let mut found = Vec::new();
-    for (index, step) in agent.job.steps[..agent.index].iter().enumerate() {
-        match step {
-            Step::Uses(uses) => found.push((steps.with_key(index), Earlier::Uses(uses))),
-            Step::Run(run) => found.push((steps.with_key(index), Earlier::Run(run))),
-            Step::Parallel { parallel } => {
-                for (inner, step) in parallel.iter().enumerate() {
-                    let route = steps.with_keys([
-                        Component::from(index),
-                        Component::from("parallel"),
-                        Component::from(inner),
-                    ]);
-                    found.push(match step {
-                        ParallelStep::Uses(uses) => (route, Earlier::Uses(uses)),
-                        ParallelStep::Run(run) => (route, Earlier::Run(run)),
-                    });
+    let inherited_env = [&step.job.env, &workflow.model.env];
+    let mut head = None;
+    for (index, route, earlier) in job_steps(step.job_id, step.job) {
+        if index >= step.index {
+            break;
+        }
+        match earlier {
+            JobStep::Uses(uses) => {
+                if let Some(checkout) = root_checkout(route, uses) {
+                    head = checkout;
                 }
             }
-            Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
+            JobStep::Run(run) => {
+                if head.is_none() && fetches_head(run, &inherited_env) {
+                    head = Some((
+                        "a `run` step checks out the PR head".to_string(),
+                        route.with_key("run"),
+                    ));
+                }
+            }
         }
     }
-    found
+    head.map(|(checkout, route)| HeadCheckout {
+        setting: format!("{checkout}, and {loads}"),
+        route,
+    })
 }
 
-fn checkout_action<'w>(route: Route<'w>, step: &'w UsesStep) -> Option<(String, Route<'w>)> {
+fn root_checkout<'w>(route: Route<'w>, step: &'w UsesStep) -> Option<Option<(String, Route<'w>)>> {
     if !is_root_action(&step.uses, CHECKOUT_ACTION) {
         return None;
     }
     let into_root = match lookup_in(&step.with, "path") {
         Input::Missing => true,
-        Input::Text { value, .. } => ROOT_PATHS.contains(&value.trim()),
+        Input::Text { value, .. } => is_workspace_root(value),
         Input::Unreadable => false,
     };
     if !into_root {
         return None;
     }
-    CHECKOUT_TARGETS.into_iter().find_map(|name| {
+    Some(CHECKOUT_TARGETS.into_iter().find_map(|name| {
         let Input::Text { key, value } = lookup_in(&step.with, name) else {
             return None;
         };
-        names_head(value).then(|| {
+        names_head(&normalized(value)).then(|| {
             (
                 format!(
                     "{} checks out the PR head with `{key}: {value}`",
@@ -125,43 +110,72 @@ fn checkout_action<'w>(route: Route<'w>, step: &'w UsesStep) -> Option<(String, 
                 route.with_keys([Component::from("with"), Component::from(key)]),
             )
         })
-    })
+    }))
 }
 
-fn checkout_command<'w>(route: Route<'w>, step: &'w RunStep) -> Option<(String, Route<'w>)> {
-    let script = normalized(&step.run);
-    let env_values: Vec<String> = match &step.shared.env {
-        LoE::Literal(env) => env
-            .values()
-            .map(|value| normalized(&value.to_string()))
-            .collect(),
-        LoE::Expr(_) => Vec::new(),
-    };
-    let fetches_head = script.contains(&normalized(GH_PR_CHECKOUT))
-        || (GIT_COMMANDS
-            .iter()
-            .any(|command| script.contains(&normalized(command)))
-            && std::iter::once(&script)
-                .chain(&env_values)
-                .any(|text| names_head(text)));
-    fetches_head.then(|| {
-        (
-            "a `run` step checks out the PR head".to_string(),
-            route.with_key("run"),
-        )
-    })
+fn is_workspace_root(path: &str) -> bool {
+    normalized(path)
+        .replace(WORKSPACE_EXPRESSION, ".")
+        .split('/')
+        .all(|component| component.is_empty() || component == ".")
 }
 
-fn names_head(text: &str) -> bool {
-    let text = normalized(text);
-    HEAD_CONTEXTS.iter().any(|context| text.contains(context))
-        || text.match_indices(PULL_REFSPEC).any(|(start, _)| {
-            text[start + PULL_REFSPEC.len()..]
-                .split_once('/')
-                .is_some_and(|(_, rest)| {
-                    PULL_REFSPEC_HEADS.iter().any(|head| rest.starts_with(head))
+fn fetches_head(step: &RunStep, inherited_env: &[&LoE<Env>]) -> bool {
+    let words: Vec<&str> = step
+        .run
+        .split(|c: char| c.is_whitespace() || SHELL_SEPARATORS.contains(c))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let gh_pr_checkout = words
+        .windows(GH_PR_CHECKOUT.len())
+        .any(|window| window == GH_PR_CHECKOUT);
+    let git_fetch = (0..words.len()).any(|start| {
+        if program_name(words[start]) != GIT {
+            return false;
+        }
+        let mut next = start + 1;
+        while let Some(word) = words.get(next).filter(|word| word.starts_with('-')) {
+            next += if GIT_OPTIONS_WITH_VALUE.contains(word) {
+                2
+            } else {
+                1
+            };
+        }
+        words
+            .get(next)
+            .is_some_and(|subcommand| GIT_SUBCOMMANDS.contains(subcommand))
+    });
+    gh_pr_checkout
+        || (git_fetch
+            && std::iter::once(&step.shared.env)
+                .chain(inherited_env.iter().copied())
+                .filter_map(|env| match env {
+                    LoE::Literal(env) => Some(env),
+                    LoE::Expr(_) => None,
                 })
-        })
+                .flat_map(|env| env.values().map(|value| value.to_string()))
+                .chain(std::iter::once(step.run.clone()))
+                .any(|text| names_head(&normalized(&text))))
+}
+
+fn program_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn names_head(normalized: &str) -> bool {
+    HEAD_CONTEXTS
+        .iter()
+        .any(|context| normalized.contains(context))
+        || followed_by(normalized, WORKFLOW_RUN_PULL_REQUESTS, ']', &[".head."])
+        || followed_by(normalized, PULL_REFSPEC, '/', &PULL_REFSPEC_HEADS)
+}
+
+fn followed_by(text: &str, prefix: &str, separator: char, suffixes: &[&str]) -> bool {
+    text.match_indices(prefix).any(|(start, _)| {
+        text[start + prefix.len()..]
+            .split_once(separator)
+            .is_some_and(|(_, rest)| suffixes.iter().any(|suffix| rest.starts_with(suffix)))
+    })
 }
 
 fn normalized(text: &str) -> String {
@@ -346,6 +360,82 @@ jobs:
             let steps = format!("      - {run}\n");
             assert_eq!(claude_after("workflow_run", &steps), None, "{run}");
         }
+    }
+
+    #[test]
+    fn pull_request_lists_merge_commits_and_workspace_paths_name_the_head() {
+        let cases = [
+            "ref: ${{ github.event.workflow_run.pull_requests[0].head.sha }}",
+            "ref: ${{ github.event.pull_request.merge_commit_sha }}",
+            "ref: ${{ github.event.workflow_run.head_sha }}\n          path: ${{ github.workspace }}",
+            "ref: ${{ github.event.workflow_run.head_sha }}\n          path: ./.",
+        ];
+        for with in cases {
+            let steps =
+                format!("      - uses: actions/checkout@v6\n        with:\n          {with}\n");
+            assert!(claude_after("workflow_run", &steps).is_some(), "{with}");
+        }
+        let number_only = "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.pull_requests[0].number }}
+";
+        assert_eq!(claude_after("workflow_run", number_only), None);
+    }
+
+    #[test]
+    fn a_later_checkout_of_the_base_puts_the_trusted_settings_back() {
+        assert_eq!(
+            claude_after(
+                "workflow_run",
+                "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - run: make build
+      - uses: actions/checkout@v6
+",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_first_step_that_brings_the_head_is_reported() {
+        assert_eq!(
+            claude_after(
+                "workflow_run",
+                "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+      - run: git checkout -b \"fix-$HEAD\"
+        env:
+          HEAD: ${{ github.event.workflow_run.head_branch }}
+",
+            )
+            .map(|found| found[..2].to_string()),
+            Some("8:".to_string())
+        );
+    }
+
+    #[test]
+    fn git_options_and_inherited_env_are_read_but_joined_words_are_not() {
+        let job_env = found(
+            "on: workflow_run
+env:
+  HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git -C . -c protocol.version=2 fetch origin \"$HEAD_SHA\"
+      - uses: anthropics/claude-code-action@v1
+",
+        );
+        assert!(job_env.is_some());
+        let joined = "      - run: |
+          echo digit
+          checkout ${{ github.event.workflow_run.head_sha }}
+";
+        assert_eq!(claude_after("workflow_run", joined), None);
     }
 
     #[test]
