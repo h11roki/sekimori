@@ -4,6 +4,7 @@ use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::If;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
@@ -23,8 +24,13 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
-const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
-const WRITER_BRANCH_EVENT: &str = "push";
+const WRITER_EVENTS: [&str; 4] = [
+    "workflow_dispatch",
+    "schedule",
+    "repository_dispatch",
+    "release",
+];
+const RESTRICTED_EVENTS: [&str; 4] = ["push", "create", "delete", "merge_group"];
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const LABEL_NAME: &str = "github.event.label.name";
 const GLOB_CHARACTERS: [char; 6] = ['*', '?', '+', '!', '[', '\\'];
@@ -295,35 +301,49 @@ impl UpstreamPath {
     }
 
     fn origin(&self) -> UpstreamOrigin {
-        let writers = |event: &String| WRITER_EVENTS.contains(&event.as_str());
-        let restricted = |event: &String| {
-            writers(event)
-                || event == WRITER_BRANCH_EVENT
-                || (self.same_repository && event == SAME_REPOSITORY_EVENT)
-        };
-        match &self.events {
-            Some(events) if events.iter().all(writers) => UpstreamOrigin::Writers,
-            Some(events) if events.iter().all(restricted) => UpstreamOrigin::Restricted,
-            _ if self.gated => UpstreamOrigin::Restricted,
-            _ => UpstreamOrigin::Anyone,
+        let origin = self
+            .events
+            .as_ref()
+            .map_or(UpstreamOrigin::Anyone, |events| {
+                events
+                    .iter()
+                    .map(|event| match event_origin(event) {
+                        UpstreamOrigin::Anyone
+                            if self.same_repository && event == SAME_REPOSITORY_EVENT =>
+                        {
+                            UpstreamOrigin::Restricted
+                        }
+                        origin => origin,
+                    })
+                    .max()
+                    .unwrap_or(UpstreamOrigin::Writers)
+            });
+        if self.gated {
+            origin.min(UpstreamOrigin::Restricted)
+        } else {
+            origin
         }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Upstreams {
-    origins: HashMap<String, UpstreamOrigin>,
+    origins: HashMap<(PathBuf, String), UpstreamOrigin>,
 }
 
 impl Upstreams {
     pub fn new<'w>(workflows: impl IntoIterator<Item = &'w Workflow>) -> Upstreams {
-        let origins = workflows
-            .into_iter()
-            .filter_map(|workflow| {
-                let name = workflow.model.name.clone()?;
-                Some((name, trigger_origin(&workflow.model.on.events)))
-            })
-            .collect();
+        let mut origins: HashMap<(PathBuf, String), UpstreamOrigin> = HashMap::new();
+        for workflow in workflows {
+            let Some(name) = workflow.model.name.clone() else {
+                continue;
+            };
+            let origin = trigger_origin(&workflow.model.on.events);
+            origins
+                .entry((directory(workflow), name))
+                .and_modify(|known| *known = (*known).max(origin))
+                .or_insert(origin);
+        }
         Upstreams { origins }
     }
 
@@ -331,45 +351,66 @@ impl Upstreams {
         let OptionalBody::Body(run) = &workflow.model.on.events.workflow_run else {
             return UpstreamOrigin::Anyone;
         };
+        let directory = directory(workflow);
         run.workflows
             .iter()
             .map(|name| {
                 if name.contains(GLOB_CHARACTERS) {
-                    UpstreamOrigin::Anyone
-                } else {
-                    self.origins
-                        .get(name)
-                        .copied()
-                        .unwrap_or(UpstreamOrigin::Anyone)
+                    return UpstreamOrigin::Anyone;
                 }
+                self.origins
+                    .get(&(directory.clone(), name.clone()))
+                    .copied()
+                    .unwrap_or(UpstreamOrigin::Anyone)
             })
             .max()
             .unwrap_or(UpstreamOrigin::Anyone)
     }
 }
 
-fn trigger_origin(events: &Events) -> UpstreamOrigin {
-    let writers = [
-        events.workflow_dispatch.is_present(),
-        events.schedule.is_present(),
-        events.repository_dispatch.is_present(),
-        events.release.is_present(),
-    ];
-    let restricted = [
-        events.push.is_present(),
-        events.create.is_present(),
-        events.delete.is_present(),
-        events.merge_group.is_present(),
-    ];
-    let count = |present: &[bool]| present.iter().filter(|present| **present).count() as u32;
-    let (writers, restricted) = (count(&writers), count(&restricted));
-    if writers + restricted < events.count() {
-        UpstreamOrigin::Anyone
-    } else if restricted > 0 {
+fn directory(workflow: &Workflow) -> PathBuf {
+    let parent = workflow.path.parent().unwrap_or(Path::new(""));
+    parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf())
+}
+
+fn event_origin(event: &str) -> UpstreamOrigin {
+    if WRITER_EVENTS.contains(&event) {
+        UpstreamOrigin::Writers
+    } else if RESTRICTED_EVENTS.contains(&event) {
         UpstreamOrigin::Restricted
     } else {
-        UpstreamOrigin::Writers
+        UpstreamOrigin::Anyone
     }
+}
+
+fn trigger_origin(events: &Events) -> UpstreamOrigin {
+    let known = [
+        ("workflow_dispatch", events.workflow_dispatch.is_present()),
+        ("schedule", events.schedule.is_present()),
+        (
+            "repository_dispatch",
+            events.repository_dispatch.is_present(),
+        ),
+        ("release", events.release.is_present()),
+        ("push", events.push.is_present()),
+        ("create", events.create.is_present()),
+        ("delete", events.delete.is_present()),
+        ("merge_group", events.merge_group.is_present()),
+    ];
+    let present: Vec<&str> = known
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect();
+    if events.count() == 0 || (present.len() as u32) < events.count() {
+        return UpstreamOrigin::Anyone;
+    }
+    present
+        .into_iter()
+        .map(event_origin)
+        .max()
+        .unwrap_or(UpstreamOrigin::Anyone)
 }
 
 pub fn upstream_origin(step: &AgentStep, from_files: UpstreamOrigin) -> UpstreamOrigin {
@@ -562,7 +603,7 @@ mod tests {
     use crate::workflow::Workflow;
 
     fn open_setting(source: &str) -> Option<String> {
-        let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+        let workflow = parsed(source);
         let events = external_events(&workflow.model.on.events);
         let steps = agent_steps(&workflow);
         assert_eq!(steps.len(), 1);
@@ -699,8 +740,7 @@ jobs:
 
     #[test]
     fn open_trigger_names_only_the_events_the_if_does_not_check() {
-        let workflow = Workflow::parse(
-            Path::new("test.yml"),
+        let workflow = parsed(
             "on: [issues, issue_comment]
 jobs:
   gemini:
@@ -708,10 +748,8 @@ jobs:
     if: contains(fromJSON('[\"OWNER\"]'), github.event.comment.author_association)
     steps:
       - uses: google-github-actions/run-gemini-cli@v0
-"
-            .to_string(),
-        )
-        .unwrap();
+",
+        );
         let events = external_events(&workflow.model.on.events);
         let open =
             open_trigger(&agent_steps(&workflow)[0], &events, UpstreamOrigin::Anyone).unwrap();
@@ -721,10 +759,8 @@ jobs:
     #[test]
     fn a_constant_false_condition_means_the_step_never_runs() {
         let never = |condition: &str| {
-            let workflow = Workflow::parse(
-                Path::new("test.yml"),
-                format!(
-                    "on: issues
+            let workflow = parsed(&format!(
+                "on: issues
 jobs:
   gemini:
     runs-on: ubuntu-latest
@@ -732,9 +768,7 @@ jobs:
       - uses: google-github-actions/run-gemini-cli@v0
         if: {condition}
 "
-                ),
-            )
-            .unwrap();
+            ));
             never_runs(&agent_steps(&workflow)[0])
         };
         assert!(never("false"));
@@ -876,10 +910,8 @@ jobs:
     }
 
     fn outside_on(events: &str, condition: &str) -> Vec<&'static str> {
-        let workflow = Workflow::parse(
-            Path::new("test.yml"),
-            format!(
-                "on: {events}
+        let workflow = parsed(&format!(
+            "on: {events}
 jobs:
   gemini:
     runs-on: ubuntu-latest
@@ -887,9 +919,7 @@ jobs:
     steps:
       - uses: google-github-actions/run-gemini-cli@v0
 "
-            ),
-        )
-        .unwrap();
+        ));
         let steps = agent_steps(&workflow);
         outside_events(
             &external_events(&workflow.model.on.events),
@@ -910,6 +940,10 @@ jobs:
             (
                 "workflow_run",
                 "github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'schedule'",
+            ),
+            (
+                "workflow_run",
+                "github.event.workflow_run.event == 'release'",
             ),
             (
                 "workflow_run",
@@ -1042,6 +1076,35 @@ jobs:
     }
 
     #[test]
+    fn upstreams_sharing_a_name_keep_the_widest_and_stay_in_their_directory() {
+        let at = |path: &str, source: &str| {
+            Workflow::parse(Path::new(path), source.to_string()).unwrap()
+        };
+        let manual = at(
+            "a/manual.yml",
+            "name: CI\non: workflow_dispatch\njobs: {}\n",
+        );
+        let forks = at("a/forks.yml", "name: CI\non: pull_request\njobs: {}\n");
+        let elsewhere = at(
+            "b/manual.yml",
+            "name: Notes\non: workflow_dispatch\njobs: {}\n",
+        );
+        let empty = at("a/empty.yml", "name: Empty\non: {}\njobs: {}\n");
+        let upstreams = Upstreams::new([&manual, &forks, &elsewhere, &empty]);
+        for (workflows, origin) in [
+            ("[CI]", UpstreamOrigin::Anyone),
+            ("[Notes]", UpstreamOrigin::Anyone),
+            ("[Empty]", UpstreamOrigin::Anyone),
+        ] {
+            let downstream = at(
+                "a/down.yml",
+                &format!("on: {{workflow_run: {{workflows: {workflows}}}}}\njobs: {{}}\n"),
+            );
+            assert_eq!(upstreams.origin_of(&downstream), origin, "{workflows}");
+        }
+    }
+
+    #[test]
     fn gemini_step_condition_counts_too() {
         let setting = open_setting(
             "on: issues
@@ -1058,14 +1121,11 @@ jobs:
 
     #[test]
     fn only_events_that_outside_contributors_can_cause_are_external() {
-        let workflow = Workflow::parse(
-            Path::new("test.yml"),
+        let workflow = parsed(
             "on: [push, pull_request, workflow_dispatch, issue_comment, pull_request_target]
 jobs: {}
-"
-            .to_string(),
-        )
-        .unwrap();
+",
+        );
         assert_eq!(
             external_events(&workflow.model.on.events),
             [
