@@ -1,4 +1,5 @@
 mod checkout;
+mod secrets;
 mod tools;
 mod trigger;
 
@@ -9,6 +10,7 @@ use yamlpath::{Component, Route};
 use crate::agent::AgentStep;
 
 pub use checkout::{HeadCheckout, head_checkout};
+pub use secrets::{SecretUse, long_lived_token, other_secret};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
 
@@ -73,4 +75,17 @@ fn before_comment(text: &str) -> &str {
 
 fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+fn ends_word(text: &str, reference: &str) -> bool {
+    text.match_indices(reference).any(|(start, _)| {
+        !text[start + reference.len()..]
+            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn references_variable(text: &str, name: &str) -> bool {
+    [format!("${name}"), format!("${{{name}}}")]
+        .iter()
+        .any(|reference| ends_word(text, reference))
 }

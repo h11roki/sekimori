@@ -3,7 +3,10 @@ use github_actions_models::common::expr::LoE;
 use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
-use super::{ExternalEvent, Input, before_comment, lookup, lookup_in, program_name};
+use super::{
+    ExternalEvent, Input, before_comment, ends_word, lookup, lookup_in, program_name,
+    references_variable,
+};
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
@@ -290,20 +293,11 @@ fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
 
 fn refers_to_head_variable(argument: &str, head_variables: &[&str]) -> bool {
     head_variables.iter().any(|name| {
-        [format!("${name}"), format!("${{{name}}}")]
-            .iter()
-            .any(|reference| ends_word(argument, reference))
+        references_variable(argument, name)
             || ends_word(
                 &normalized(argument),
                 &format!("{ENV_CONTEXT}{}", name.to_lowercase()),
             )
-    })
-}
-
-fn ends_word(text: &str, reference: &str) -> bool {
-    text.match_indices(reference).any(|(start, _)| {
-        !text[start + reference.len()..]
-            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
     })
 }
 

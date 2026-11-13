@@ -6,8 +6,8 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, broad_tool, external_events,
-    head_checkout, never_runs, open_trigger,
+    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, broad_tool, external_events,
+    head_checkout, long_lived_token, never_runs, open_trigger, other_secret,
 };
 use crate::workflow::Workflow;
 
@@ -24,6 +24,8 @@ pub enum Rule {
     UnrestrictedTrigger,
     BroadTools,
     PrHeadCheckout,
+    LongLivedToken,
+    OtherSecrets,
 }
 
 impl Rule {
@@ -32,6 +34,8 @@ impl Rule {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
             Rule::BroadTools => "broad-tools",
             Rule::PrHeadCheckout => "pr-head-checkout",
+            Rule::LongLivedToken => "long-lived-token",
+            Rule::OtherSecrets => "other-secrets",
         }
     }
 
@@ -40,6 +44,8 @@ impl Rule {
             Rule::UnrestrictedTrigger => "can be started without write access",
             Rule::BroadTools => "can run unrestricted tools",
             Rule::PrHeadCheckout => "loads settings from a checked-out PR head",
+            Rule::LongLivedToken => "gets a long-lived GitHub token",
+            Rule::OtherSecrets => "can read other secrets",
         }
     }
 }
@@ -198,9 +204,20 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: tool_reasons.join("; "),
     });
-    let permissions_and_secrets = write_permission(workflow, step.job).map(|reason| AxisScore {
+    let mut secret_reasons = Vec::new();
+    for (rule, found) in [
+        (Rule::LongLivedToken, long_lived_token(workflow, &step)),
+        (Rule::OtherSecrets, other_secret(workflow, &step)),
+    ] {
+        if let Some(SecretUse { setting, route }) = found {
+            hits.push(Hit { rule, route });
+            secret_reasons.push(setting);
+        }
+    }
+    secret_reasons.extend(write_permission(workflow, step.job));
+    let permissions_and_secrets = (!secret_reasons.is_empty()).then(|| AxisScore {
         weight: Weight::Full,
-        reason,
+        reason: secret_reasons.join("; "),
     });
     Assessment {
         step,
@@ -484,6 +501,52 @@ jobs:
             )
         );
         assert_eq!(assessment.total_halves(), 5);
+    }
+
+    #[test]
+    fn tokens_secrets_and_write_access_share_the_permissions_axis() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: write
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_PAT }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let assessment = &assessments[0];
+        let rules: Vec<_> = assessment
+            .findings()
+            .iter()
+            .map(|finding| finding.hit.rule)
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                Rule::UnrestrictedTrigger,
+                Rule::LongLivedToken,
+                Rule::OtherSecrets
+            ]
+        );
+        assert_eq!(
+            assessment.permissions_and_secrets,
+            score(
+                Weight::Full,
+                "env GH_TOKEN uses secrets.ORG_PAT, a stored token rather than GITHUB_TOKEN or an app token; env NPM_TOKEN passes secrets.NPM_TOKEN to the agent; contents write"
+            )
+        );
+        assert_eq!(assessment.level(), Some(Level::Warning));
     }
 
     #[test]
