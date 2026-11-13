@@ -8,3 +8,5 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: Write an article about the latest release.

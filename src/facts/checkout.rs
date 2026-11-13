@@ -22,6 +22,13 @@ const BASE_REFERENCES: [&str; 8] = [
     "github.event.workflow_run.head_branch",
     "github.event.repository.default_branch",
 ];
+const PROMPT_INPUT: &str = "prompt";
+const BASE_WORKSPACE_EVENTS: [ExternalEvent; 4] = [
+    ExternalEvent::Issues,
+    ExternalEvent::IssueComment,
+    ExternalEvent::Discussion,
+    ExternalEvent::DiscussionComment,
+];
 const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const WILDCARD: &str = "*";
@@ -129,6 +136,38 @@ pub fn head_checkout<'w>(
         setting: format!("{checkout}, and {loads}"),
         route,
     })
+}
+
+pub fn outside_text_cannot_reach(step: &AgentStep, events: &[ExternalEvent]) -> bool {
+    let checks_out_default_branch = |earlier: &UsesStep| {
+        let reference = match lookup_in(&earlier.with, "ref") {
+            Input::Missing => true,
+            Input::Text { value, .. } => {
+                !value.contains(EXPRESSION_START) && !names_head_commit(&normalized(value))
+            }
+            Input::Unreadable => false,
+        };
+        let repository = match lookup_in(&earlier.with, "repository") {
+            Input::Missing => true,
+            Input::Text { value, .. } => normalized(value) == BASE_REPOSITORY_EXPRESSION,
+            Input::Unreadable => false,
+        };
+        is_root_action(&earlier.uses, CHECKOUT_ACTION) && reference && repository
+    };
+    step.agent == Agent::GeminiCli
+        && blank_input(step, PROMPT_INPUT)
+        && events
+            .iter()
+            .all(|event| BASE_WORKSPACE_EVENTS.contains(event))
+        && job_steps(step.job_id, step.job)
+            .into_iter()
+            .filter(|(index, ..)| *index <= step.index)
+            .all(|(.., earlier)| match earlier {
+                JobStep::Uses(uses) => {
+                    std::ptr::eq(uses, step.step) || checks_out_default_branch(uses)
+                }
+                JobStep::Run(_) => false,
+            })
 }
 
 enum RootCheckout<'w> {
@@ -329,13 +368,16 @@ fn normalized(text: &str) -> String {
         .collect()
 }
 
-fn gemini_loads_workspace_settings(workflow: &Workflow, step: &AgentStep) -> bool {
-    let without_settings = match lookup(step, SETTINGS_INPUT) {
+fn blank_input(step: &AgentStep, name: &str) -> bool {
+    match lookup(step, name) {
         Input::Missing => true,
         Input::Text { value, .. } => value.trim().is_empty(),
         Input::Unreadable => false,
-    };
-    without_settings
+    }
+}
+
+fn gemini_loads_workspace_settings(workflow: &Workflow, step: &AgentStep) -> bool {
+    blank_input(step, SETTINGS_INPUT)
         && agent_env(workflow, step)
             .variables
             .iter()

@@ -8,7 +8,7 @@ use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
     BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, Upstreams,
     broad_tool, condition_origin, external_events, head_checkout, long_lived_token, never_runs,
-    open_trigger, other_secret, outside_events, secret_env,
+    open_trigger, other_secret, outside_events, outside_text_cannot_reach, secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -61,7 +61,7 @@ impl Rule {
     pub fn description(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => {
-                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Fills the who-can-trigger axis."
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not fill this axis when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and every earlier step in the job is an `actions/checkout` of this repository at a fixed ref. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
@@ -199,7 +199,7 @@ fn assess_step<'w>(
 ) -> Assessment<'w> {
     let mut hits = Vec::new();
     let mut who_can_trigger = None;
-    if !events.is_empty() {
+    if !events.is_empty() && !outside_text_cannot_reach(&step, events) {
         who_can_trigger = Some(match open_trigger(&step, events, upstream) {
             Some(OpenTrigger {
                 setting,
@@ -421,6 +421,152 @@ jobs:
         assert_eq!(trigger, None);
         assert_eq!(total, 2);
         assert_eq!(level, None);
+    }
+
+    #[test]
+    fn gemini_without_a_prompt_input_gets_no_outside_text() {
+        let gemini = |with: &str| {
+            assessed(&format!(
+                "on: [issues, discussion]
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: google-github-actions/run-gemini-cli@v0
+{with}"
+            ))
+        };
+        let open = score(
+            Weight::Full,
+            "no `if:` on the job or step, on issues, discussion",
+        );
+
+        let missing = gemini("");
+        assert_eq!(missing.trigger, None);
+        assert_eq!(missing.total, 4);
+        assert_eq!(missing.level, Some(Level::Warning));
+
+        for with in [
+            "        with:
+          custom_prompt: ${{ github.event.issue.body }}
+",
+            "        with:
+          prompt: ' '
+",
+            "        with:
+          prompt:
+",
+        ] {
+            assert_eq!(gemini(with).trigger, None, "{with}");
+        }
+
+        let given = gemini(
+            "        with:
+          PROMPT: ${{ github.event.issue.body }}
+",
+        );
+        assert_eq!(given.trigger, open);
+        assert_eq!(given.level, Some(Level::Error));
+
+        let unreadable = gemini(
+            "        with: ${{ fromJSON(vars.GEMINI_INPUTS) }}
+",
+        );
+        assert_eq!(unreadable.trigger, open);
+    }
+
+    #[test]
+    fn gemini_without_a_prompt_counts_unless_only_the_default_branch_is_checked_out() {
+        let trigger = |on: &str, steps: &str| {
+            assessed(&format!(
+                "on: {on}
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    steps:
+{steps}"
+            ))
+            .trigger
+        };
+        let gemini = "      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          settings: '{\"tools\": {\"core\": [\"read_file\"]}}'
+";
+        let open = |on: &str| {
+            score(
+                Weight::Full,
+                &format!("no `if:` on the job or step, on {on}"),
+            )
+        };
+
+        for before in [
+            "      - uses: actions/checkout@v6
+        with:
+          path: pr
+          ref: refs/pull/7/head
+",
+            "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+",
+            "      - uses: actions/checkout@v6
+        with: ${{ fromJSON(vars.CHECKOUT) }}
+",
+            "      - uses: actions/checkout@v6
+        with:
+          repository: someone/prompts
+",
+            "      - run: gh pr checkout ${{ github.event.issue.number }}
+",
+            "      - uses: ./.github/actions/checkout-pr
+",
+        ] {
+            assert_eq!(
+                trigger("issue_comment", &format!("{before}{gemini}")),
+                open("issue_comment"),
+                "{before}"
+            );
+        }
+        assert_eq!(
+            trigger(
+                "issue_comment",
+                &format!(
+                    "      - parallel:
+          - run: gh pr checkout ${{{{ github.event.issue.number }}}}
+    {}",
+                    gemini.replace("\n      ", "\n          ")
+                )
+            ),
+            open("issue_comment")
+        );
+        assert_eq!(
+            trigger(
+                "pull_request_review",
+                &format!("      - uses: actions/checkout@v6\n{gemini}")
+            ),
+            open("pull_request_review")
+        );
+
+        for before in [
+            "",
+            "      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+",
+            "      - uses: actions/checkout@v6
+        with:
+          path: docs
+          ref: gh-pages
+          repository: ${{ github.repository }}
+",
+        ] {
+            assert_eq!(
+                trigger("issue_comment", &format!("{before}{gemini}")),
+                None,
+                "{before}"
+            );
+        }
     }
 
     #[test]
