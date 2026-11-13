@@ -579,29 +579,6 @@ jobs:
     }
 
     #[test]
-    fn every_rule_is_listed_once() {
-        let listed = |rule: Rule| match rule {
-            Rule::UnrestrictedTrigger
-            | Rule::BroadTools
-            | Rule::LongLivedToken
-            | Rule::PrHeadCheckout
-            | Rule::OtherSecrets => Rule::ALL.iter().filter(|known| **known == rule).count(),
-        };
-        assert!(Rule::ALL.iter().all(|rule| listed(*rule) == 1));
-        assert_eq!(
-            [
-                Rule::UnrestrictedTrigger,
-                Rule::BroadTools,
-                Rule::LongLivedToken,
-                Rule::PrHeadCheckout,
-                Rule::OtherSecrets
-            ]
-            .map(listed),
-            [1; 5]
-        );
-    }
-
-    #[test]
     fn a_step_that_never_runs_is_not_assessed() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

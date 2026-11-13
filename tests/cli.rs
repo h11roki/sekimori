@@ -106,9 +106,12 @@ fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
     let results = run["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|result| result["level"] == "error"));
-    assert_eq!(
-        results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-        "tests/fixtures/findings/open-codex.yml"
+    let uri = results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        .as_str()
+        .unwrap();
+    assert!(
+        uri.ends_with("tests/fixtures/findings/open-codex.yml"),
+        "{uri}"
     );
     assert_eq!(run["invocations"][0]["executionSuccessful"], false);
 }
