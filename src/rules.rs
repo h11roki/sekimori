@@ -29,6 +29,14 @@ pub enum Rule {
 }
 
 impl Rule {
+    pub const ALL: [Rule; 5] = [
+        Rule::UnrestrictedTrigger,
+        Rule::BroadTools,
+        Rule::LongLivedToken,
+        Rule::PrHeadCheckout,
+        Rule::OtherSecrets,
+    ];
+
     pub fn id(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
@@ -46,6 +54,26 @@ impl Rule {
             Rule::PrHeadCheckout => "loads settings from a checked-out PR head",
             Rule::LongLivedToken => "gets a long-lived GitHub token",
             Rule::OtherSecrets => "can read other secrets",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Rule::UnrestrictedTrigger => {
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it. Fills the who-can-trigger axis."
+            }
+            Rule::BroadTools => {
+                "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
+            }
+            Rule::LongLivedToken => {
+                "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. Fills the permissions/secrets axis."
+            }
+            Rule::PrHeadCheckout => {
+                "A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. Fills the allowed-tools axis."
+            }
+            Rule::OtherSecrets => {
+                "A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. Fills the permissions/secrets axis."
+            }
         }
     }
 }

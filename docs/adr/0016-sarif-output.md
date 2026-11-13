@@ -29,7 +29,7 @@
 - 文書は `version` が `2.1.0`、`$schema` が SARIF 2.1.0 の JSON Schema。run は 1 つ
 - `tool.driver` は、`name` が `sekimori`、`version` と `semanticVersion` が Cargo の版、`informationUri` がリポジトリの URL。`rules` には 5 つの規則を全て、ADR 0011 の ID の順に並べる。各規則は `shortDescription` に平文の 1 行目の文、`fullDescription` と `help` に規則が見る設定と軸を書き、`properties.tags` を `security` にする
 - 結果は、指摘ごとに 1 つ。`ruleId` と `ruleIndex`、`level`(`warning` か `error`)、`message.text` に平文の 1 行目の文と軸の内訳、`locations` に 1 つの位置を書く
-- 位置の `artifactLocation.uri` は、渡されたパスを `/` で区切った相対パスにする(先頭の `./` は除く)。絶対パスは、今の作業場所の下なら相対に直し、そうでなければ `file://` の URI にする。`region` は平文と同じ行と列(1 から数える)
+- 位置の `artifactLocation.uri` は、渡されたパスを `/` で区切った相対パスにする(`.` は除き、`a/../b` は字面のまま `b` に畳む)。絶対パスは、今の作業場所の下なら相対に直し、そうでなければ `file://` の URI にする。`region` は平文と同じ行と列(1 から数える)
 - 読めないファイルは、平文と同じく標準エラーに出し、加えて `invocations[0].toolExecutionNotifications` に `error` で書き、`executionSuccessful` を偽にする。終了コードは ADR 0010 のとおり
 - `partialFingerprints` と `runAutomationDetails` は書かない。前者は `upload-sarif` が作り、後者は `upload-sarif` の `category` で利用者が決める
 
