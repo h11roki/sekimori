@@ -6,13 +6,11 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, broad_tool,
-    condition_origin, external_events, head_checkout, long_lived_token, never_runs, open_trigger,
-    other_secret, outside_events, secret_env,
+    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, Upstreams,
+    broad_tool, condition_origin, external_events, head_checkout, long_lived_token, never_runs,
+    open_trigger, other_secret, outside_events, secret_env,
 };
 use crate::workflow::Workflow;
-
-pub use crate::facts::Upstreams;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];

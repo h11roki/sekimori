@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
+use sekimori::facts::Upstreams;
 use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results};
-use sekimori::rules::{Assessment, Upstreams, assess};
+use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
 const EXIT_FINDINGS: u8 = 1;

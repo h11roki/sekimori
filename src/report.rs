@@ -224,7 +224,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::rules::{Assessment, Upstreams, assess};
+    use crate::facts::Upstreams;
+    use crate::rules::{Assessment, assess};
 
     #[test]
     fn a_finding_names_its_place_rule_step_and_every_axis() {

@@ -24,15 +24,32 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
-const UPSTREAM_EVENTS: [(&str, UpstreamOrigin); 8] = [
-    ("workflow_dispatch", UpstreamOrigin::Writers),
-    ("schedule", UpstreamOrigin::Writers),
-    ("repository_dispatch", UpstreamOrigin::Writers),
-    ("release", UpstreamOrigin::Writers),
-    ("push", UpstreamOrigin::Restricted),
-    ("create", UpstreamOrigin::Restricted),
-    ("delete", UpstreamOrigin::Restricted),
-    ("merge_group", UpstreamOrigin::Restricted),
+type EventPresent = fn(&Events) -> bool;
+const UPSTREAM_EVENTS: [(&str, UpstreamOrigin, EventPresent); 8] = [
+    ("workflow_dispatch", UpstreamOrigin::Writers, |events| {
+        events.workflow_dispatch.is_present()
+    }),
+    ("schedule", UpstreamOrigin::Writers, |events| {
+        events.schedule.is_present()
+    }),
+    ("repository_dispatch", UpstreamOrigin::Writers, |events| {
+        events.repository_dispatch.is_present()
+    }),
+    ("release", UpstreamOrigin::Writers, |events| {
+        events.release.is_present()
+    }),
+    ("push", UpstreamOrigin::Restricted, |events| {
+        events.push.is_present()
+    }),
+    ("create", UpstreamOrigin::Restricted, |events| {
+        events.create.is_present()
+    }),
+    ("delete", UpstreamOrigin::Restricted, |events| {
+        events.delete.is_present()
+    }),
+    ("merge_group", UpstreamOrigin::Restricted, |events| {
+        events.merge_group.is_present()
+    }),
 ];
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const LABEL_NAME: &str = "github.event.label.name";
@@ -310,13 +327,19 @@ impl UpstreamPath {
             .map_or(UpstreamOrigin::Anyone, |events| {
                 events
                     .iter()
-                    .map(|event| match event_origin(event) {
-                        UpstreamOrigin::Anyone
-                            if self.same_repository && event == SAME_REPOSITORY_EVENT =>
+                    .map(|event| {
+                        let origin = UPSTREAM_EVENTS
+                            .iter()
+                            .find(|(name, _, _)| name == event)
+                            .map_or(UpstreamOrigin::Anyone, |(_, origin, _)| *origin);
+                        if origin == UpstreamOrigin::Anyone
+                            && self.same_repository
+                            && event == SAME_REPOSITORY_EVENT
                         {
                             UpstreamOrigin::Restricted
+                        } else {
+                            origin
                         }
-                        origin => origin,
                     })
                     .max()
                     .unwrap_or(UpstreamOrigin::Writers)
@@ -408,32 +431,15 @@ fn directory(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| parent.to_path_buf())
 }
 
-fn event_origin(event: &str) -> UpstreamOrigin {
-    UPSTREAM_EVENTS
-        .iter()
-        .find(|(name, _)| *name == event)
-        .map_or(UpstreamOrigin::Anyone, |(_, origin)| *origin)
-}
-
 fn trigger_origin(events: &Events) -> UpstreamOrigin {
-    let present = |name: &str| match name {
-        "workflow_dispatch" => events.workflow_dispatch.is_present(),
-        "schedule" => events.schedule.is_present(),
-        "repository_dispatch" => events.repository_dispatch.is_present(),
-        "release" => events.release.is_present(),
-        "push" => events.push.is_present(),
-        "create" => events.create.is_present(),
-        "delete" => events.delete.is_present(),
-        "merge_group" => events.merge_group.is_present(),
-        _ => false,
-    };
     let origins: Vec<UpstreamOrigin> = UPSTREAM_EVENTS
         .iter()
-        .filter(|(name, _)| present(name))
-        .map(|(_, origin)| *origin)
+        .filter(|(_, _, present)| present(events))
+        .map(|(_, origin, _)| *origin)
         .collect();
+    let started_by_name = events.count() - u32::from(events.workflow_call.is_present());
     match origins.iter().max() {
-        Some(widest) if origins.len() as u32 == events.count() => *widest,
+        Some(widest) if origins.len() as u32 == started_by_name => *widest,
         _ => UpstreamOrigin::Anyone,
     }
 }
@@ -968,6 +974,10 @@ jobs:
             ),
             (
                 "workflow_run",
+                "github.event.workflow_run.event == 'repository_dispatch'",
+            ),
+            (
+                "workflow_run",
                 "contains(fromJSON('[\"schedule\", \"Workflow_Dispatch\"]'), github.event.workflow_run.event)",
             ),
             (
@@ -991,6 +1001,7 @@ jobs:
     fn workflow_run_whose_upstream_is_restricted_still_lets_outside_text_in() {
         for condition in [
             "github.event.workflow_run.event == 'push'",
+            "github.event.workflow_run.event == 'merge_group' || github.event.workflow_run.event == 'delete'",
             "github.actor == 'dependabot[bot]'",
             "(github.event.workflow_run.event == 'pull_request_target' && github.actor == 'octocat') || github.event.workflow_run.event == 'push'",
             "contains(fromJSON('[\"push\", \"schedule\"]'), github.event.workflow_run.event)",
@@ -1066,6 +1077,11 @@ jobs:
             ("[push, pull_request]", UpstreamOrigin::Anyone),
             ("issues", UpstreamOrigin::Anyone),
             ("{workflow_run: {workflows: [CI]}}", UpstreamOrigin::Anyone),
+            (
+                "[workflow_dispatch, workflow_call]",
+                UpstreamOrigin::Writers,
+            ),
+            ("workflow_call", UpstreamOrigin::Anyone),
         ] {
             let upstream = parsed(&format!("name: Up\non: {on}\njobs: {{}}\n"));
             let downstream = parsed("on: {workflow_run: {workflows: [Up]}}\njobs: {}\n");
