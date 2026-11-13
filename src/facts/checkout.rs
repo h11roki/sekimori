@@ -4,8 +4,8 @@ use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
 use super::{
-    ExternalEvent, Input, before_comment, ends_word, lookup, lookup_in, program_name,
-    references_variable,
+    EXPRESSION_START, ExternalEvent, Input, before_comment, ends_word, expression_spans, lookup,
+    lookup_in, program_name, references_variable,
 };
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
@@ -23,8 +23,6 @@ const BASE_REFERENCES: [&str; 8] = [
     "github.event.workflow_run.head_branch",
     "github.event.repository.default_branch",
 ];
-const EXPRESSION_START: &str = "${{";
-const EXPRESSION_END: &str = "}}";
 const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const WILDCARD: &str = "*";
@@ -240,19 +238,15 @@ fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
 
 fn flatten_expressions(text: &str) -> String {
     let mut flattened = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(EXPRESSION_START) {
-        flattened.push_str(&rest[..start]);
-        let expression = &rest[start..];
-        let end = expression
-            .find(EXPRESSION_END)
-            .map_or(expression.len(), |end| end + EXPRESSION_END.len());
-        flattened.extend(expression[..end].chars().filter(|c| {
+    let mut last = 0;
+    for span in expression_spans(text) {
+        flattened.push_str(&text[last..span.start]);
+        flattened.extend(text[span.clone()].chars().filter(|c| {
             !c.is_whitespace() && !COMMAND_SEPARATORS.contains(*c) && !WORD_SEPARATORS.contains(*c)
         }));
-        rest = &expression[end..];
+        last = span.end;
     }
-    flattened.push_str(rest);
+    flattened.push_str(&text[last..]);
     flattened
 }
 

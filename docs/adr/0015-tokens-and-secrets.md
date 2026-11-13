@@ -22,14 +22,15 @@
 
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
 
-- 値は、`${{ }}` の式の中の `secrets.NAME`、`secrets['NAME']`、または `secrets` そのもの(`toJSON(secrets)`)を、大文字と小文字を区別せずに探す。`secrets.GITHUB_TOKEN` は GitHub が作る短命のトークンなので、どちらの規則でも数えない
-- `env` は、ステップ、ジョブ、ワークフローの順で最初に見つかる値で決める
+- 値は、`${{ }}` の式を ADR 0012 と同じ式のパーサーで読み、`secrets.NAME`、`secrets['NAME']`、または `secrets` そのもの(`toJSON(secrets)`)を、大文字と小文字を区別せずに探す。文字列の中の `secrets` や、`steps.import-secrets` のような名前の一部は数えない。`secrets[matrix.name]` のように名前が実行時に決まるものは、`GITHUB_TOKEN` かもしれないので数えない。`secrets.GITHUB_TOKEN` は GitHub が作る短命のトークンなので、どちらの規則でも数えない
+- `env` は、ステップ、ジョブ、ワークフローの順で最初に見つかる値で決める。途中の `env` がまるごと式(`env: ${{ fromJSON(...) }}`)なら、その式で探すのを止める。どの名前を上書きするか分からないため
 - 期限の無いトークン: GitHub のトークンとしてエージェントに渡る値に、`secrets.GITHUB_TOKEN` 以外の `secrets.*` がある
   - claude-code-action: `with` の `github_token`
   - codex-action と run-gemini-cli: `env` の `GITHUB_TOKEN` と `GH_TOKEN`
   - `github.token`、`steps.*.outputs.*`(App のトークン)、それらを `||` でつないだものは数えない
 - 他の秘密情報: 次の値に、`secrets.GITHUB_TOKEN` 以外の `secrets.*` がある
-  - `with` のうち、エージェント自身の資格情報の入力(claude は `anthropic_api_key`、`claude_code_oauth_token`、`github_token`、`ssh_signing_key`、codex は `openai-api-key`、gemini は `gemini_api_key`、`google_api_key`)を除いたもの。`settings`、`claude_args`、`prompt` に書いた秘密情報もエージェントに届く
+  - `with` のうち、エージェント自身の資格情報の入力(claude は `anthropic_api_key`、`claude_code_oauth_token`、`github_token`、`ssh_signing_key`、codex は `openai-api-key`、gemini は `gemini_api_key`、`google_api_key`)を除いたもの。`settings`、`claude_args`、`prompt` に書いた秘密情報もエージェントに届く。`${{ env.NAME }}` で、秘密情報を持つ `env` の変数を参照するものも数える。GitHub が action に渡す前に値へ置き換えるため
+  - まるごと式の `env` が秘密情報を参照するもの(claude-code-action と codex-action)
   - claude-code-action と codex-action: `env` のうち、エージェント自身の資格情報として読む名前と `GITHUB_TOKEN`、`GH_TOKEN` を除いたもの。claude は上の資格情報の名前、codex は `OPENAI_API_KEY`
   - run-gemini-cli: `env` のうち、`settings` の文字列が `$NAME` か `${NAME}` で参照する名前のもの。それ以外はシェルから消える。`GEMINI_API_KEY`、`GOOGLE_API_KEY`、`GITHUB_TOKEN`、`GH_TOKEN` は除く
 - どちらも当たれば権限と秘密情報の軸を 1 とし、書き込みの権限と合わせて、理由を全て書く。指摘はその値の `with` か `env` の鍵を指す

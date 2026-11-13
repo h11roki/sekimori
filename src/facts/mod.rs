@@ -5,6 +5,8 @@ mod trigger;
 
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue};
+use std::ops::Range;
+
 use yamlpath::{Component, Route};
 
 use crate::agent::AgentStep;
@@ -13,6 +15,9 @@ pub use checkout::{HeadCheckout, head_checkout};
 pub use secrets::{SecretUse, long_lived_token, other_secret};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
+
+const EXPRESSION_START: &str = "${{";
+const EXPRESSION_END: &str = "}}";
 
 enum Input<'w> {
     Missing,
@@ -88,4 +93,26 @@ fn references_variable(text: &str, name: &str) -> bool {
     [format!("${name}"), format!("${{{name}}}")]
         .iter()
         .any(|reference| ends_word(text, reference))
+}
+
+fn expression_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = text[offset..].find(EXPRESSION_START) {
+        let start = offset + start;
+        let end = text[start..]
+            .find(EXPRESSION_END)
+            .map_or(text.len(), |end| start + end + EXPRESSION_END.len());
+        spans.push(start..end);
+        offset = end;
+    }
+    spans
+}
+
+fn expression_bodies(text: &str) -> impl Iterator<Item = &str> {
+    expression_spans(text).into_iter().map(|span| {
+        let expression = &text[span];
+        let body = &expression[EXPRESSION_START.len()..];
+        body.strip_suffix(EXPRESSION_END).unwrap_or(body)
+    })
 }
