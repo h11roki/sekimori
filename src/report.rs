@@ -59,45 +59,45 @@ pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Ve
     }
     places
         .into_iter()
-        .map(
-            |SamePlace {
-                 rule,
-                 position,
-                 findings: mut merged,
-             }| {
-                merged.sort_by_key(|finding| Reverse(finding.level));
-                let level = merged[0].level;
-                let breakdowns: Vec<String> = merged
-                    .iter()
-                    .map(|finding| {
-                        let mut lines = vec![headline(finding)];
-                        if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
-                            lines.push(format!("agent step: line {line}"));
-                        }
-                        lines.extend(axis_rows(finding).into_iter().map(
-                            |(label, value, reason)| match reason {
-                                Some(reason) => format!("{label}: {value} ({reason})"),
-                                None => format!("{label}: {value}"),
-                            },
-                        ));
-                        lines.join("\n")
-                    })
-                    .collect();
-                let (line, column) = position.unwrap_or((1, 1));
-                json!({
-                    "ruleId": rule.id(),
-                    "level": level.to_string(),
-                    "message": { "text": breakdowns.join("\n\n") },
-                    "locations": [{
-                        "physicalLocation": {
-                            "artifactLocation": { "uri": uri },
-                            "region": { "startLine": line, "startColumn": column },
-                        },
-                    }],
-                })
-            },
-        )
+        .map(|mut place| {
+            place
+                .findings
+                .sort_by_key(|finding| Reverse(finding.assessment.total_halves()));
+            let breakdowns: Vec<String> = place
+                .findings
+                .iter()
+                .map(|finding| sarif_breakdown(workflow, finding))
+                .collect();
+            let (line, column) = place.position.unwrap_or((1, 1));
+            json!({
+                "ruleId": place.rule.id(),
+                "level": place.findings[0].level.to_string(),
+                "message": { "text": breakdowns.join("\n\n") },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": uri },
+                        "region": { "startLine": line, "startColumn": column },
+                    },
+                }],
+            })
+        })
         .collect()
+}
+
+fn sarif_breakdown(workflow: &Workflow, finding: &Finding) -> String {
+    let mut lines = vec![headline(finding)];
+    if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
+        lines.push(format!("agent step: line {line}"));
+    }
+    lines.extend(
+        axis_rows(finding)
+            .into_iter()
+            .map(|(label, value, reason)| match reason {
+                Some(reason) => format!("{label}: {value} ({reason})"),
+                None => format!("{label}: {value}"),
+            }),
+    );
+    lines.join("\n")
 }
 
 pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
@@ -311,23 +311,8 @@ total: 2 of 3"
     #[test]
     fn sarif_results_at_the_same_place_merge_into_the_heaviest_level() {
         let workflow = Workflow::parse(
-            Path::new("codex.yml"),
-            "on: issue_comment
-env:
-  GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
-jobs:
-  codex:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: openai/codex-action@v1
-        with:
-          safety-strategy: unsafe
-      - uses: openai/codex-action@v1
-        with:
-          allow-users: '*'
-          safety-strategy: unsafe
-"
-            .to_string(),
+            Path::new("shared-token.yml"),
+            include_str!("../tests/fixtures/findings/shared-token.yml").to_string(),
         )
         .unwrap();
         let assessments = assess(&workflow);

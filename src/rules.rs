@@ -99,7 +99,7 @@ pub struct AxisScore {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Warning,
     Error,
@@ -319,11 +319,6 @@ mod tests {
             weight,
             reason: reason.to_string(),
         })
-    }
-
-    #[test]
-    fn an_error_is_heavier_than_a_warning() {
-        assert!(Level::Error > Level::Warning);
     }
 
     #[test]
