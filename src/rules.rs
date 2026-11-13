@@ -6,11 +6,13 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, broad_tool, external_events,
-    head_checkout, long_lived_token, never_runs, open_trigger, other_secret, outside_events,
-    secret_env,
+    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, broad_tool,
+    external_events, head_checkout, long_lived_token, never_runs, open_trigger, other_secret,
+    outside_events, secret_env, upstream_origin,
 };
 use crate::workflow::Workflow;
+
+pub use crate::facts::Upstreams;
 
 const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
@@ -173,14 +175,16 @@ impl<'w> Assessment<'w> {
     }
 }
 
-pub fn assess(workflow: &Workflow) -> Vec<Assessment<'_>> {
+pub fn assess<'w>(workflow: &'w Workflow, upstreams: &Upstreams) -> Vec<Assessment<'w>> {
     let events = external_events(&workflow.model.on.events);
+    let from_files = upstreams.origin_of(workflow);
     agent_steps(workflow)
         .into_iter()
         .filter(|step| !never_runs(step))
         .map(|step| {
-            let events = outside_events(&step, &events);
-            assess_step(workflow, step, &events)
+            let upstream = upstream_origin(&step, from_files);
+            let events = outside_events(&events, upstream);
+            assess_step(workflow, step, &events, upstream)
         })
         .collect()
 }
@@ -189,11 +193,12 @@ fn assess_step<'w>(
     workflow: &'w Workflow,
     step: AgentStep<'w>,
     events: &[ExternalEvent],
+    upstream: UpstreamOrigin,
 ) -> Assessment<'w> {
     let mut hits = Vec::new();
     let mut who_can_trigger = None;
     if !events.is_empty() {
-        who_can_trigger = Some(match open_trigger(&step, events) {
+        who_can_trigger = Some(match open_trigger(&step, events, upstream) {
             Some(OpenTrigger {
                 setting,
                 route,
@@ -306,7 +311,7 @@ mod tests {
 
     fn assessed(source: &str) -> Scores {
         let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
-        let mut assessments = assess(&workflow);
+        let mut assessments = assess(&workflow, &Upstreams::default());
         assert_eq!(assessments.len(), 1);
         let assessment = assessments.remove(0);
         Scores {
@@ -433,7 +438,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let findings: Vec<_> = assessments[0]
             .findings()
             .iter()
@@ -512,7 +517,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let assessment = &assessments[0];
         let rules: Vec<_> = assessment
             .findings()
@@ -557,7 +562,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let assessment = &assessments[0];
         let rules: Vec<_> = assessment
             .findings()
@@ -600,7 +605,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         assert_eq!(assessments[0].who_can_trigger, None);
         assert!(assessments[0].hits.is_empty());
     }
@@ -623,7 +628,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         assert_eq!(
             assessments[0]
                 .who_can_trigger
@@ -656,7 +661,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        assert!(assess(&workflow).is_empty());
+        assert!(assess(&workflow, &Upstreams::default()).is_empty());
     }
 
     #[test]

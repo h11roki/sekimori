@@ -3,11 +3,14 @@ use github_actions_expressions::literal::Literal;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::If;
-use github_actions_models::workflow::event::Events;
+use std::collections::HashMap;
+
+use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
 use super::{input, input_route, parse_expression};
 use crate::agent::{Agent, AgentStep};
+use crate::workflow::Workflow;
 
 const ACTOR_CONTEXTS: [&str; 3] = [
     "github.actor",
@@ -24,6 +27,7 @@ const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
 const WRITER_BRANCH_EVENT: &str = "push";
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const LABEL_NAME: &str = "github.event.label.name";
+const GLOB_CHARACTERS: [char; 6] = ['*', '?', '+', '!', '[', '\\'];
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
     "FIRST_TIMER",
@@ -116,13 +120,13 @@ pub fn external_events(events: &Events) -> Vec<ExternalEvent> {
     .collect()
 }
 
-pub fn outside_events(step: &AgentStep, events: &[ExternalEvent]) -> Vec<ExternalEvent> {
-    let writers_only = events.contains(&ExternalEvent::WorkflowRun)
-        && upstream_origin(step) == UpstreamOrigin::Writers;
+pub fn outside_events(events: &[ExternalEvent], upstream: UpstreamOrigin) -> Vec<ExternalEvent> {
     events
         .iter()
         .copied()
-        .filter(|event| !(*event == ExternalEvent::WorkflowRun && writers_only))
+        .filter(|event| {
+            !(*event == ExternalEvent::WorkflowRun && upstream == UpstreamOrigin::Writers)
+        })
         .collect()
 }
 
@@ -142,7 +146,11 @@ pub fn never_runs(step: &AgentStep) -> bool {
     })
 }
 
-pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Option<OpenTrigger<'w>> {
+pub fn open_trigger<'w>(
+    step: &AgentStep<'w>,
+    events: &[ExternalEvent],
+    upstream: UpstreamOrigin,
+) -> Option<OpenTrigger<'w>> {
     let conditions = conditions(step);
     let (setting, route) = match step.agent {
         Agent::ClaudeCode => {
@@ -163,8 +171,7 @@ pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Optio
             (setting.to_string(), step.route.clone())
         }
     };
-    let upstream_restricted = events.contains(&ExternalEvent::WorkflowRun)
-        && upstream_origin(step) != UpstreamOrigin::Anyone;
+    let upstream_restricted = upstream != UpstreamOrigin::Anyone;
     let open_events: Vec<ExternalEvent> = events
         .iter()
         .copied()
@@ -249,7 +256,7 @@ fn gates_who_starts(expression: &SpannedExpr, event: ExternalEvent) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum UpstreamOrigin {
+pub enum UpstreamOrigin {
     Writers,
     Restricted,
     Anyone,
@@ -303,7 +310,73 @@ impl UpstreamPath {
     }
 }
 
-fn upstream_origin(step: &AgentStep) -> UpstreamOrigin {
+#[derive(Debug, Default)]
+pub struct Upstreams {
+    origins: HashMap<String, UpstreamOrigin>,
+}
+
+impl Upstreams {
+    pub fn new<'w>(workflows: impl IntoIterator<Item = &'w Workflow>) -> Upstreams {
+        let origins = workflows
+            .into_iter()
+            .filter_map(|workflow| {
+                let name = workflow.model.name.clone()?;
+                Some((name, trigger_origin(&workflow.model.on.events)))
+            })
+            .collect();
+        Upstreams { origins }
+    }
+
+    pub fn origin_of(&self, workflow: &Workflow) -> UpstreamOrigin {
+        let OptionalBody::Body(run) = &workflow.model.on.events.workflow_run else {
+            return UpstreamOrigin::Anyone;
+        };
+        run.workflows
+            .iter()
+            .map(|name| {
+                if name.contains(GLOB_CHARACTERS) {
+                    UpstreamOrigin::Anyone
+                } else {
+                    self.origins
+                        .get(name)
+                        .copied()
+                        .unwrap_or(UpstreamOrigin::Anyone)
+                }
+            })
+            .max()
+            .unwrap_or(UpstreamOrigin::Anyone)
+    }
+}
+
+fn trigger_origin(events: &Events) -> UpstreamOrigin {
+    let writers = [
+        events.workflow_dispatch.is_present(),
+        events.schedule.is_present(),
+        events.repository_dispatch.is_present(),
+        events.release.is_present(),
+    ];
+    let restricted = [
+        events.push.is_present(),
+        events.create.is_present(),
+        events.delete.is_present(),
+        events.merge_group.is_present(),
+    ];
+    let count = |present: &[bool]| present.iter().filter(|present| **present).count() as u32;
+    let (writers, restricted) = (count(&writers), count(&restricted));
+    if writers + restricted < events.count() {
+        UpstreamOrigin::Anyone
+    } else if restricted > 0 {
+        UpstreamOrigin::Restricted
+    } else {
+        UpstreamOrigin::Writers
+    }
+}
+
+pub fn upstream_origin(step: &AgentStep, from_files: UpstreamOrigin) -> UpstreamOrigin {
+    condition_origin(step).min(from_files)
+}
+
+fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
     conditions(step)
         .iter()
         .map(|condition| match condition {
@@ -493,7 +566,8 @@ mod tests {
         let events = external_events(&workflow.model.on.events);
         let steps = agent_steps(&workflow);
         assert_eq!(steps.len(), 1);
-        open_trigger(&steps[0], &events).map(|open| {
+        let upstream = upstream_origin(&steps[0], UpstreamOrigin::Anyone);
+        open_trigger(&steps[0], &events, upstream).map(|open| {
             let (line, _) = workflow.position(&open.route).unwrap();
             format!("{line}: {}", open.setting)
         })
@@ -639,7 +713,8 @@ jobs:
         )
         .unwrap();
         let events = external_events(&workflow.model.on.events);
-        let open = open_trigger(&agent_steps(&workflow)[0], &events).unwrap();
+        let open =
+            open_trigger(&agent_steps(&workflow)[0], &events, UpstreamOrigin::Anyone).unwrap();
         assert_eq!(open.events, [ExternalEvent::Issues]);
     }
 
@@ -816,10 +891,13 @@ jobs:
         )
         .unwrap();
         let steps = agent_steps(&workflow);
-        outside_events(&steps[0], &external_events(&workflow.model.on.events))
-            .into_iter()
-            .map(ExternalEvent::name)
-            .collect()
+        outside_events(
+            &external_events(&workflow.model.on.events),
+            upstream_origin(&steps[0], UpstreamOrigin::Anyone),
+        )
+        .into_iter()
+        .map(ExternalEvent::name)
+        .collect()
     }
 
     #[test]
@@ -913,6 +991,54 @@ jobs:
 ",
         );
         assert_eq!(setting, None);
+    }
+
+    fn parsed(source: &str) -> Workflow {
+        Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap()
+    }
+
+    #[test]
+    fn upstream_triggers_decide_who_can_start_the_upstream() {
+        for (on, origin) in [
+            ("workflow_dispatch", UpstreamOrigin::Writers),
+            (
+                "[workflow_dispatch, release, repository_dispatch]",
+                UpstreamOrigin::Writers,
+            ),
+            ("{schedule: [{cron: '0 0 * * *'}]}", UpstreamOrigin::Writers),
+            ("{push: {tags: ['*']}}", UpstreamOrigin::Restricted),
+            ("[push, workflow_dispatch]", UpstreamOrigin::Restricted),
+            ("[push, pull_request]", UpstreamOrigin::Anyone),
+            ("issues", UpstreamOrigin::Anyone),
+            ("{workflow_run: {workflows: [CI]}}", UpstreamOrigin::Anyone),
+        ] {
+            let upstream = parsed(&format!("name: Up\non: {on}\njobs: {{}}\n"));
+            let downstream = parsed("on: {workflow_run: {workflows: [Up]}}\njobs: {}\n");
+            assert_eq!(
+                Upstreams::new([&upstream]).origin_of(&downstream),
+                origin,
+                "{on}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_names_are_matched_exactly_and_the_widest_one_wins() {
+        let release = parsed("name: Release Notes\non: {push: {tags: ['*']}}\njobs: {}\n");
+        let manual = parsed("name: Manual\non: workflow_dispatch\njobs: {}\n");
+        let upstreams = Upstreams::new([&release, &manual]);
+        for (workflows, origin) in [
+            ("[Manual]", UpstreamOrigin::Writers),
+            ("[Manual, Release Notes]", UpstreamOrigin::Restricted),
+            ("[Manual, Missing]", UpstreamOrigin::Anyone),
+            ("[manual]", UpstreamOrigin::Anyone),
+            ("['Release*']", UpstreamOrigin::Anyone),
+        ] {
+            let downstream = parsed(&format!(
+                "on: {{workflow_run: {{workflows: {workflows}}}}}\njobs: {{}}\n"
+            ));
+            assert_eq!(upstreams.origin_of(&downstream), origin, "{workflows}");
+        }
     }
 
     #[test]
