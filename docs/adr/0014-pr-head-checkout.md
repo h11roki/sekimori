@@ -12,7 +12,8 @@
   - codex-action(13e9c17)と Codex(16280e1): 作業場所の `.codex/config.toml` と hooks は、信頼したプロジェクトでなければ効かない。codex-action は信頼の設定を書かず、`codex-args` で信頼を足すことも拒む。`AGENTS.md` は信頼に関わらず読む
   - run-gemini-cli(387c8dd)と Gemini CLI(b977656): `settings` が空でなければ `.gemini/settings.json` を上書きし、空なら checkout したものが残る。Gemini CLI は、作業場所を信頼していなければ作業場所の設定を捨てる。信頼は `GEMINI_CLI_TRUST_WORKSPACE=true` か信頼したフォルダの一覧で決まり、CI では一覧が無い。公式の例の 6 つのうち 5 つが `GEMINI_CLI_TRUST_WORKSPACE: 'true'` を書いている
 - `issue_comment` も、`pull_request_target` と同じく base の枝の権限と秘密情報で動き、`gh pr checkout` で PR の head を取り出すワークフローがよくある
-- Anthropic の例の `ci-failure-auto-fix.yml` は、`workflow_run` で `ref: ${{ github.event.workflow_run.head_branch }}` を checkout してから claude-code-action を動かす
+- 枝の名前(`github.head_ref`、`github.event.workflow_run.head_branch` など)を `ref` にだけ書くと、base のリポジトリの同じ名前の枝を checkout する。フォークの枝は来ず、来るのは書き込める人が置いた枝になる。コミット(`head.sha`、`pull/<番号>/head`)は、フォークのものでも base のリポジトリから取り出せる
+- Anthropic の例の `ci-failure-auto-fix.yml` は、`workflow_run` で `ref: ${{ github.event.workflow_run.head_branch }}` を checkout してから claude-code-action を動かす。`pull_requests[0]` を条件にして、同じリポジトリの PR に絞っている
 
 ## 検討した選択肢
 
@@ -29,8 +30,9 @@
   - run-gemini-cli: `settings` が無いか空で、ステップ、ジョブ、ワークフローの順で最初に見つかる `env` の `GEMINI_CLI_TRUST_WORKSPACE` が `true`
   - codex-action: 当てない。作業場所の設定は信頼が無いと効かないため
 - PR の head の checkout は次のどれか
-  - `actions/checkout` のステップで、`ref` か `repository` の値が PR の head を指し、`path` が作業場所の根(無い、空、`.`、`./`、`${{ github.workspace }}` など、`.` と空の区切りだけからなるもの)。PR の head を指す値は、`github.event.pull_request.head.`、`github.event.pull_request.merge_commit_sha`、`github.head_ref`、`github.event.workflow_run.head_`、`github.event.workflow_run.pull_requests[...].head.` を含むもの、または `pull/<番号>/head` や `pull/<番号>/merge` の形。大文字と小文字と空白を無視して比べる
-  - `run` のステップで、`gh pr checkout` があるか、`git` の `checkout`、`switch`、`fetch`、`pull`、`reset` があり、スクリプトか、そのステップ、ジョブ、ワークフローの `env` の値が PR の head を指すもの。コマンドは空白とシェルの区切り(`;`、`&`、`|`、括弧、`` ` ``)で語に分けて読み、`git -C <dir>` や `git -c <name>=<value>` のような前に置くオプションは飛ばす
+  - `actions/checkout` のステップで、`path` が作業場所の根(無い、空、`.`、`./`、`${{ github.workspace }}` など、`.` と空の区切りだけからなるもの)で、`repository` が PR の head のリポジトリ(`github.event.pull_request.head.repo.`、`github.event.workflow_run.head_repository.`、`github.event.workflow_run.pull_requests[...].head.repo.`)を指すか、`ref` が PR の head のコミット(`github.event.pull_request.head.sha`、`github.event.pull_request.merge_commit_sha`、`github.event.workflow_run.head_sha`、`github.event.workflow_run.pull_requests[...].head.sha`、`pull/<番号>/head`、`pull/<番号>/merge`)を指すもの。大文字と小文字と空白を無視して比べる
+  - `run` のステップで、`gh pr checkout` があるもの。または、`git` の `checkout`、`switch`、`reset`、`pull` の引数が PR の head のコミットを指すもの。`git fetch` の引数が PR の head のコミットを指し、その後に `checkout`、`switch`、`reset`、`pull` があるもの。引数は、値を直接書くか、その値を持つ `env` の変数(ステップ、ジョブ、ワークフロー)を `$NAME`、`${NAME}`、`${{ env.NAME }}` で参照するもの
+  - `run` は、行ごとに `#` から後ろのコメントを除き(ADR 0013 の `claude_args` と同じ読み方)、`;`、`&`、`|`、括弧、`` ` `` でコマンドに分け、空白と引用符で語に分ける。`git -C <dir>`、`-c`、`--git-dir`、`--work-tree` のような前に置くオプションは飛ばす。`git fetch` だけでは作業場所が変わらないので当てない
 - エージェントより前のステップを順に見て、作業場所の根への `actions/checkout` は作業場所を入れ替えるものとして扱う。PR の head を取り出した後に、PR の head を指さない checkout が根にあれば、base に戻ったとみなして当てない。`run` は、まだ PR の head を取り出していないときだけ見る
 - エージェントのステップが `parallel:` の中にあるときは、その `parallel:` より前のステップを見る
 - 指摘は checkout のステップの `ref`、`repository`、`run` のどれかを指す。広い道具と両方に当たったときは、許した道具の軸の理由に両方を書く
@@ -41,6 +43,7 @@
 - 1 は、claude-code-action の `pull_request_target` と codex-action の全てで誤検知になる
 - 3 の指示のファイルは、外部の人の文面がエージェントに届く経路で、起動できる人の軸(ADR 0007 の半分)ですでに数えている。道具や権限を変えるものではない
 - `issue_comment` を足すのは、`gh pr checkout` を使うワークフローが `pull_request_target` と同じ形で PR の head を取り出すため
+- 枝の名前だけを `ref` に書いた checkout を当てないのは、取り出すのが書き込める人の置いた枝で、外部の人の設定ではないため。このため `ci-failure-auto-fix.yml` には当たらない
 
 ## 受け入れたトレードオフ
 
@@ -51,7 +54,9 @@
 - `GEMINI_CLI_TRUST_WORKSPACE` を前のステップで `$GITHUB_ENV` に書くときや、値が式のときは、信頼していないとみなす
 - checkout の `ref` が前のステップの出力(`${{ steps.pr.outputs.sha }}`)のように読めないときは、PR の head と分からないので当てない
 - 部分文字列で比べるので、PR の head を指す値を条件にだけ使う式(`head.repo.fork && 'a' || 'b'`)も PR の head とみなす
-- `run` の `git checkout -b <名前>` のように、PR の head の名前で枝を作るだけのコマンドも、PR の head を取り出したとみなす。`git checkout origin/main -- .claude` のように一部のファイルだけ base に戻すコマンドは、戻したとみなさない
+- 書き込める人が悪意を持って置いた枝は、枝の名前だけの checkout で取り出されるが、外部の人の脅威を見るこの規則では当てない
+- `run` で作業場所を base に戻すコマンド(`git checkout main`、`git checkout origin/main -- .claude`)は、戻したとみなさない。何に戻したかを静的に決めにくいため
+- `git fetch` で取り出した PR の head と、その後の `git checkout` の引数が同じものかは確かめない
 - 同じ checkout の後に複数のエージェントがあれば、エージェントのステップごとに同じ場所を指す指摘が出る
 - checkout のステップの `if:` は見ない。`if: false` の checkout も数える
 - `run` のステップの `working-directory` は見ず、作業場所の根に取り出したとみなす
