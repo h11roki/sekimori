@@ -18,7 +18,8 @@ pub use checkout::{HeadCheckout, head_checkout};
 pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{
-    ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger, outside_events,
+    ExternalEvent, OpenTrigger, UpstreamOrigin, Upstreams, condition_origin, external_events,
+    never_runs, open_trigger, outside_events,
 };
 
 const EXPRESSION_START: &str = "${{";

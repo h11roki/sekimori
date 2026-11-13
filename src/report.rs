@@ -224,6 +224,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::facts::Upstreams;
     use crate::rules::{Assessment, assess};
 
     #[test]
@@ -243,7 +244,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let findings = assessments[0].findings();
         assert_eq!(findings.len(), 1);
         assert_eq!(
@@ -283,7 +284,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let findings = assessments[0].findings();
         let results = sarif_results(&workflow, ".github/workflows/claude.yml", &findings);
         assert_eq!(results.len(), 1);
@@ -315,7 +316,7 @@ total: 2 of 3"
             include_str!("../tests/fixtures/findings/shared-token.yml").to_string(),
         )
         .unwrap();
-        let assessments = assess(&workflow);
+        let assessments = assess(&workflow, &Upstreams::default());
         let findings: Vec<Finding> = assessments.iter().flat_map(Assessment::findings).collect();
         assert_eq!(findings.len(), 5);
         let results = sarif_results(&workflow, "codex.yml", &findings);
