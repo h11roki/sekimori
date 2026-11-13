@@ -33,6 +33,28 @@
   - リリースが無いとき(版を上げてからタグを押すまで)は、その旨を notice に出して飛ばす。版を読めないときや、gh が「release not found」以外で失敗したときは、ジョブを失敗させる。試さずに通ったように見せないため
 - ADR 0016 の「送るステップに `if: always()` を付ける」と、ADR 0017 の利用者のワークフローの例は、この ADR の `upload-sarif` の条件で置き換える。`always()` は取り消された実行でも送り、fork からの PR では権限が無く失敗するため
 
+利用者のワークフローの例(ADR 0017 の例を置き換える)
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@<SHA> # v7.0.1
+    with:
+      persist-credentials: false
+  - id: sekimori
+    uses: h11roki/sekimori@<SHA> # v0.1.0
+  - if: >-
+      !cancelled()
+      && steps.sekimori.outputs.sarif-file != ''
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: github/codeql-action/upload-sarif@<SHA> # v4.39.3
+    with:
+      sarif_file: ${{ steps.sekimori.outputs.sarif-file }}
+      category: sekimori
+```
+
 ## 理由
 
 - 利用者と同じ使い方(リリースを取ってきて、証明を確かめて、SARIF を送る)を毎回通せる
