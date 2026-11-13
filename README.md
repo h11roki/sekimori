@@ -136,7 +136,7 @@ Every rule that matched the step is reported with the step's level. In SARIF, re
 
 ## Survey
 
-In November 2026 sekimori was run on 2,044 public workflows found by GitHub code search (up to 1,000 per action). 375 of them (18.3%) had at least one finding, and 55 (2.7%) were `error`. Almost all `error` findings were `run-gemini-cli` workflows that start on issues or comments without checking who triggered them.
+In November 2026 sekimori was run on 2,044 public workflows found by GitHub code search (up to 1,000 per action). 375 of them (18.3%) had at least one finding, and 55 (2.7%) were `error` when each file was checked alone, or 50 (2.4%) when each repository's files were checked together so that `workflow_run` upstreams could be found. Almost all `error` findings were `run-gemini-cli` workflows that start on issues or comments without checking who triggered them.
 
 In random samples checked by reading the workflows, no false positives were found for `broad-tools` or the permissions/secrets axis. All false positives were on the who-can-trigger axis: about half of the sampled `error` findings depended on something outside the workflow file, such as an upstream workflow, an earlier job in `needs:`, or an agent that gets no outside text. The counts and the method are in [docs/survey/2026-11.md](docs/survey/2026-11.md) (in Japanese); repository names are not published.
 
