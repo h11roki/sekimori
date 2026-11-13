@@ -3,21 +3,25 @@ mod secrets;
 mod tools;
 mod trigger;
 
-use github_actions_models::common::expr::LoE;
-use github_actions_models::common::{Env, EnvValue};
 use std::ops::Range;
 
-use yamlpath::{Component, Route};
+use github_actions_models::common::expr::LoE;
+use github_actions_models::common::{Env, EnvValue};
+use github_actions_models::workflow::job::NormalJob;
+use yamlpath::{Component, Route, route};
 
 use crate::agent::AgentStep;
+use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout};
-pub use secrets::{SecretUse, long_lived_token, other_secret};
+pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
 
 const EXPRESSION_START: &str = "${{";
 const EXPRESSION_END: &str = "}}";
+const ENV_CONTEXT: &str = "env";
+const SETTINGS_INPUT: &str = "settings";
 
 enum Input<'w> {
     Missing,
@@ -96,23 +100,86 @@ fn references_variable(text: &str, name: &str) -> bool {
 }
 
 fn expression_spans(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
     let mut spans = Vec::new();
     let mut offset = 0;
-    while let Some(start) = text[offset..].find(EXPRESSION_START) {
-        let start = offset + start;
-        let end = text[start..]
-            .find(EXPRESSION_END)
-            .map_or(text.len(), |end| start + end + EXPRESSION_END.len());
+    while let Some(found) = text[offset..].find(EXPRESSION_START) {
+        let start = offset + found;
+        let mut in_string = false;
+        let mut end = text.len();
+        for index in start + EXPRESSION_START.len()..bytes.len() {
+            match bytes[index] {
+                b'\'' => in_string = !in_string,
+                b'}' if !in_string && text[index..].starts_with(EXPRESSION_END) => {
+                    end = index + EXPRESSION_END.len();
+                    break;
+                }
+                _ => {}
+            }
+        }
         spans.push(start..end);
         offset = end;
     }
     spans
 }
 
-fn expression_bodies(text: &str) -> impl Iterator<Item = &str> {
-    expression_spans(text).into_iter().map(|span| {
-        let expression = &text[span];
-        let body = &expression[EXPRESSION_START.len()..];
-        body.strip_suffix(EXPRESSION_END).unwrap_or(body)
-    })
+struct EnvVariable<'w> {
+    name: &'w str,
+    value: String,
+    route: Route<'w>,
+}
+
+struct NearestEnv<'w> {
+    variables: Vec<EnvVariable<'w>>,
+    expression: Option<(&'w str, Route<'w>)>,
+}
+
+fn nearest_env<'w>(
+    workflow: &'w Workflow,
+    job_id: &'w str,
+    job: &'w NormalJob,
+    step_env: &'w LoE<Env>,
+    step_route: &Route<'w>,
+) -> NearestEnv<'w> {
+    let scopes = [
+        (step_env, step_route.with_key(ENV_CONTEXT)),
+        (&job.env, route!["jobs", job_id, ENV_CONTEXT]),
+        (&workflow.model.env, route![ENV_CONTEXT]),
+    ];
+    let mut variables: Vec<EnvVariable<'w>> = Vec::new();
+    for (env, scope) in scopes {
+        let env = match env {
+            LoE::Literal(env) => env,
+            LoE::Expr(expression) => {
+                return NearestEnv {
+                    variables,
+                    expression: Some((expression.as_raw(), scope)),
+                };
+            }
+        };
+        for (name, value) in env {
+            if variables.iter().any(|variable| variable.name == name) {
+                continue;
+            }
+            variables.push(EnvVariable {
+                name,
+                value: value.to_string(),
+                route: scope.with_key(name.as_str()),
+            });
+        }
+    }
+    NearestEnv {
+        variables,
+        expression: None,
+    }
+}
+
+fn agent_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> NearestEnv<'w> {
+    nearest_env(
+        workflow,
+        step.job_id,
+        step.job,
+        &step.step.shared.env,
+        &step.route,
+    )
 }

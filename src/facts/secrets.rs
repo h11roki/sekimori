@@ -2,16 +2,17 @@ use github_actions_expressions::call::Call;
 use github_actions_expressions::context::Context;
 use github_actions_expressions::op::BinExpr;
 use github_actions_expressions::{Expr, SpannedExpr};
-use github_actions_models::common::Env;
 use github_actions_models::common::expr::LoE;
-use yamlpath::{Route, route};
+use yamlpath::Route;
 
-use super::{Input, expression_bodies, input, input_route, lookup, references_variable};
+use super::{
+    ENV_CONTEXT, EXPRESSION_END, EXPRESSION_START, Input, SETTINGS_INPUT, agent_env,
+    expression_spans, input, input_route, lookup, references_variable,
+};
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
 
 const SECRETS_CONTEXT: &str = "secrets";
-const ENV_CONTEXT: &str = "env";
 const SHORT_LIVED_SECRET: &str = "GITHUB_TOKEN";
 const EVERY_SECRET: &str = "every secret";
 const CLAUDE_TOKEN_INPUT: &str = "github_token";
@@ -33,7 +34,6 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 1] = ["OPENAI_API_KEY"];
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
-const GEMINI_SETTINGS_INPUT: &str = "settings";
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 
 #[derive(Debug)]
@@ -42,48 +42,63 @@ pub struct SecretUse<'w> {
     pub route: Route<'w>,
 }
 
-pub fn long_lived_token<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> Option<SecretUse<'w>> {
-    let (setting, value, route) = match step.agent {
+pub struct SecretEnv<'w> {
+    variables: Vec<SecretVariable<'w>>,
+    expression: Option<(&'w str, Route<'w>)>,
+}
+
+struct SecretVariable<'w> {
+    name: &'w str,
+    secret: Option<String>,
+    route: Route<'w>,
+}
+
+pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv<'w> {
+    let env = agent_env(workflow, step);
+    SecretEnv {
+        variables: env
+            .variables
+            .into_iter()
+            .map(|variable| SecretVariable {
+                name: variable.name,
+                secret: first_secret(&variable.value, &[]),
+                route: variable.route,
+            })
+            .collect(),
+        expression: env.expression,
+    }
+}
+
+pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<SecretUse<'w>> {
+    let (setting, secret, route) = match step.agent {
         Agent::ClaudeCode => {
             let (key, value) = input(step, CLAUDE_TOKEN_INPUT)?;
-            (key.to_string(), value.to_string(), input_route(step, key))
+            let secret = first_secret(value, &env.variables)?;
+            (key.to_string(), secret, input_route(step, key))
         }
-        Agent::Codex | Agent::GeminiCli => {
-            let EnvScope::Variables(variables) = visible_env(workflow, step) else {
-                return None;
-            };
-            let variable = variables
-                .into_iter()
-                .find(|variable| TOKEN_VARIABLES.contains(&variable.name))?;
-            (
-                format!("env {}", variable.name),
-                variable.value,
-                variable.route,
-            )
-        }
+        Agent::Codex | Agent::GeminiCli => env
+            .variables
+            .iter()
+            .filter(|variable| TOKEN_VARIABLES.contains(&variable.name))
+            .find_map(|variable| {
+                Some((
+                    format!("env {}", variable.name),
+                    variable.secret.clone()?,
+                    variable.route.clone(),
+                ))
+            })?,
     };
-    let secret = first_secret(&value, &[])?;
     Some(SecretUse {
         setting: format!("{setting} uses {secret}, {LONG_LIVED}"),
         route,
     })
 }
 
-pub fn other_secret<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> Option<SecretUse<'w>> {
+pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<SecretUse<'w>> {
     let credential_inputs: &[&str] = match step.agent {
         Agent::ClaudeCode => &CLAUDE_CREDENTIAL_INPUTS,
         Agent::Codex => &CODEX_CREDENTIAL_INPUTS,
         Agent::GeminiCli => &GEMINI_CREDENTIAL_INPUTS,
-    };
-    let env = visible_env(workflow, step);
-    let secret_variables: Vec<(&str, String)> = match &env {
-        EnvScope::Variables(variables) => variables
-            .iter()
-            .filter_map(|variable| {
-                first_secret(&variable.value, &[]).map(|secret| (variable.name, secret))
-            })
-            .collect(),
-        EnvScope::Expression { .. } => Vec::new(),
     };
     let from_input = match &step.step.with {
         LoE::Literal(with) => with
@@ -94,39 +109,44 @@ pub fn other_secret<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> Option<
                     .any(|credential| credential.eq_ignore_ascii_case(key))
             })
             .find_map(|(key, value)| {
-                let secret = first_secret(&value.to_string(), &secret_variables)?;
                 Some(SecretUse {
-                    setting: format!("{key} passes {secret} to the agent"),
+                    setting: format!(
+                        "{key} passes {} to the agent",
+                        first_secret(&value.to_string(), &env.variables)?
+                    ),
                     route: input_route(step, key),
                 })
             }),
         LoE::Expr(_) => None,
     };
-    from_input.or_else(|| match env {
-        EnvScope::Expression { text, route } => {
-            let secret = first_secret(text, &[])?;
-            (step.agent != Agent::GeminiCli).then(|| SecretUse {
-                setting: format!("env passes {secret} to the agent"),
-                route,
-            })
-        }
-        EnvScope::Variables(variables) => {
-            let gemini_settings = match lookup(step, GEMINI_SETTINGS_INPUT) {
-                Input::Text { value, .. } => value,
-                Input::Missing | Input::Unreadable => "",
-            };
-            variables
-                .into_iter()
-                .filter(|variable| reaches_agent(step.agent, variable.name, gemini_settings))
-                .find_map(|variable| {
-                    let secret = first_secret(&variable.value, &[])?;
-                    Some(SecretUse {
-                        setting: format!("env {} passes {secret} to the agent", variable.name),
-                        route: variable.route,
-                    })
+    let gemini_settings = match lookup(step, SETTINGS_INPUT) {
+        Input::Text { value, .. } => value,
+        Input::Missing | Input::Unreadable => "",
+    };
+    let from_variable = || {
+        env.variables
+            .iter()
+            .filter(|variable| reaches_agent(step.agent, variable.name, gemini_settings))
+            .find_map(|variable| {
+                Some(SecretUse {
+                    setting: format!(
+                        "env {} passes {} to the agent",
+                        variable.name,
+                        variable.secret.as_ref()?
+                    ),
+                    route: variable.route.clone(),
                 })
-        }
-    })
+            })
+    };
+    let from_expression = || {
+        let (text, route) = env.expression.as_ref()?;
+        (step.agent != Agent::GeminiCli).then_some(())?;
+        Some(SecretUse {
+            setting: format!("env passes {} to the agent", first_secret(text, &[])?),
+            route: route.clone(),
+        })
+    };
+    from_input.or_else(from_variable).or_else(from_expression)
 }
 
 fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
@@ -148,87 +168,41 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
     }
 }
 
-struct Variable<'w> {
-    name: &'w str,
-    value: String,
-    route: Route<'w>,
-}
-
-enum EnvScope<'w> {
-    Variables(Vec<Variable<'w>>),
-    Expression { text: &'w str, route: Route<'w> },
-}
-
-fn visible_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> EnvScope<'w> {
-    let scopes: [(&'w LoE<Env>, Route<'w>); 3] = [
-        (&step.step.shared.env, step.route.with_key("env")),
-        (&step.job.env, route!["jobs", step.job_id, "env"]),
-        (&workflow.model.env, route!["env"]),
-    ];
-    let mut variables: Vec<Variable<'w>> = Vec::new();
-    for (env, scope) in scopes {
-        let env = match env {
-            LoE::Literal(env) => env,
-            LoE::Expr(expression) => {
-                return EnvScope::Expression {
-                    text: expression.as_raw(),
-                    route: scope,
-                };
-            }
-        };
-        for (name, value) in env {
-            if variables.iter().any(|variable| variable.name == name) {
-                continue;
-            }
-            variables.push(Variable {
-                name,
-                value: value.to_string(),
-                route: scope.with_key(name.as_str()),
-            });
-        }
-    }
-    EnvScope::Variables(variables)
-}
-
-fn first_secret(text: &str, secret_variables: &[(&str, String)]) -> Option<String> {
-    expression_bodies(text).find_map(|body| {
-        let expression = Expr::parse(body.trim()).ok()?;
-        secret_in(&expression, secret_variables)
+fn first_secret(text: &str, variables: &[SecretVariable]) -> Option<String> {
+    expression_spans(text).into_iter().find_map(|span| {
+        let body = text[span].strip_prefix(EXPRESSION_START)?;
+        let body = body.strip_suffix(EXPRESSION_END).unwrap_or(body);
+        secret_in(&Expr::parse(body.trim()).ok()?, variables)
     })
 }
 
-fn secret_in(expression: &SpannedExpr, secret_variables: &[(&str, String)]) -> Option<String> {
+fn secret_in(expression: &SpannedExpr, variables: &[SecretVariable]) -> Option<String> {
     match &expression.inner {
-        Expr::Identifier(identifier)
-            if identifier.as_str().eq_ignore_ascii_case(SECRETS_CONTEXT) =>
-        {
-            Some(EVERY_SECRET.to_string())
-        }
-        Expr::Context(context) => secret_of(context, secret_variables).or_else(|| {
+        Expr::Context(context) => secret_of(context, variables).or_else(|| {
             context
                 .parts
                 .iter()
                 .filter(|part| !matches!(part.inner, Expr::Identifier(_)))
-                .find_map(|part| secret_in(part, secret_variables))
+                .find_map(|part| secret_in(part, variables))
         }),
-        Expr::Index(index) => secret_in(index, secret_variables),
+        Expr::Index(index) => secret_in(index, variables),
         Expr::Call(Call { args, .. }) => args
             .iter()
-            .find_map(|argument| secret_in(argument, secret_variables)),
+            .find_map(|argument| secret_in(argument, variables)),
         Expr::BinExpr(BinExpr { lhs, rhs, .. }) => {
-            secret_in(lhs, secret_variables).or_else(|| secret_in(rhs, secret_variables))
+            secret_in(lhs, variables).or_else(|| secret_in(rhs, variables))
         }
-        Expr::UnExpr { expr, .. } => secret_in(expr, secret_variables),
+        Expr::UnExpr { expr, .. } => secret_in(expr, variables),
         Expr::Literal(_) | Expr::Star | Expr::Identifier(_) => None,
     }
 }
 
-fn secret_of(context: &Context, secret_variables: &[(&str, String)]) -> Option<String> {
+fn secret_of(context: &Context, variables: &[SecretVariable]) -> Option<String> {
     let Some(Expr::Identifier(head)) = context.parts.first().map(|part| &part.inner) else {
         return None;
     };
     if head.as_str().eq_ignore_ascii_case(SECRETS_CONTEXT) {
-        if context.parts.len() == 1 {
+        if context.parts.len() == 1 || matches!(context.parts[1].inner, Expr::Star) {
             return Some(EVERY_SECRET.to_string());
         }
         let name = context.single_tail()?;
@@ -237,10 +211,10 @@ fn secret_of(context: &Context, secret_variables: &[(&str, String)]) -> Option<S
     }
     if head.as_str().eq_ignore_ascii_case(ENV_CONTEXT) {
         let name = context.single_tail()?;
-        return secret_variables
+        return variables
             .iter()
-            .find(|(variable, _)| *variable == name)
-            .map(|(_, secret)| secret.clone());
+            .find(|variable| variable.name.eq_ignore_ascii_case(name))
+            .and_then(|variable| variable.secret.clone());
     }
     None
 }
@@ -252,12 +226,13 @@ mod tests {
     use super::*;
     use crate::agent::agent_steps;
 
-    type Finder = for<'w> fn(&'w Workflow, &AgentStep<'w>) -> Option<SecretUse<'w>>;
+    type Finder = for<'w> fn(&AgentStep<'w>, &SecretEnv<'w>) -> Option<SecretUse<'w>>;
 
     fn found(finder: Finder, source: &str) -> Option<String> {
         let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
         let steps = agent_steps(&workflow);
-        finder(&workflow, &steps[0]).map(|found| {
+        let env = secret_env(&workflow, &steps[0]);
+        finder(&steps[0], &env).map(|found| {
             let (line, _) = workflow.position(&found.route).unwrap();
             format!("{line}: {}", found.setting)
         })
@@ -456,5 +431,64 @@ mod tests {
             Some("9: env passes secrets.AGENT_ENV to the agent".to_string())
         );
         assert_eq!(found(long_lived_token, &source), None);
+    }
+    #[test]
+    fn nearer_variables_survive_an_outer_env_expression() {
+        let source = "on: issues
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    env: ${{ fromJSON(vars.EXTRA) }}
+    steps:
+      - uses: openai/codex-action@v1
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
+";
+        assert!(found(other_secret, source).is_some());
+        assert!(found(long_lived_token, source).is_some());
+    }
+
+    #[test]
+    fn every_token_variable_and_env_reference_is_checked() {
+        let both = workflow(
+            "env:\n  GH_TOKEN: ${{ secrets.ORG_PAT }}\n",
+            "openai/codex-action@v1",
+            "        env:\n          GITHUB_TOKEN: ${{ github.token }}\n",
+        );
+        assert!(found(long_lived_token, &both).is_some());
+        let through_env = workflow(
+            "env:\n  BOT: ${{ secrets.BOT_PAT }}\n",
+            "anthropics/claude-code-action@v1",
+            "        with:\n          github_token: ${{ env.bot }}\n",
+        );
+        assert_eq!(
+            found(long_lived_token, &through_env),
+            Some("10: github_token uses secrets.BOT_PAT, a stored token rather than GITHUB_TOKEN or an app token".to_string())
+        );
+    }
+
+    #[test]
+    fn braces_in_strings_and_object_filters_are_read() {
+        let source = workflow(
+            "",
+            "anthropics/claude-code-action@v1",
+            "        with:
+          claude_args: ${{ format('--mcp-config {{\"env\":{{\"K\":\"{0}\"}}}}', secrets.SENTRY) }}
+",
+        );
+        assert_eq!(
+            found(other_secret, &source),
+            Some("8: claude_args passes secrets.SENTRY to the agent".to_string())
+        );
+        let filter = workflow(
+            "",
+            "openai/codex-action@v1",
+            "        env:\n          ALL: ${{ toJSON(secrets.*) }}\n",
+        );
+        assert_eq!(
+            found(other_secret, &filter),
+            Some("8: env ALL passes every secret to the agent".to_string())
+        );
     }
 }

@@ -7,7 +7,7 @@ use yamlpath::Route;
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
     BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, broad_tool, external_events,
-    head_checkout, long_lived_token, never_runs, open_trigger, other_secret,
+    head_checkout, long_lived_token, never_runs, open_trigger, other_secret, secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -204,10 +204,11 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: tool_reasons.join("; "),
     });
+    let env = secret_env(workflow, &step);
     let mut secret_reasons = Vec::new();
     for (rule, found) in [
-        (Rule::LongLivedToken, long_lived_token(workflow, &step)),
-        (Rule::OtherSecrets, other_secret(workflow, &step)),
+        (Rule::LongLivedToken, long_lived_token(&step, &env)),
+        (Rule::OtherSecrets, other_secret(&step, &env)),
     ] {
         if let Some(SecretUse { setting, route }) = found {
             hits.push(Hit { rule, route });
