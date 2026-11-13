@@ -13,34 +13,43 @@
 
 ## 検討した選択肢
 
-1. リリースした版の Action を SHA で固定して使い、Dependabot で上げる。結果を `upload-sarif` で送る
-2. `uses: ./` でこのリポジトリの Action を使う
+1. リリースした版の Action を SHA で固定して自分を検査し、結果を `upload-sarif` で送る。別のジョブで、`uses: ./` の Action を fixture に当てて試す。`Cargo.toml` の版のリリースがまだ無いときは、後者を飛ばす
+2. `uses: ./` だけで自分を検査し、結果を送る
 3. Action を使わず、CI でビルドした CLI で検査する
 
 ## 決定
 
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
 
-- `.github/workflows/sekimori.yml` を足す。main への push と PR で動く
-- `h11roki/sekimori` を v0.1.0 のコミットの SHA で固定して使い、`.github/workflows` を検査する。ADR 0008 の Dependabot が、新しいリリースのタグに合わせて SHA を上げる
-- ワークフローの権限は空にし、ジョブに `contents: read` と `security-events: write` だけを与える
-- `upload-sarif` は `if: always()` で動かす。ただし fork からの PR では送らない
-- `upload-sarif` の `category` は `sekimori` にする。CodeQL などの他の解析と分けるため
+- `.github/workflows/sekimori.yml` を足す。main への push と PR で動く。ワークフローの権限は空にし、ジョブごとに要るものだけを与える
+- 自己検査のジョブ(`self-check`、`contents: read` と `security-events: write`)
+  - `h11roki/sekimori` を v0.1.0 のコミットの SHA で固定して使い、`.github/workflows` を検査する。ADR 0008 の Dependabot が、新しいリリースのタグに合わせて SHA を上げる
+  - `upload-sarif` は `!cancelled()` で動かす。指摘があって検査のステップが失敗しても送り、取り消された実行では送らない
+  - fork からの PR では送らない。条件は「PR ではない、または同じリポジトリからの PR」と書き、後でトリガーを足しても送り続けるようにする
+  - `upload-sarif` の `category` は `sekimori` にする。CodeQL などの他の解析と分けるため
+- Action を試すジョブ(`action`、`contents: read`)
+  - `Cargo.toml` の版のリリースがあるときだけ、このコミットの action.yml を動かす。参照は `uses: ./` ではなく、2026-07 に GitHub が入れた `uses: $/` にする。前のステップが書き換えた作業場所のファイルを読まないため(zizmor 1.32.0 の self-repository の監査)。`paths` に、指摘のある fixture のディレクトリと `.github/workflows` を 2 行で渡す
+  - 検査のステップが失敗すること(指摘あり)、SARIF に結果があり、fixture の位置を指すこと、読めないファイルが無いこと(2 つのパスに分けられたこと)を確かめる
+  - リリースが無いとき(版を上げてからタグを押すまで)は、その旨を notice に出して飛ばす
+- ADR 0017 の利用者のワークフローの例は、この ADR の `upload-sarif` の条件で置き換える。`always()` は取り消された実行でも送り、fork からの PR では権限が無く失敗するため
 
 ## 理由
 
 - 利用者と同じ使い方(リリースを取ってきて、証明を確かめて、SARIF を送る)を毎回通せる
-- `uses: ./` は、版を上げてからタグを押すまでの間、CI が落ちる(選択肢 2)
+- action.yml の変更は、リリースの前に、このジョブで指摘ありの場合まで試せる
+- `uses: ./` だけでは、版を上げてからタグを押すまでの間、自己検査が落ちる(選択肢 2)
 - CLI で検査するだけでは、Action の手順を通らない(選択肢 3)
 - 自分のワークフローに sekimori を当て続けると、将来エージェントを動かすワークフローを足したときに、自分で気付ける
 
 ## 受け入れたトレードオフ
 
-- まだリリースしていない action.yml の変更は、この検査では通らない。タグを押した後に、Dependabot の PR で初めて通る
+- 版を上げてからタグを押すまでの間は、action.yml の変更を試せない
+- Dependabot は、リリースのジョブが失敗したタグにも PR を出しうる。その PR では、取ってくるリリースが無く自己検査が落ちる。落ちた PR はマージせず、リリースを出し直す
+- `Cargo.toml` の版を読む `sed` が、action.yml とこのワークフローの 2 か所になる
 - fork からの PR では、結果がコードスキャンに載らない。検査の結果はログに出る
 - 結果がふつう指摘なしなので、指摘がコードスキャンにどう出るかは、このワークフローでは確かめられない(ADR 0018 で、使い捨ての枝で確かめた)
 
 ## 再検討する条件
 
-- action.yml の変更が増え、リリースの前に Action を試したくなったとき
+- 版を上げてからタグを押すまでの間にも、action.yml を試したくなったとき
 - このリポジトリに、エージェントを動かすワークフローを足したとき
