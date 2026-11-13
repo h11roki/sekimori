@@ -1,0 +1,80 @@
+# 0019. このリポジトリのワークフローを、リリースした sekimori の Action で検査し、結果をコードスキャンに送る
+
+- ステータス: 承認
+- 日付: 2026-11-13
+
+## 文脈
+
+- ADR 0017 で Action を作り、v0.1.0 を出した。Action は、自分と同じ ref の `Cargo.toml` の版のリリースを取ってくる
+- PR #10 のレビューで、Action 自身(リリースを取ってきて証明を確かめる手順、`paths` の分け方、終了コードの合わせ方)を CI で動かしていないと指摘された
+- このリポジトリには、エージェントを動かすワークフローが無い。検査の結果は、ふつう指摘なしになる
+- `uses: ./` でこのリポジトリの Action を使うと、`Cargo.toml` の版を上げた PR では、まだ無いリリースを探して失敗する
+- `github/codeql-action/upload-sarif` は、`security-events: write` の権限が要る。fork からの PR では、この権限は与えられない
+
+## 検討した選択肢
+
+1. リリースした版の Action を SHA で固定して自分を検査し、結果を `upload-sarif` で送る。別のジョブで、`uses: ./` の Action を fixture に当てて試す。`Cargo.toml` の版のリリースがまだ無いときは、後者を飛ばす
+2. `uses: ./` だけで自分を検査し、結果を送る
+3. Action を使わず、CI でビルドした CLI で検査する
+
+## 決定
+
+高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
+
+- `.github/workflows/sekimori.yml` を足す。main への push と PR で動く。ワークフローの権限は空にし、ジョブごとに要るものだけを与える
+- 自己検査のジョブ(`self-check`、`contents: read` と `security-events: write`)
+  - `h11roki/sekimori` を v0.1.0 のコミットの SHA で固定して使い、`.github/workflows` を検査する。ADR 0008 の Dependabot が、新しいリリースのタグに合わせて SHA を上げる
+  - `upload-sarif` は `!cancelled()` で動かす。指摘があって検査のステップが失敗しても送り、取り消された実行では送らない
+  - fork からの PR では送らない。条件は「PR ではない、または同じリポジトリからの PR」と書き、後でトリガーを足しても送り続けるようにする
+  - `upload-sarif` の `category` は `sekimori` にする。CodeQL などの他の解析と分けるため
+- Action を試すジョブ(`action`、`contents: read`)
+  - `Cargo.toml` の版のリリースがあるときだけ、このコミットの action.yml を、そのリリースのバイナリで動かす。参照は `uses: ./` ではなく、2026-07 に GitHub が入れた `uses: $/` にする。前のステップが書き換えた作業場所のファイルを読まないため(zizmor 1.32.0 の self-repository の監査)。`paths` に、指摘のある 2 つの fixture のファイルを 2 行で渡す
+  - 検査のステップが失敗すること(指摘あり)、SARIF の結果が 2 つのファイルをちょうど指すこと(2 行に分けて両方を検査したこと)、読めないファイルが無いことを確かめる
+  - リリースが無いとき(版を上げてからタグを押すまで)は、その旨を notice に出して飛ばす。版を読めないときや、gh が「release not found」以外で失敗したときは、ジョブを失敗させる。試さずに通ったように見せないため
+- ADR 0016 の「送るステップに `if: always()` を付ける」と、ADR 0017 の利用者のワークフローの例は、この ADR の `upload-sarif` の条件で置き換える。`always()` は取り消された実行でも送り、fork からの PR では権限が無く失敗するため
+
+利用者のワークフローの例(ADR 0017 の例を置き換える)
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@<SHA> # v7.0.1
+    with:
+      persist-credentials: false
+  - id: sekimori
+    uses: h11roki/sekimori@<SHA> # v0.1.0
+  - if: >-
+      !cancelled()
+      && steps.sekimori.outputs.sarif-file != ''
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: github/codeql-action/upload-sarif@<SHA> # v4.39.3
+    with:
+      sarif_file: ${{ steps.sekimori.outputs.sarif-file }}
+      category: sekimori
+```
+
+## 理由
+
+- 利用者と同じ使い方(リリースを取ってきて、証明を確かめて、SARIF を送る)を毎回通せる
+- action.yml の変更は、リリースの前に、このジョブで指摘ありの場合まで試せる
+- `uses: ./` だけでは、版を上げてからタグを押すまでの間、自己検査が落ちる(選択肢 2)
+- CLI で検査するだけでは、Action の手順を通らない(選択肢 3)
+- 自分のワークフローに sekimori を当て続けると、将来エージェントを動かすワークフローを足したときに、自分で気付ける
+
+## 受け入れたトレードオフ
+
+- 版を上げてからタグを押すまでの間は、action.yml の変更を試せない
+- Action を試すジョブは、リリースしたバイナリを使う。CLI と action.yml を同じ PR で変えると、新しい action.yml を古いバイナリで試すことになる
+- ADR 0008 の Dependabot の cooldown(7 日)と週に 1 回の確認のため、新しい版を出してから自己検査がその版に上がるまで、1 週間から 2 週間かかる
+- Dependabot の PR で `upload-sarif` が送れるかは、まだ確かめていない。GitHub の文書では、ワークフローの `permissions` で Dependabot の PR のトークンの権限を上げられる。最初の Dependabot の PR で確かめる
+- Dependabot は、リリースのジョブが失敗したタグにも PR を出しうる。その PR では、取ってくるリリースが無く自己検査が落ちる。落ちた PR はマージせず、リリースを出し直す
+- `Cargo.toml` の版を読む `sed` が、action.yml とこのワークフローの 2 か所になる
+- fork からの PR では、結果がコードスキャンに載らない。検査の結果はログに出る
+- 結果がふつう指摘なしなので、指摘がコードスキャンにどう出るかは、このワークフローでは確かめられない(ADR 0018 で、使い捨ての枝で確かめた)
+
+## 再検討する条件
+
+- 版を上げてからタグを押すまでの間にも、action.yml を試したくなったとき
+- このリポジトリに、エージェントを動かすワークフローを足したとき
