@@ -118,16 +118,12 @@ fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
 
 #[test]
 fn sarif_merges_steps_that_share_a_place_but_plain_lists_each_step() {
-    let path = Path::new(FIXTURES).join("../findings/shared-token.yml");
-    let plain = Command::new(env!("CARGO_BIN_EXE_sekimori"))
-        .arg(&path)
-        .output()
-        .unwrap();
+    let plain = sekimori(&["../findings/shared-token.yml"]);
     let stdout = String::from_utf8(plain.stdout).unwrap();
     assert_eq!(stdout.matches("[long-lived-token]").count(), 2);
     let sarif = Command::new(env!("CARGO_BIN_EXE_sekimori"))
         .args(["--format", "sarif"])
-        .arg(&path)
+        .arg(Path::new(FIXTURES).join("../findings/shared-token.yml"))
         .output()
         .unwrap();
     assert_eq!(sarif.status.code(), Some(1));
