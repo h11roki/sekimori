@@ -454,7 +454,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: anthropics/claude-code-action@v1
         with:
           claude_args: --allowedTools Bash
@@ -480,7 +480,7 @@ jobs:
             assessment.allowed_tools,
             score(
                 Weight::Full,
-                "claude_args allows `Bash` through --allowedTools; actions/checkout@v6 checks out the PR head with `ref: ${{ github.event.workflow_run.head_branch }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md"
+                "claude_args allows `Bash` through --allowedTools; actions/checkout@v6 checks out the PR head with `ref: ${{ github.event.workflow_run.head_sha }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md"
             )
         );
         assert_eq!(assessment.total_halves(), 5);

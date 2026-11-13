@@ -3,27 +3,34 @@ use github_actions_models::common::expr::LoE;
 use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
-use super::{ExternalEvent, Input, lookup, lookup_in};
+use super::{ExternalEvent, Input, before_comment, lookup, lookup_in, program_name};
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
 const CHECKOUT_ACTION: &str = "actions/checkout";
-const CHECKOUT_TARGETS: [&str; 2] = ["ref", "repository"];
 const WORKSPACE_EXPRESSION: &str = "${{github.workspace}}";
-const HEAD_CONTEXTS: [&str; 4] = [
-    "github.event.pull_request.head.",
+const HEAD_COMMITS: [&str; 3] = [
+    "github.event.pull_request.head.sha",
     "github.event.pull_request.merge_commit_sha",
-    "github.head_ref",
-    "github.event.workflow_run.head_",
+    "github.event.workflow_run.head_sha",
+];
+const HEAD_REPOSITORIES: [&str; 2] = [
+    "github.event.pull_request.head.repo.",
+    "github.event.workflow_run.head_repository.",
 ];
 const WORKFLOW_RUN_PULL_REQUESTS: &str = "github.event.workflow_run.pull_requests[";
+const PULL_REQUEST_HEAD_COMMIT: &str = ".head.sha";
+const PULL_REQUEST_HEAD_REPOSITORY: &str = ".head.repo.";
 const PULL_REFSPEC: &str = "pull/";
 const PULL_REFSPEC_HEADS: [&str; 2] = ["head", "merge"];
 const GIT: &str = "git";
-const GIT_OPTIONS_WITH_VALUE: [&str; 2] = ["-C", "-c"];
-const GIT_SUBCOMMANDS: [&str; 5] = ["checkout", "switch", "fetch", "pull", "reset"];
+const GIT_OPTIONS_WITH_VALUE: [&str; 4] = ["-C", "-c", "--git-dir", "--work-tree"];
+const GIT_FETCH: &str = "fetch";
+const GIT_WORKTREE_COMMANDS: [&str; 4] = ["checkout", "switch", "reset", "pull"];
 const GH_PR_CHECKOUT: [&str; 3] = ["gh", "pr", "checkout"];
-const SHELL_SEPARATORS: &str = ";&|()`";
+const COMMAND_SEPARATORS: &str = ";&|()`";
+const WORD_SEPARATORS: &str = "\"'";
+const ENV_CONTEXT: &str = "env.";
 const GEMINI_TRUST_VARIABLE: &str = "GEMINI_CLI_TRUST_WORKSPACE";
 
 #[derive(Debug)]
@@ -57,20 +64,30 @@ pub fn head_checkout<'w>(
         ),
         Agent::Codex => None,
     }?;
-    let inherited_env = [&step.job.env, &workflow.model.env];
+    let inherited_head_variables = head_variables(&[&step.job.env, &workflow.model.env]);
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
             break;
         }
         match earlier {
-            JobStep::Uses(uses) => {
-                if let Some(checkout) = root_checkout(route, uses) {
-                    head = checkout;
+            JobStep::Uses(uses) => match root_checkout(uses) {
+                RootCheckout::NotRoot => {}
+                RootCheckout::Base => head = None,
+                RootCheckout::Head(key, value) => {
+                    head = Some((
+                        format!(
+                            "{} checks out the PR head with `{key}: {value}`",
+                            uses.uses.raw()
+                        ),
+                        route.with_keys([Component::from("with"), Component::from(key)]),
+                    ));
                 }
-            }
+            },
             JobStep::Run(run) => {
-                if head.is_none() && fetches_head(run, &inherited_env) {
+                let mut variables = head_variables(&[&run.shared.env]);
+                variables.extend(inherited_head_variables.iter().cloned());
+                if head.is_none() && checks_out_head(run, &variables) {
                     head = Some((
                         "a `run` step checks out the PR head".to_string(),
                         route.with_key("run"),
@@ -85,9 +102,15 @@ pub fn head_checkout<'w>(
     })
 }
 
-fn root_checkout<'w>(route: Route<'w>, step: &'w UsesStep) -> Option<Option<(String, Route<'w>)>> {
+enum RootCheckout<'w> {
+    NotRoot,
+    Base,
+    Head(&'w str, &'w str),
+}
+
+fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
     if !is_root_action(&step.uses, CHECKOUT_ACTION) {
-        return None;
+        return RootCheckout::NotRoot;
     }
     let into_root = match lookup_in(&step.with, "path") {
         Input::Missing => true,
@@ -95,22 +118,19 @@ fn root_checkout<'w>(route: Route<'w>, step: &'w UsesStep) -> Option<Option<(Str
         Input::Unreadable => false,
     };
     if !into_root {
-        return None;
+        return RootCheckout::NotRoot;
     }
-    Some(CHECKOUT_TARGETS.into_iter().find_map(|name| {
-        let Input::Text { key, value } = lookup_in(&step.with, name) else {
-            return None;
-        };
-        names_head(&normalized(value)).then(|| {
-            (
-                format!(
-                    "{} checks out the PR head with `{key}: {value}`",
-                    step.uses.raw()
-                ),
-                route.with_keys([Component::from("with"), Component::from(key)]),
-            )
-        })
-    }))
+    let text = |name| match lookup_in(&step.with, name) {
+        Input::Text { key, value } => Some((key, value)),
+        Input::Missing | Input::Unreadable => None,
+    };
+    let repository =
+        text("repository").filter(|(_, value)| names_head_repository(&normalized(value)));
+    let commit = text("ref").filter(|(_, value)| names_head_commit(&normalized(value)));
+    match repository.or(commit) {
+        Some((key, value)) => RootCheckout::Head(key, value),
+        None => RootCheckout::Base,
+    }
 }
 
 fn is_workspace_root(path: &str) -> bool {
@@ -120,54 +140,107 @@ fn is_workspace_root(path: &str) -> bool {
         .all(|component| component.is_empty() || component == ".")
 }
 
-fn fetches_head(step: &RunStep, inherited_env: &[&LoE<Env>]) -> bool {
-    let words: Vec<&str> = step
+fn head_variables(envs: &[&LoE<Env>]) -> Vec<String> {
+    envs.iter()
+        .filter_map(|env| match env {
+            LoE::Literal(env) => Some(env),
+            LoE::Expr(_) => None,
+        })
+        .flatten()
+        .filter(|(_, value)| names_head_commit(&normalized(&value.to_string())))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn checks_out_head(step: &RunStep, head_variables: &[String]) -> bool {
+    let mut fetched_head = false;
+    let commands = step
         .run
-        .split(|c: char| c.is_whitespace() || SHELL_SEPARATORS.contains(c))
-        .filter(|word| !word.is_empty())
-        .collect();
-    let gh_pr_checkout = words
-        .windows(GH_PR_CHECKOUT.len())
-        .any(|window| window == GH_PR_CHECKOUT);
-    let git_fetch = (0..words.len()).any(|start| {
-        if program_name(words[start]) != GIT {
-            return false;
+        .lines()
+        .map(before_comment)
+        .flat_map(|line| line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
+    for command in commands {
+        let words: Vec<&str> = command
+            .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(c))
+            .filter(|word| !word.is_empty())
+            .collect();
+        if words
+            .windows(GH_PR_CHECKOUT.len())
+            .any(|window| window == GH_PR_CHECKOUT)
+        {
+            return true;
         }
-        let mut next = start + 1;
-        while let Some(word) = words.get(next).filter(|word| word.starts_with('-')) {
-            next += if GIT_OPTIONS_WITH_VALUE.contains(word) {
-                2
-            } else {
-                1
-            };
+        let Some((subcommand, arguments)) = git_subcommand(&words) else {
+            continue;
+        };
+        let names_head = names_head_commit(&normalized(&arguments.concat()))
+            || arguments
+                .iter()
+                .any(|argument| refers_to_head_variable(argument, head_variables));
+        if GIT_WORKTREE_COMMANDS.contains(&subcommand) && (names_head || fetched_head) {
+            return true;
         }
-        words
-            .get(next)
-            .is_some_and(|subcommand| GIT_SUBCOMMANDS.contains(subcommand))
-    });
-    gh_pr_checkout
-        || (git_fetch
-            && std::iter::once(&step.shared.env)
-                .chain(inherited_env.iter().copied())
-                .filter_map(|env| match env {
-                    LoE::Literal(env) => Some(env),
-                    LoE::Expr(_) => None,
-                })
-                .flat_map(|env| env.values().map(|value| value.to_string()))
-                .chain(std::iter::once(step.run.clone()))
-                .any(|text| names_head(&normalized(&text))))
+        fetched_head |= subcommand == GIT_FETCH && names_head;
+    }
+    false
 }
 
-fn program_name(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
+    let start = words.iter().position(|word| program_name(word) == GIT)?;
+    let mut next = start + 1;
+    while let Some(word) = words.get(next).filter(|word| word.starts_with('-')) {
+        next += if GIT_OPTIONS_WITH_VALUE.contains(word) {
+            2
+        } else {
+            1
+        };
+    }
+    let subcommand = words.get(next)?;
+    Some((subcommand, words[next + 1..].to_vec()))
 }
 
-fn names_head(normalized: &str) -> bool {
-    HEAD_CONTEXTS
+fn refers_to_head_variable(argument: &str, head_variables: &[String]) -> bool {
+    head_variables.iter().any(|name| {
+        [format!("${name}"), format!("${{{name}}}")]
+            .iter()
+            .any(|reference| ends_word(argument, reference))
+            || ends_word(
+                &normalized(argument),
+                &format!("{ENV_CONTEXT}{}", name.to_lowercase()),
+            )
+    })
+}
+
+fn ends_word(text: &str, reference: &str) -> bool {
+    text.match_indices(reference).any(|(start, _)| {
+        !text[start + reference.len()..]
+            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn names_head_commit(normalized: &str) -> bool {
+    HEAD_COMMITS
         .iter()
         .any(|context| normalized.contains(context))
-        || followed_by(normalized, WORKFLOW_RUN_PULL_REQUESTS, ']', &[".head."])
+        || followed_by(
+            normalized,
+            WORKFLOW_RUN_PULL_REQUESTS,
+            ']',
+            &[PULL_REQUEST_HEAD_COMMIT],
+        )
         || followed_by(normalized, PULL_REFSPEC, '/', &PULL_REFSPEC_HEADS)
+}
+
+fn names_head_repository(normalized: &str) -> bool {
+    HEAD_REPOSITORIES
+        .iter()
+        .any(|context| normalized.contains(context))
+        || followed_by(
+            normalized,
+            WORKFLOW_RUN_PULL_REQUESTS,
+            ']',
+            &[PULL_REQUEST_HEAD_REPOSITORY],
+        )
 }
 
 fn followed_by(text: &str, prefix: &str, separator: char, suffixes: &[&str]) -> bool {
@@ -255,11 +328,11 @@ jobs:
                 "workflow_run",
                 "      - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
 ",
             ),
             Some(
-                "8: actions/checkout@v6 checks out the PR head with `ref: ${{ github.event.workflow_run.head_branch }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md"
+                "8: actions/checkout@v6 checks out the PR head with `ref: ${{ github.event.workflow_run.head_sha }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md"
                     .to_string()
             )
         );
@@ -321,7 +394,7 @@ jobs:
         let cases = [
             "repository: ${{ github.event.workflow_run.head_repository.full_name }}",
             "ref: refs/pull/${{ github.event.workflow_run.pull_requests[0].number }}/merge",
-            "ref: ${{ github.head_ref }}\n          path: ./",
+            "ref: ${{ github.event.pull_request.head.sha }}\n          path: ./",
             "REF: ${{ GitHub.Event.Workflow_Run.Head_SHA }}",
         ];
         for with in cases {
@@ -405,7 +478,7 @@ jobs:
                 "workflow_run",
                 "      - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
       - run: git checkout -b \"fix-$HEAD\"
         env:
           HEAD: ${{ github.event.workflow_run.head_branch }}
@@ -426,7 +499,7 @@ jobs:
   agent:
     runs-on: ubuntu-latest
     steps:
-      - run: git -C . -c protocol.version=2 fetch origin \"$HEAD_SHA\"
+      - run: git -C . -c protocol.version=2 fetch origin \"$HEAD_SHA\" && git checkout FETCH_HEAD
       - uses: anthropics/claude-code-action@v1
 ",
         );
@@ -436,6 +509,61 @@ jobs:
           checkout ${{ github.event.workflow_run.head_sha }}
 ";
         assert_eq!(claude_after("workflow_run", joined), None);
+    }
+
+    #[test]
+    fn a_branch_name_counts_only_with_the_head_repository() {
+        let branch_only = "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+";
+        assert_eq!(claude_after("workflow_run", branch_only), None);
+        let with_repository = "      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_branch }}
+";
+        assert_eq!(
+            claude_after("workflow_run", with_repository),
+            Some("8: actions/checkout@v6 checks out the PR head with `repository: ${{ github.event.workflow_run.head_repository.full_name }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md".to_string())
+        );
+        let run_branch = "      - run: git checkout \"$BRANCH\"
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+";
+        assert_eq!(claude_after("workflow_run", run_branch), None);
+    }
+
+    #[test]
+    fn fetching_without_changing_the_worktree_or_in_a_comment_is_not_a_checkout() {
+        let cases = [
+            "run: git fetch origin pull/${{ env.PR }}/head:pr && git diff main...pr",
+            "run: |\n          # git checkout ${{ github.event.workflow_run.head_sha }}\n          make",
+            "run: echo ${{ github.event.workflow_run.head_sha }}; git fetch --tags",
+        ];
+        for run in cases {
+            let steps = format!("      - {run}\n");
+            assert_eq!(claude_after("workflow_run", &steps), None, "{run}");
+        }
+    }
+
+    #[test]
+    fn quoted_commands_and_git_options_with_values_are_read() {
+        let cases = [
+            "run: bash -c \"gh pr checkout ${{ github.event.issue.number }}\"",
+            "run: git --git-dir .git --work-tree . checkout ${{ github.event.workflow_run.head_sha }}",
+            "run: git checkout ${{ env.HEAD }}\n        env:\n          HEAD: ${{ github.event.workflow_run.head_sha }}",
+        ];
+        for run in cases {
+            let steps = format!("      - {run}\n");
+            assert!(claude_after("workflow_run", &steps).is_some(), "{run}");
+        }
+        let longer_name = "      - run: git checkout \"$HEAD_OLD\"
+        env:
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+          HEAD_OLD: main
+";
+        assert_eq!(claude_after("workflow_run", longer_name), None);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use json_comments::CommentSettings;
 use serde_json::Value;
 use yamlpath::Route;
 
-use super::{Input, input, input_route, lookup};
+use super::{Input, before_comment, input, input_route, lookup, program_name};
 use crate::agent::{Agent, AgentStep};
 
 const CLAUDE_ALLOWED_TOOLS_FLAGS: [&str; 2] = ["--allowedTools", "--allowed-tools"];
@@ -227,29 +227,6 @@ impl<'w> ClaudePermissions<'w> {
     }
 }
 
-fn before_comment(text: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut previous = ' ';
-    for (index, c) in text.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if c == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else {
-            match quote {
-                Some(open) if c == open => quote = None,
-                Some(_) => {}
-                None if c == '\'' || c == '"' => quote = Some(c),
-                None if c == '#' && previous.is_whitespace() => return &text[..index],
-                None => {}
-            }
-        }
-        previous = c;
-    }
-    text
-}
-
 fn flag_values<'a>(args: &mut std::iter::Peekable<std::slice::Iter<'a, String>>) -> Vec<&'a str> {
     let mut values = Vec::new();
     while let Some(next) = args.next_if(|next| !next.starts_with("--")) {
@@ -299,8 +276,7 @@ fn opens_any_command(prefix: &str) -> bool {
     if matches_every_command(program) {
         return true;
     }
-    let name = program.rsplit('/').next().unwrap_or(program);
-    let name = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let name = program_name(program).trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     WRAPPERS.contains(&name)
         || (INTERPRETERS.contains(&name) && words.all(|word| word.starts_with('-')))
 }

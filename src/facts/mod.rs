@@ -47,3 +47,30 @@ fn input_route<'w>(step: &AgentStep<'w>, key: &'w str) -> Route<'w> {
     step.route
         .with_keys([Component::from("with"), Component::from(key)])
 }
+
+fn before_comment(text: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous = ' ';
+    for (index, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else {
+            match quote {
+                Some(open) if c == open => quote = None,
+                Some(_) => {}
+                None if c == '\'' || c == '"' => quote = Some(c),
+                None if c == '#' && previous.is_whitespace() => return &text[..index],
+                None => {}
+            }
+        }
+        previous = c;
+    }
+    text
+}
+
+fn program_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
