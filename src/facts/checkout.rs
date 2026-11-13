@@ -22,6 +22,13 @@ const BASE_REFERENCES: [&str; 8] = [
     "github.event.workflow_run.head_branch",
     "github.event.repository.default_branch",
 ];
+const PROMPT_INPUT: &str = "prompt";
+const BASE_WORKSPACE_EVENTS: [ExternalEvent; 4] = [
+    ExternalEvent::Issues,
+    ExternalEvent::IssueComment,
+    ExternalEvent::Discussion,
+    ExternalEvent::DiscussionComment,
+];
 const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const WILDCARD: &str = "*";
@@ -68,27 +75,6 @@ pub fn head_checkout<'w>(
     step: &AgentStep<'w>,
     events: &[ExternalEvent],
 ) -> Option<HeadCheckout<'w>> {
-    let loads = match step.agent {
-        Agent::ClaudeCode => events.contains(&ExternalEvent::WorkflowRun).then_some(
-            "on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md",
-        ),
-        Agent::GeminiCli => gemini_loads_workspace_settings(workflow, step).then_some(
-            "with no `settings` and GEMINI_CLI_TRUST_WORKSPACE=true, Gemini CLI loads the PR's .gemini/settings.json",
-        ),
-        Agent::Codex => None,
-    }?;
-    let HeadCheckout { setting, route } = pr_head_before(workflow, step, events)?;
-    Some(HeadCheckout {
-        setting: format!("{setting}, and {loads}"),
-        route,
-    })
-}
-
-pub fn pr_head_before<'w>(
-    workflow: &'w Workflow,
-    step: &AgentStep<'w>,
-    events: &[ExternalEvent],
-) -> Option<HeadCheckout<'w>> {
     let privileged = events.iter().any(|event| {
         matches!(
             event,
@@ -97,9 +83,15 @@ pub fn pr_head_before<'w>(
                 | ExternalEvent::IssueComment
         )
     });
-    if !privileged {
-        return None;
-    }
+    let loads = match step.agent {
+        Agent::ClaudeCode => events.contains(&ExternalEvent::WorkflowRun).then_some(
+            "on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md",
+        ),
+        Agent::GeminiCli => (privileged && gemini_loads_workspace_settings(workflow, step)).then_some(
+            "with no `settings` and GEMINI_CLI_TRUST_WORKSPACE=true, Gemini CLI loads the PR's .gemini/settings.json",
+        ),
+        Agent::Codex => None,
+    }?;
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
@@ -140,7 +132,58 @@ pub fn pr_head_before<'w>(
             }
         }
     }
-    head.map(|(setting, route)| HeadCheckout { setting, route })
+    head.map(|(checkout, route)| HeadCheckout {
+        setting: format!("{checkout}, and {loads}"),
+        route,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum OutsideText {
+    Prompt,
+    PrHead,
+    Nothing,
+}
+
+pub fn outside_text(
+    workflow: &Workflow,
+    step: &AgentStep,
+    events: &[ExternalEvent],
+) -> OutsideText {
+    let fixed_prompt = step.agent == Agent::GeminiCli
+        && match lookup(step, PROMPT_INPUT) {
+            Input::Missing => true,
+            Input::Text { value, .. } => value.trim().is_empty(),
+            Input::Unreadable => false,
+        };
+    if !fixed_prompt
+        || !events
+            .iter()
+            .all(|event| BASE_WORKSPACE_EVENTS.contains(event))
+    {
+        return OutsideText::Prompt;
+    }
+    let head_anywhere = job_steps(step.job_id, step.job)
+        .into_iter()
+        .take_while(|(index, ..)| *index < step.index)
+        .any(|(_, route, earlier)| match earlier {
+            JobStep::Uses(uses) => matches!(checkout_of(uses), RootCheckout::Head(..)),
+            JobStep::Run(run) => checks_out_head(
+                run,
+                &head_variables(&nearest_env(
+                    workflow,
+                    step.job_id,
+                    step.job,
+                    &run.shared.env,
+                    &route,
+                )),
+            ),
+        });
+    if head_anywhere {
+        OutsideText::PrHead
+    } else {
+        OutsideText::Nothing
+    }
 }
 
 enum RootCheckout<'w> {
@@ -150,15 +193,20 @@ enum RootCheckout<'w> {
 }
 
 fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
-    if !is_root_action(&step.uses, CHECKOUT_ACTION) {
-        return RootCheckout::Untouched;
-    }
     let into_root = match lookup_in(&step.with, "path") {
         Input::Missing => true,
         Input::Text { value, .. } => is_workspace_root(value),
         Input::Unreadable => false,
     };
-    if !into_root {
+    if into_root {
+        checkout_of(step)
+    } else {
+        RootCheckout::Untouched
+    }
+}
+
+fn checkout_of(step: &UsesStep) -> RootCheckout<'_> {
+    if !is_root_action(&step.uses, CHECKOUT_ACTION) {
         return RootCheckout::Untouched;
     }
     let text = |name| match lookup_in(&step.with, name) {
