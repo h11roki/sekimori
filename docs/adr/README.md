@@ -57,3 +57,4 @@
 | [0016](0016-sarif-output.md) | SARIF は `--format sarif` で 1 つの run として出し、重さは結果の level で表す | 承認(結果のまとめ方と message の形と重複の見込みは 0018 で置き換え) |
 | [0017](0017-action-distribution.md) | Action は、Releases に置いたビルド済みのバイナリを、来歴の証明を確かめてから取ってくる composite Action にする | 承認 |
 | [0018](0018-sarif-merge-same-place.md) | SARIF では、同じ規則と位置の結果を 1 つにまとめ、重い方の level と全ての内訳を書く | 承認 |
+| [0019](0019-self-check.md) | このリポジトリのワークフローを、リリースした sekimori の Action で検査し、結果をコードスキャンに送る | 承認 |
