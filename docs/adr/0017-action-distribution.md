@@ -15,7 +15,7 @@
 - GitHub の artifact attestations(actions/attest、2026-11-13 に v4.2.2 の action.yml と README で確かめた)
   - ビルドしたファイルに、どのリポジトリのどのワークフローのどの ref でビルドしたかの来歴(SLSA build provenance)を署名して付ける。公開リポジトリでは Sigstore の公開のインスタンスで署名し、どの GitHub のプランでも使える
   - `id-token: write` と `attestations: write` の権限が要る。`artifact-metadata: write` はコンテナのレジストリに記録を書くときだけ要る
-  - 確かめる側は、`gh attestation verify` に `--repo`、`--signer-workflow`、`--source-ref` を渡して、署名したワークフローと ref まで縛れる。gh はどのランナーにも入っている
+  - 確かめる側は、`gh attestation verify` に `--repo`、`--signer-workflow`、`--source-ref` を渡して、署名したワークフローと ref まで縛れる。gh は GitHub のホストするランナーに入っている
 - 高橋さんは、選択肢を出したところ「推奨のやり方でお願い」と答え、公開まで進めることを認めた(2026-11-13)
 
 ## 検討した選択肢
@@ -41,11 +41,11 @@
 | `macos-latest` | `aarch64-apple-darwin` | `sekimori-aarch64-apple-darwin` |
 | `windows-latest` | `x86_64-pc-windows-msvc` | `sekimori-x86_64-pc-windows-msvc.exe` |
 
-- Linux は musl で静的にリンクし、ランナーの glibc の版に縛られないようにする。yamlpath が使う tree-sitter は C のコードを含むので、musl-tools を入れて `musl-gcc` でコンパイルする
+- Linux は musl で静的にリンクし、ランナーの glibc の版に縛られないようにする。yamlpath が使う tree-sitter は C のコードを含むので、musl-tools を入れて `musl-gcc` でコンパイルする。Windows も `+crt-static` で C の実行時ライブラリを静的にリンクし、VC++ の再頒布パッケージの無い環境でも動くようにする
 - バイナリは圧縮せずにそのまま、ワークフローの artifact に上げる
-- ビルドのジョブは、release.yml、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` を変える PR でも動かす。タグを押す前に、4 つの環境でビルドできるかを確かめるため
+- ビルドのジョブは、全ての PR でも動かす。ソースの変更で特定の環境だけが壊れることがあり、タグを押す前に、4 つの環境でビルドできるかを確かめるため
+- タグのときは、ビルドしたバイナリの `--version` がタグ(`v` + 版)と一致するかを確かめる。ずれていれば、そのタグのリリースを作らない。Action は `Cargo.toml` の版からリリースを探すので、ずれると取ってこられないため
 - タグのときだけ、全てのビルドが済んでから、リリースのジョブが動く。このジョブはコンパイルしたコードを動かさない
-  - タグが `Cargo.toml` の `[package]` の版(`v` + 版)と一致するかを確かめる。版は Action と同じ `sed` で読む
   - 4 つのバイナリを集めて、actions/attest で来歴の証明を付ける
   - 4 つを添えてリリースを作る。1 つでもビルドが失敗すれば、リリースは作られない
 - 外部の Action は、checkout、upload-artifact、download-artifact、actions/attest の 4 つで、どれも GitHub の公式のものを SHA で固定する(ADR 0008)。リリースの操作は gh で行う
@@ -55,8 +55,9 @@ Action(リポジトリの根の `action.yml`)
 - composite Action にする。入力は 2 つ
   - `paths`: 検査するファイルかディレクトリを、空白か改行で区切ったもの。既定は `.github/workflows`
   - `token`: リリースを取ってきて、証明を確かめるためのトークン。既定は `github.token`
-- 出力は `sarif-file`。SARIF を書いたファイルのパス。同じジョブで 2 回使っても上書きしないよう、ファイルごとに名前を変える
-- 使うバイナリの版は、Action と同じ ref にある `Cargo.toml` の `[package]` の版から決める。Action を `v0.1.0` のタグ(か、その SHA)で使えば、`v0.1.0` のバイナリを使う。版を書く場所を `Cargo.toml` の 1 つに保つため
+- 出力は `sarif-file`。SARIF を書いたファイルのパス。同じジョブで 2 回使っても上書きしないよう、使うたびに別の一時ディレクトリを作り、その中の `sekimori.sarif` に書く
+- `paths` は `--` の後に渡し、`-` で始まるパスをオプションとして読まない
+- 使うバイナリの版は、Action と同じ ref にある `Cargo.toml` の `[package]` の版から決める。読めなければ、その旨のエラーで止める。Action を `v0.1.0` のタグ(か、その SHA)で使えば、`v0.1.0` のバイナリを使う。版を書く場所を `Cargo.toml` の 1 つに保つため
 - gh が無いランナーでは、その旨のエラーで止める
 - バイナリを取ってきたら、`gh attestation verify` で、このリポジトリの release.yml が `refs/tags/v<版>` でビルドしたものかを確かめる。合わなければ動かさずに失敗する
 - 平文の結果をログに出し、SARIF をランナーの一時ディレクトリに書く。終了コードは ADR 0010 のとおりで、指摘があれば失敗する。2 回の検査の終了コードのうち、大きい方を返す。SARIF を書けなかったことを隠さないため
@@ -105,10 +106,11 @@ steps:
 - `cargo install sekimori` では入れられない。手元で使うには、Releases からバイナリを取ってくるか、ソースからビルドする
 - Intel の macOS と ARM の Windows のランナーでは動かない。対応の無い環境では、エラーで止める
 - Action を main のような、まだリリースしていない版の ref で使うと、`Cargo.toml` の版のリリースが無いか、古いバイナリを使う
-- 平文と SARIF を出すために、検査を 2 回走らせる。ワークフローのファイルは数十なので、時間は問題にならない
+- 平文と SARIF を出すために、検査を 2 回走らせる。ワークフローのファイルは数十なので、時間は問題にならない。読めないファイルのエラーは、ログに 2 回出る
 - 証明を確かめるのに、gh とトークンと GitHub の API への接続が要る。gh は GitHub のホストするランナーには入っているが、自前のランナーでは入れる必要がある。GitHub Enterprise Server では、github.com のリリースを取ってこられないことがある
 - 証明が縛るのはタグの名前で、コミットではない。このリポジトリに書き込める人は、タグを別のコミットに付け替えてワークフローを動かせば、正しい証明を持つ別のバイナリを作れる。ただし、そういう人は main にも書き込めるので、守れる範囲は変わらない
 - リリースを作る途中で失敗すると、半端なリリースとタグが残る。消してから、タグを押し直す
+- 全ての PR で 4 つの環境のビルドが走り、CI の時間が増える。公開リポジトリなので費用はかからない
 
 ## 再検討する条件
 
