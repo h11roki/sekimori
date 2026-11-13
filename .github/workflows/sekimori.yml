@@ -49,7 +49,7 @@ jobs:
           fi
           if response=$(gh release view "v$version" --repo "$GITHUB_REPOSITORY" 2>&1); then
             echo "released=true" >> "$GITHUB_OUTPUT"
-          elif [ "$response" = "release not found" ]; then
+          elif grep -qx "release not found" <<< "$response"; then
             echo "::notice::v$version is not released yet, so the action in this commit is not run"
           else
             echo "$response"
@@ -69,6 +69,5 @@ jobs:
           SARIF: ${{ steps.findings.outputs.sarif-file }}
         run: |
           test "$OUTCOME" = failure
-          jq -e '.runs[0].results | length > 0' "$SARIF"
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
