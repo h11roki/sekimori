@@ -147,3 +147,11 @@ fn a_workflow_run_upstream_is_looked_up_among_the_files_checked_together() {
         "{together}"
     );
 }
+
+#[test]
+fn an_unreadable_file_beside_the_upstream_keeps_the_workflow_run_open() {
+    let output = sekimori(&["../upstream-broken"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[unrestricted-trigger]"), "{stdout}");
+}
