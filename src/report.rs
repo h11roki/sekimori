@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
+use crate::rules::{Finding, HALVES_PER_POINT, Level, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
 const LABEL_WIDTH: usize = 21;
@@ -33,8 +33,54 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     )
 }
 
-pub fn sarif_result(workflow: &Workflow, uri: &str, finding: &Finding) -> Value {
-    let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));
+struct SarifPlace {
+    rule: Rule,
+    position: (usize, usize),
+    level: Level,
+    breakdowns: Vec<String>,
+}
+
+pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Vec<Value> {
+    let mut places: Vec<SarifPlace> = Vec::new();
+    for finding in findings {
+        let position = workflow.position(&finding.hit.route).unwrap_or((1, 1));
+        let breakdown = sarif_breakdown(finding);
+        match places
+            .iter_mut()
+            .find(|place| place.rule == finding.hit.rule && place.position == position)
+        {
+            Some(place) => {
+                place.level = place.level.max(finding.level);
+                place.breakdowns.push(breakdown);
+            }
+            None => places.push(SarifPlace {
+                rule: finding.hit.rule,
+                position,
+                level: finding.level,
+                breakdowns: vec![breakdown],
+            }),
+        }
+    }
+    places
+        .into_iter()
+        .map(|place| {
+            let (line, column) = place.position;
+            json!({
+                "ruleId": place.rule.id(),
+                "level": place.level.to_string(),
+                "message": { "text": place.breakdowns.join("\n\n") },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": uri },
+                        "region": { "startLine": line, "startColumn": column },
+                    },
+                }],
+            })
+        })
+        .collect()
+}
+
+fn sarif_breakdown(finding: &Finding) -> String {
     let rows: Vec<String> = axis_rows(finding)
         .into_iter()
         .map(|(label, value, reason)| match reason {
@@ -42,17 +88,7 @@ pub fn sarif_result(workflow: &Workflow, uri: &str, finding: &Finding) -> Value 
             None => format!("{label}: {value}"),
         })
         .collect();
-    json!({
-        "ruleId": finding.hit.rule.id(),
-        "level": finding.level.to_string(),
-        "message": { "text": format!("{}\n{}", headline(finding), rows.join("\n")) },
-        "locations": [{
-            "physicalLocation": {
-                "artifactLocation": { "uri": uri },
-                "region": { "startLine": line, "startColumn": column },
-            },
-        }],
-    })
+    format!("{}\n{}", headline(finding), rows.join("\n"))
 }
 
 pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
@@ -179,7 +215,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::rules::assess;
+    use crate::rules::{Assessment, assess};
 
     #[test]
     fn a_finding_names_its_place_rule_step_and_every_axis() {
@@ -240,7 +276,9 @@ jobs:
         .unwrap();
         let assessments = assess(&workflow);
         let findings = assessments[0].findings();
-        let result = sarif_result(&workflow, ".github/workflows/claude.yml", &findings[0]);
+        let results = sarif_results(&workflow, ".github/workflows/claude.yml", &findings);
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
         assert_eq!(result["ruleId"], "unrestricted-trigger");
         assert_eq!(result["level"], "warning");
         let location = &result["locations"][0]["physicalLocation"];
@@ -258,6 +296,60 @@ allowed tools: 0
 permissions/secrets: 1 (no permissions are set, so GITHUB_TOKEN gets the repository default)
 total: 2 of 3"
         );
+    }
+
+    #[test]
+    fn sarif_results_at_the_same_place_merge_into_the_heaviest_level() {
+        let workflow = Workflow::parse(
+            Path::new("codex.yml"),
+            "on: issue_comment
+env:
+  GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          safety-strategy: unsafe
+      - uses: openai/codex-action@v1
+        with:
+          allow-users: '*'
+          safety-strategy: unsafe
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let findings: Vec<Finding> = assessments.iter().flat_map(Assessment::findings).collect();
+        assert_eq!(findings.len(), 5);
+        let results = sarif_results(&workflow, "codex.yml", &findings);
+        let summary: Vec<(&str, &str, u64)> = results
+            .iter()
+            .map(|result| {
+                (
+                    result["ruleId"].as_str().unwrap(),
+                    result["level"].as_str().unwrap(),
+                    result["locations"][0]["physicalLocation"]["region"]["startLine"]
+                        .as_u64()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("broad-tools", "warning", 10),
+                ("long-lived-token", "error", 3),
+                ("unrestricted-trigger", "error", 13),
+                ("broad-tools", "error", 14),
+            ]
+        );
+        let merged = results[1]["message"]["text"].as_str().unwrap();
+        let breakdowns: Vec<&str> = merged.split("\n\n").collect();
+        assert_eq!(breakdowns.len(), 2);
+        assert!(breakdowns[0].ends_with("total: 2.5 of 3"));
+        assert!(breakdowns[1].ends_with("total: 3 of 3"));
     }
 
     #[test]

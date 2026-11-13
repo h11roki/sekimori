@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use sekimori::report::{artifact_uri, plain, sarif_log, sarif_result};
-use sekimori::rules::{Assessment, assess};
+use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results};
+use sekimori::rules::{Assessment, Finding, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
 const EXIT_FINDINGS: u8 = 1;
@@ -41,20 +41,22 @@ fn main() -> ExitCode {
             }
         };
         let assessments = assess(&workflow);
-        let mut uri = None;
-        for finding in assessments.iter().flat_map(Assessment::findings) {
-            found = true;
-            match cli.format {
-                Format::Plain => {
-                    if let Err(error) = stdout.write_all(plain(&workflow, &finding).as_bytes()) {
+        let findings: Vec<Finding> = assessments.iter().flat_map(Assessment::findings).collect();
+        if findings.is_empty() {
+            continue;
+        }
+        found = true;
+        match cli.format {
+            Format::Plain => {
+                for finding in &findings {
+                    if let Err(error) = stdout.write_all(plain(&workflow, finding).as_bytes()) {
                         return write_failure(&error);
                     }
                 }
-                Format::Sarif => {
-                    let uri =
-                        uri.get_or_insert_with(|| artifact_uri(&repository_path(&workflow.path)));
-                    results.push(sarif_result(&workflow, uri, &finding));
-                }
+            }
+            Format::Sarif => {
+                let uri = artifact_uri(&repository_path(&workflow.path));
+                results.extend(sarif_results(&workflow, &uri, &findings));
             }
         }
     }
