@@ -35,6 +35,10 @@ runs:
           exit 1
         fi
         version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml")
+        if [ -z "$version" ]; then
+          echo "::error::could not read the sekimori version from $GITHUB_ACTION_PATH/Cargo.toml"
+          exit 1
+        fi
         case "$RUNNER_OS/$RUNNER_ARCH" in
           Linux/X64) asset=sekimori-x86_64-unknown-linux-musl ;;
           Linux/ARM64) asset=sekimori-aarch64-unknown-linux-musl ;;
@@ -60,10 +64,10 @@ runs:
         SEKIMORI_PATHS: ${{ inputs.paths }}
       run: |
         read -r -d '' -a paths <<< "$SEKIMORI_PATHS" || true
-        sarif=$(mktemp "$RUNNER_TEMP/sekimori-sarif-XXXXXX")
+        sarif="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")/sekimori.sarif"
         status=0
-        "$SEKIMORI" "${paths[@]}" || status=$?
+        "$SEKIMORI" -- "${paths[@]}" || status=$?
         sarif_status=0
-        "$SEKIMORI" --format sarif "${paths[@]}" > "$sarif" || sarif_status=$?
+        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$sarif" || sarif_status=$?
         echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
         exit $(( status > sarif_status ? status : sarif_status ))
