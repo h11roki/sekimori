@@ -55,3 +55,4 @@
 | [0014](0014-pr-head-checkout.md) | PR の head の checkout は、エージェントが PR の設定を読み込むときだけ当てる | 承認 |
 | [0015](0015-tokens-and-secrets.md) | 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る | 承認 |
 | [0016](0016-sarif-output.md) | SARIF は `--format sarif` で 1 つの run として出し、重さは結果の level で表す | 承認 |
+| [0017](0017-action-distribution.md) | Action は、Releases に置いたビルド済みのバイナリを、来歴の証明を確かめてから取ってくる composite Action にする | 承認 |
