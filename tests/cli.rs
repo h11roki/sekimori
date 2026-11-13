@@ -10,6 +10,14 @@ fn sekimori(paths: &[&str]) -> Output {
         .unwrap()
 }
 
+fn sekimori_sarif(paths: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "sarif"])
+        .args(paths.iter().map(|path| Path::new(FIXTURES).join(path)))
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn readable_workflows_exit_with_zero() {
     let output = sekimori(&["ci.yml", "release.yaml"]);
@@ -91,15 +99,7 @@ fn a_directory_without_workflows_exits_with_two() {
 
 #[test]
 fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
-    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
-        .args(["--format", "sarif"])
-        .args(
-            ["../findings/open-codex.yml", "broken.yml"]
-                .iter()
-                .map(|path| Path::new(FIXTURES).join(path)),
-        )
-        .output()
-        .unwrap();
+    let output = sekimori_sarif(&["../findings/open-codex.yml", "broken.yml"]);
     assert_eq!(output.status.code(), Some(2));
     let log: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let run = &log["runs"][0];
@@ -114,4 +114,22 @@ fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
         "{uri}"
     );
     assert_eq!(run["invocations"][0]["executionSuccessful"], false);
+}
+
+#[test]
+fn sarif_merges_steps_that_share_a_place_but_plain_lists_each_step() {
+    let plain = sekimori(&["../findings/shared-token.yml"]);
+    let stdout = String::from_utf8(plain.stdout).unwrap();
+    assert_eq!(stdout.matches("[long-lived-token]").count(), 2);
+    let sarif = sekimori_sarif(&["../findings/shared-token.yml"]);
+    assert_eq!(sarif.status.code(), Some(1));
+    let log: serde_json::Value = serde_json::from_slice(&sarif.stdout).unwrap();
+    let tokens: Vec<&serde_json::Value> = log["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|result| result["ruleId"] == "long-lived-token")
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["level"], "error");
 }

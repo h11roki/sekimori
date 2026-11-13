@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use serde_json::{Value, json};
 
 use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
@@ -33,26 +35,69 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     )
 }
 
-pub fn sarif_result(workflow: &Workflow, uri: &str, finding: &Finding) -> Value {
-    let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));
-    let rows: Vec<String> = axis_rows(finding)
+struct SamePlace<'f, 'a, 'w> {
+    rule: Rule,
+    position: Option<(usize, usize)>,
+    findings: Vec<&'f Finding<'a, 'w>>,
+}
+
+pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Vec<Value> {
+    let mut places: Vec<SamePlace> = Vec::new();
+    for finding in findings {
+        let position = workflow.position(&finding.hit.route);
+        let same_place = places.iter_mut().find(|place| {
+            place.rule == finding.hit.rule && position.is_some() && place.position == position
+        });
+        match same_place {
+            Some(place) => place.findings.push(finding),
+            None => places.push(SamePlace {
+                rule: finding.hit.rule,
+                position,
+                findings: vec![finding],
+            }),
+        }
+    }
+    places
         .into_iter()
-        .map(|(label, value, reason)| match reason {
-            Some(reason) => format!("{label}: {value} ({reason})"),
-            None => format!("{label}: {value}"),
+        .map(|mut place| {
+            place
+                .findings
+                .sort_by_key(|finding| Reverse(finding.assessment.total_halves()));
+            let breakdowns: Vec<String> = place
+                .findings
+                .iter()
+                .map(|finding| sarif_breakdown(workflow, finding))
+                .collect();
+            let (line, column) = place.position.unwrap_or((1, 1));
+            json!({
+                "ruleId": place.rule.id(),
+                "level": place.findings[0].level.to_string(),
+                "message": { "text": breakdowns.join("\n\n") },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": uri },
+                        "region": { "startLine": line, "startColumn": column },
+                    },
+                }],
+            })
         })
-        .collect();
-    json!({
-        "ruleId": finding.hit.rule.id(),
-        "level": finding.level.to_string(),
-        "message": { "text": format!("{}\n{}", headline(finding), rows.join("\n")) },
-        "locations": [{
-            "physicalLocation": {
-                "artifactLocation": { "uri": uri },
-                "region": { "startLine": line, "startColumn": column },
-            },
-        }],
-    })
+        .collect()
+}
+
+fn sarif_breakdown(workflow: &Workflow, finding: &Finding) -> String {
+    let mut lines = vec![headline(finding)];
+    if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
+        lines.push(format!("agent step: line {line}"));
+    }
+    lines.extend(
+        axis_rows(finding)
+            .into_iter()
+            .map(|(label, value, reason)| match reason {
+                Some(reason) => format!("{label}: {value} ({reason})"),
+                None => format!("{label}: {value}"),
+            }),
+    );
+    lines.join("\n")
 }
 
 pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
@@ -179,7 +224,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::rules::assess;
+    use crate::rules::{Assessment, assess};
 
     #[test]
     fn a_finding_names_its_place_rule_step_and_every_axis() {
@@ -240,7 +285,9 @@ jobs:
         .unwrap();
         let assessments = assess(&workflow);
         let findings = assessments[0].findings();
-        let result = sarif_result(&workflow, ".github/workflows/claude.yml", &findings[0]);
+        let results = sarif_results(&workflow, ".github/workflows/claude.yml", &findings);
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
         assert_eq!(result["ruleId"], "unrestricted-trigger");
         assert_eq!(result["level"], "warning");
         let location = &result["locations"][0]["physicalLocation"];
@@ -253,11 +300,53 @@ jobs:
         assert_eq!(
             result["message"]["text"],
             "anthropics/claude-code-action@v1 in job `claude` can be started without write access
+agent step: line 6
 who can trigger: 1 (allowed_non_write_users: '*', on issue_comment)
 allowed tools: 0
 permissions/secrets: 1 (no permissions are set, so GITHUB_TOKEN gets the repository default)
 total: 2 of 3"
         );
+    }
+
+    #[test]
+    fn sarif_results_at_the_same_place_merge_into_the_heaviest_level() {
+        let workflow = Workflow::parse(
+            Path::new("shared-token.yml"),
+            include_str!("../tests/fixtures/findings/shared-token.yml").to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let findings: Vec<Finding> = assessments.iter().flat_map(Assessment::findings).collect();
+        assert_eq!(findings.len(), 5);
+        let results = sarif_results(&workflow, "codex.yml", &findings);
+        let summary: Vec<(&str, &str, u64)> = results
+            .iter()
+            .map(|result| {
+                (
+                    result["ruleId"].as_str().unwrap(),
+                    result["level"].as_str().unwrap(),
+                    result["locations"][0]["physicalLocation"]["region"]["startLine"]
+                        .as_u64()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("broad-tools", "warning", 10),
+                ("long-lived-token", "error", 3),
+                ("unrestricted-trigger", "error", 13),
+                ("broad-tools", "error", 14),
+            ]
+        );
+        let merged = results[1]["message"]["text"].as_str().unwrap();
+        let breakdowns: Vec<&str> = merged.split("\n\n").collect();
+        assert_eq!(breakdowns.len(), 2);
+        assert!(breakdowns[0].contains("agent step: line 11\n"));
+        assert!(breakdowns[0].ends_with("total: 3 of 3"));
+        assert!(breakdowns[1].contains("agent step: line 8\n"));
+        assert!(breakdowns[1].ends_with("total: 2.5 of 3"));
     }
 
     #[test]
