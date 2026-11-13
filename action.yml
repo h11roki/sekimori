@@ -8,7 +8,7 @@ branding:
 
 inputs:
   paths:
-    description: Whitespace-separated workflow files or directories to check.
+    description: Workflow files or directories to check, separated by whitespace or newlines.
     required: false
     default: .github/workflows
   token:
@@ -30,7 +30,11 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         SEKIMORI_REPOSITORY: h11roki/sekimori
       run: |
-        version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -n 1)
+        if ! command -v gh > /dev/null; then
+          echo "::error::sekimori needs the GitHub CLI (gh) to download and verify its release"
+          exit 1
+        fi
+        version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml")
         case "$RUNNER_OS/$RUNNER_ARCH" in
           Linux/X64) asset=sekimori-x86_64-unknown-linux-musl ;;
           Linux/ARM64) asset=sekimori-aarch64-unknown-linux-musl ;;
@@ -55,11 +59,11 @@ runs:
         SEKIMORI: ${{ steps.install.outputs.binary }}
         SEKIMORI_PATHS: ${{ inputs.paths }}
       run: |
-        set -f
-        read -r -a paths <<< "$SEKIMORI_PATHS"
-        sarif="$RUNNER_TEMP/sekimori.sarif"
+        read -r -d '' -a paths <<< "$SEKIMORI_PATHS" || true
+        sarif=$(mktemp "$RUNNER_TEMP/sekimori-sarif-XXXXXX")
         status=0
         "$SEKIMORI" "${paths[@]}" || status=$?
-        "$SEKIMORI" --format sarif "${paths[@]}" > "$sarif" || true
+        sarif_status=0
+        "$SEKIMORI" --format sarif "${paths[@]}" > "$sarif" || sarif_status=$?
         echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
-        exit "$status"
+        exit $(( status > sarif_status ? status : sarif_status ))
