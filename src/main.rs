@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results};
-use sekimori::rules::{Assessment, assess};
+use sekimori::rules::{Assessment, Upstreams, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
 const EXIT_FINDINGS: u8 = 1;
@@ -31,16 +31,19 @@ fn main() -> ExitCode {
     let mut errors = Vec::new();
     let mut results = Vec::new();
     let mut found = false;
+    let mut workflows = Vec::new();
     for path in workflow_paths(&cli.paths) {
-        let workflow = match path.and_then(|path| Workflow::load(&path)) {
-            Ok(workflow) => workflow,
+        match path.and_then(|path| Workflow::load(&path)) {
+            Ok(workflow) => workflows.push(workflow),
             Err(error) => {
                 eprintln!("error: {error}");
                 errors.push(error.to_string());
-                continue;
             }
-        };
-        let assessments = assess(&workflow);
+        }
+    }
+    let upstreams = Upstreams::new(&workflows);
+    for workflow in &workflows {
+        let assessments = assess(workflow, &upstreams);
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();
         if findings.is_empty() {
             continue;
@@ -49,14 +52,14 @@ fn main() -> ExitCode {
         match cli.format {
             Format::Plain => {
                 for finding in &findings {
-                    if let Err(error) = stdout.write_all(plain(&workflow, finding).as_bytes()) {
+                    if let Err(error) = stdout.write_all(plain(workflow, finding).as_bytes()) {
                         return write_failure(&error);
                     }
                 }
             }
             Format::Sarif => {
                 let uri = artifact_uri(&repository_path(&workflow.path));
-                results.extend(sarif_results(&workflow, &uri, &findings));
+                results.extend(sarif_results(workflow, &uri, &findings));
             }
         }
     }

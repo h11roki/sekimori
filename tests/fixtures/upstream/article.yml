@@ -1,0 +1,10 @@
+on:
+  workflow_run:
+    workflows: ["Release Notes"]
+    types: [completed]
+jobs:
+  article:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
