@@ -6,7 +6,8 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, OpenTrigger, broad_tool, external_events, never_runs, open_trigger,
+    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, broad_tool, external_events,
+    head_checkout, never_runs, open_trigger,
 };
 use crate::workflow::Workflow;
 
@@ -22,6 +23,7 @@ const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 pub enum Rule {
     UnrestrictedTrigger,
     BroadTools,
+    PrHeadCheckout,
 }
 
 impl Rule {
@@ -29,6 +31,7 @@ impl Rule {
         match self {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
             Rule::BroadTools => "broad-tools",
+            Rule::PrHeadCheckout => "pr-head-checkout",
         }
     }
 
@@ -36,6 +39,7 @@ impl Rule {
         match self {
             Rule::UnrestrictedTrigger => "can be started without write access",
             Rule::BroadTools => "can run unrestricted tools",
+            Rule::PrHeadCheckout => "loads settings from a checked-out PR head",
         }
     }
 }
@@ -175,17 +179,25 @@ fn assess_step<'w>(
             },
         });
     }
-    let mut allowed_tools = None;
+    let mut tool_reasons = Vec::new();
     if let Some(BroadTool { setting, route }) = broad_tool(&step) {
         hits.push(Hit {
             rule: Rule::BroadTools,
             route,
         });
-        allowed_tools = Some(AxisScore {
-            weight: Weight::Full,
-            reason: setting,
-        });
+        tool_reasons.push(setting);
     }
+    if let Some(HeadCheckout { setting, route }) = head_checkout(workflow, &step, events) {
+        hits.push(Hit {
+            rule: Rule::PrHeadCheckout,
+            route,
+        });
+        tool_reasons.push(setting);
+    }
+    let allowed_tools = (!tool_reasons.is_empty()).then(|| AxisScore {
+        weight: Weight::Full,
+        reason: tool_reasons.join("; "),
+    });
     let permissions_and_secrets = write_permission(workflow, step.job).map(|reason| AxisScore {
         weight: Weight::Full,
         reason,
@@ -427,6 +439,51 @@ jobs:
             )
         );
         assert_eq!(gemini.level, None);
+    }
+
+    #[test]
+    fn a_head_checkout_shares_the_allowed_tools_axis_with_broad_tools() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: workflow_run
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: --allowedTools Bash
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let assessment = &assessments[0];
+        let rules: Vec<_> = assessment
+            .findings()
+            .iter()
+            .map(|finding| (finding.level, finding.hit.rule))
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                (Level::Warning, Rule::BroadTools),
+                (Level::Warning, Rule::PrHeadCheckout)
+            ]
+        );
+        assert_eq!(
+            assessment.allowed_tools,
+            score(
+                Weight::Full,
+                "claude_args allows `Bash` through --allowedTools; actions/checkout@v6 checks out the PR head with `ref: ${{ github.event.workflow_run.head_sha }}`, and on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md"
+            )
+        );
+        assert_eq!(assessment.total_halves(), 5);
     }
 
     #[test]

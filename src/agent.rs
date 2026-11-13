@@ -1,6 +1,6 @@
 use github_actions_models::common::Uses;
 use github_actions_models::workflow::Job;
-use github_actions_models::workflow::job::{NormalJob, ParallelStep, Step, UsesStep};
+use github_actions_models::workflow::job::{NormalJob, ParallelStep, RunStep, Step, UsesStep};
 use yamlpath::{Component, Route, route};
 
 use crate::workflow::Workflow;
@@ -20,20 +20,21 @@ const AGENT_ACTIONS: [(&str, Agent); 3] = [
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
-        let Uses::Repository(repository) = uses else {
-            return None;
-        };
-        if repository
-            .subpath()
-            .is_some_and(|subpath| !subpath.is_empty())
-        {
-            return None;
-        }
         AGENT_ACTIONS
             .iter()
-            .find(|(action, _)| action.eq_ignore_ascii_case(repository.slug()))
+            .find(|(action, _)| is_root_action(uses, action))
             .map(|(_, agent)| *agent)
     }
+}
+
+pub(crate) fn is_root_action(uses: &Uses, action: &str) -> bool {
+    let Uses::Repository(repository) = uses else {
+        return false;
+    };
+    repository
+        .subpath()
+        .is_none_or(|subpath| subpath.is_empty())
+        && action.eq_ignore_ascii_case(repository.slug())
 }
 
 #[derive(Debug)]
@@ -41,6 +42,7 @@ pub struct AgentStep<'w> {
     pub agent: Agent,
     pub job_id: &'w str,
     pub job: &'w NormalJob,
+    pub index: usize,
     pub step: &'w UsesStep,
     pub route: Route<'w>,
 }
@@ -51,41 +53,53 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
         let Job::NormalJob(job) = job else {
             continue;
         };
-        let steps = route!["jobs", job_id.as_str(), "steps"];
-        for (index, step) in job.steps.iter().enumerate() {
-            match step {
-                Step::Uses(step) => {
-                    if let Some(agent) = Agent::of(&step.uses) {
-                        found.push(AgentStep {
-                            agent,
-                            job_id,
-                            job,
-                            step,
-                            route: steps.with_key(index),
-                        });
-                    }
-                }
-                Step::Parallel { parallel } => {
-                    for (inner, step) in parallel.iter().enumerate() {
-                        if let ParallelStep::Uses(step) = step
-                            && let Some(agent) = Agent::of(&step.uses)
-                        {
-                            found.push(AgentStep {
-                                agent,
-                                job_id,
-                                job,
-                                step,
-                                route: steps.with_keys([
-                                    Component::from(index),
-                                    Component::from("parallel"),
-                                    Component::from(inner),
-                                ]),
-                            });
-                        }
-                    }
-                }
-                Step::Run(_) | Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
+        for (index, route, step) in job_steps(job_id, job) {
+            if let JobStep::Uses(step) = step
+                && let Some(agent) = Agent::of(&step.uses)
+            {
+                found.push(AgentStep {
+                    agent,
+                    job_id,
+                    job,
+                    index,
+                    step,
+                    route,
+                });
             }
+        }
+    }
+    found
+}
+
+pub(crate) enum JobStep<'w> {
+    Uses(&'w UsesStep),
+    Run(&'w RunStep),
+}
+
+pub(crate) fn job_steps<'w>(
+    job_id: &'w str,
+    job: &'w NormalJob,
+) -> Vec<(usize, Route<'w>, JobStep<'w>)> {
+    let steps = route!["jobs", job_id, "steps"];
+    let mut found = Vec::new();
+    for (index, step) in job.steps.iter().enumerate() {
+        match step {
+            Step::Uses(step) => found.push((index, steps.with_key(index), JobStep::Uses(step))),
+            Step::Run(step) => found.push((index, steps.with_key(index), JobStep::Run(step))),
+            Step::Parallel { parallel } => {
+                for (inner, step) in parallel.iter().enumerate() {
+                    let route = steps.with_keys([
+                        Component::from(index),
+                        Component::from("parallel"),
+                        Component::from(inner),
+                    ]);
+                    found.push(match step {
+                        ParallelStep::Uses(step) => (index, route, JobStep::Uses(step)),
+                        ParallelStep::Run(step) => (index, route, JobStep::Run(step)),
+                    });
+                }
+            }
+            Step::Wait { .. } | Step::WaitAll { .. } | Step::Cancel { .. } => {}
         }
     }
     found
