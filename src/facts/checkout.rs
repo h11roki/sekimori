@@ -113,7 +113,16 @@ pub fn head_checkout<'w>(
             },
             JobStep::Run(run) => {
                 if head.is_none()
-                    && checks_out_head(run, &run_head_variables(workflow, step, run, &route))
+                    && checks_out_head(
+                        run,
+                        &head_variables(&nearest_env(
+                            workflow,
+                            step.job_id,
+                            step.job,
+                            &run.shared.env,
+                            &route,
+                        )),
+                    )
                 {
                     head = Some((
                         "a `run` step checks out the PR head".to_string(),
@@ -129,46 +138,36 @@ pub fn head_checkout<'w>(
     })
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum OutsideText {
-    MayReach,
-    NeverReaches,
-    ThroughCheckout(String),
-}
-
-pub fn outside_text(
-    workflow: &Workflow,
-    step: &AgentStep,
-    events: &[ExternalEvent],
-) -> OutsideText {
-    if step.agent != Agent::GeminiCli
-        || !blank_input(step, PROMPT_INPUT)
-        || !events
+pub fn outside_text_cannot_reach(step: &AgentStep, events: &[ExternalEvent]) -> bool {
+    let checks_out_default_branch = |earlier: &UsesStep| {
+        let reference = match lookup_in(&earlier.with, "ref") {
+            Input::Missing => true,
+            Input::Text { value, .. } => {
+                !value.contains(EXPRESSION_START) && !names_head_commit(&normalized(value))
+            }
+            Input::Unreadable => false,
+        };
+        let repository = match lookup_in(&earlier.with, "repository") {
+            Input::Missing => true,
+            Input::Text { value, .. } => normalized(value) == BASE_REPOSITORY_EXPRESSION,
+            Input::Unreadable => false,
+        };
+        is_root_action(&earlier.uses, CHECKOUT_ACTION) && reference && repository
+    };
+    step.agent == Agent::GeminiCli
+        && blank_input(step, PROMPT_INPUT)
+        && events
             .iter()
             .all(|event| BASE_WORKSPACE_EVENTS.contains(event))
-    {
-        return OutsideText::MayReach;
-    }
-    let source = job_steps(step.job_id, step.job)
-        .into_iter()
-        .take_while(|(index, ..)| *index < step.index)
-        .find_map(|(_, route, earlier)| match earlier {
-            JobStep::Uses(uses) => (is_root_action(&uses.uses, CHECKOUT_ACTION)
-                && (matches!(lookup_in(&uses.with, "ref"), Input::Unreadable)
-                    || !matches!(checkout_of(uses), RootCheckout::Base)))
-            .then(|| format!("`{}`", uses.uses.raw())),
-            JobStep::Run(run) => {
-                (checks_out_head(run, &run_head_variables(workflow, step, run, &route))
-                    || names_head_commit(&normalized(&run.run)))
-                .then(|| "a `run` step".to_string())
-            }
-        });
-    match source {
-        Some(source) => OutsideText::ThroughCheckout(format!(
-            "with no `prompt`, Gemini CLI still reads GEMINI.md files that {source} may bring from a PR"
-        )),
-        None => OutsideText::NeverReaches,
-    }
+        && job_steps(step.job_id, step.job)
+            .into_iter()
+            .filter(|(index, ..)| *index <= step.index)
+            .all(|(.., earlier)| match earlier {
+                JobStep::Uses(uses) => {
+                    std::ptr::eq(uses, step.step) || checks_out_default_branch(uses)
+                }
+                JobStep::Run(_) => false,
+            })
 }
 
 enum RootCheckout<'w> {
@@ -178,20 +177,15 @@ enum RootCheckout<'w> {
 }
 
 fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
+    if !is_root_action(&step.uses, CHECKOUT_ACTION) {
+        return RootCheckout::Untouched;
+    }
     let into_root = match lookup_in(&step.with, "path") {
         Input::Missing => true,
         Input::Text { value, .. } => is_workspace_root(value),
         Input::Unreadable => false,
     };
-    if into_root {
-        checkout_of(step)
-    } else {
-        RootCheckout::Untouched
-    }
-}
-
-fn checkout_of(step: &UsesStep) -> RootCheckout<'_> {
-    if !is_root_action(&step.uses, CHECKOUT_ACTION) {
+    if !into_root {
         return RootCheckout::Untouched;
     }
     let text = |name| match lookup_in(&step.with, name) {
@@ -227,21 +221,6 @@ fn is_workspace_root(path: &str) -> bool {
         .replace(WORKSPACE_EXPRESSION, ".")
         .split('/')
         .all(|component| component.is_empty() || component == ".")
-}
-
-fn run_head_variables<'w>(
-    workflow: &'w Workflow,
-    step: &AgentStep<'w>,
-    run: &'w RunStep,
-    route: &Route<'w>,
-) -> Vec<&'w str> {
-    head_variables(&nearest_env(
-        workflow,
-        step.job_id,
-        step.job,
-        &run.shared.env,
-        route,
-    ))
 }
 
 fn head_variables<'w>(env: &NearestEnv<'w>) -> Vec<&'w str> {

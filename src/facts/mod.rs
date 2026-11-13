@@ -14,7 +14,7 @@ use yamlpath::{Component, Route, route};
 use crate::agent::AgentStep;
 use crate::workflow::Workflow;
 
-pub use checkout::{HeadCheckout, OutsideText, head_checkout, outside_text};
+pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
 pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{
