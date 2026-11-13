@@ -13,12 +13,12 @@
   - CLI は `gemini --yolo --prompt "${PROMPT}"` で動き、`PROMPT` は `inputs.prompt` だけから作る。ステップの `env` の `PROMPT` は、中のステップの `env` で上書きされる
   - `github_issue_number` と `github_pr_number` は、イベントの番号を既定に持つが、使い道は遠隔測定の記録とインストールの環境変数だけで、本文は読まない
   - GitHub は、Action に無い名前の入力を警告するだけで、Action には渡さない
-- Gemini CLI は、作業場所の `GEMINI.md` と `.gemini/settings.json` を読む。issue やコメントのイベントでは作業場所は既定のブランチで、外部の人は書けない。PR の head を checkout したときだけ、外部の人が書いたものになる(ADR 0014 の `pr-head-checkout`)
+- Gemini CLI は、作業場所の `GEMINI.md` と `.gemini/settings.json` を読む。issue やコメントのイベントでは作業場所は既定のブランチで、外部の人は書けない。PR の head を checkout したときだけ、外部の人が書いたものになる。ADR 0014 は、`.gemini/settings.json` を読むのは作業場所を信頼したときだけと確かめて `pr-head-checkout` を当て、`GEMINI.md` のような指示のファイルは起動できる人の軸で数えるとした。`GEMINI.md` を信頼の無い作業場所でも読むかは、確かめていない
 - codex-action は、`prompt` も `prompt-file` も無いと `codex exec` を動かさない。claude-code-action は、`prompt` が無いとコメントを読んで動く。この 2 つは今回の対象にしない
 
 ## 検討した選択肢
 
-1. run-gemini-cli のステップに `prompt` の入力が無く、`pr-head-checkout` も当たらなければ、起動できる人の軸を数えない
+1. run-gemini-cli のステップに `prompt` の入力が無く、前のステップで PR の head を checkout していなければ、起動できる人の軸を数えない
 2. 1 と同じ形で、起動できる人の軸を 0.5 に下げる
 3. プロンプトの文に `github.event` などの外部の値が含まれないときも、軸を数えない
 
@@ -27,7 +27,7 @@
 高橋さんが判断を任せ(2026-11-13 に「承認を求めないでどんどん続けていい」)、Claude が 1 を選んだ。
 
 - run-gemini-cli のステップで、`with` に `prompt` の入力(大文字と小文字を区別しない)が無ければ、エージェントには決まった既定のプロンプトだけが届くとみなす
-- そのステップに `pr-head-checkout` が当たらなければ、起動できる人の軸を数えず、`unrestricted-trigger` も出さない
+- ADR 0014 の PR の head の checkout(`pull_request_target`、`workflow_run`、`issue_comment` で、同じジョブの前のステップが作業場所の根に PR の head を取り出す)が無ければ、起動できる人の軸を数えず、`unrestricted-trigger` も出さない。checkout があれば、作業場所の信頼や `settings` に関わらず、これまでどおりに数える
 - `with` を式で丸ごと渡すなど、入力を読めないときは、これまでどおり文面が届くとみなす。`prompt` が空の文字列でも、渡しているので、これまでどおりに数える
 
 ## 理由
@@ -35,7 +35,7 @@
 - 起動できる人の軸は、外部の人がエージェントに指示を混ぜられるかを測るもので、ADR 0007 の 1 も 0.5 も文面が届くことが前提になっている。文面が届かないなら、どちらにも当たらない
 - 2 は、0.5 を「起動は絞っているが文面は届く」と決めた ADR 0007 の意味と食い違う
 - 3 は、run-gemini-cli の公式の例のように、プロンプトを `/gemini-review` のような作業場所のコマンドにし、そのコマンドが環境変数から issue の本文を読む形を見逃す。プロンプトに外部の値が無くても、エージェントが自分で issue を読みに行く指示もありうる
-- PR の head を checkout すると、外部の人が書いた `GEMINI.md` がプロンプトに加わるので、その場合は数え続ける
+- PR の head を checkout すると、外部の人が書いた `GEMINI.md` がプロンプトに加わりうるので、その場合は数え続ける。信頼の無い作業場所で `GEMINI.md` を読むかは確かめていないので、指摘を出す側に倒し、`pr-head-checkout` の条件(信頼と `settings`)は使わない
 
 ## 受け入れたトレードオフ
 
