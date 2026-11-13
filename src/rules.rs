@@ -17,8 +17,6 @@ const COUNTED_WRITE_SCOPES: [&str; 5] =
 pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
 pub const HALVES_PER_POINT: u8 = 2;
-const PR_HEAD_TEXT: &str =
-    "; with no `prompt`, Gemini CLI still reads the GEMINI.md of the PR head checked out before it";
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
 
@@ -63,7 +61,7 @@ impl Rule {
     pub fn description(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => {
-                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not fill this axis when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and no earlier step in the job checks out the PR head, into any directory. Fills the who-can-trigger axis."
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not fill this axis when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and no earlier step in the job may check out a pull request, into any directory. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
@@ -201,15 +199,13 @@ fn assess_step<'w>(
 ) -> Assessment<'w> {
     let mut hits = Vec::new();
     let mut who_can_trigger = None;
-    let through = match outside_text(workflow, &step, events) {
-        OutsideText::Prompt => Some(""),
-        OutsideText::PrHead => Some(PR_HEAD_TEXT),
-        OutsideText::Nothing => None,
+    let outside = if events.is_empty() {
+        OutsideText::NeverReaches
+    } else {
+        outside_text(workflow, &step, events)
     };
-    if !events.is_empty()
-        && let Some(through) = through
-    {
-        who_can_trigger = Some(match open_trigger(&step, events, upstream) {
+    if outside != OutsideText::NeverReaches {
+        let mut score = match open_trigger(&step, events, upstream) {
             Some(OpenTrigger {
                 setting,
                 route,
@@ -221,17 +217,21 @@ fn assess_step<'w>(
                 });
                 AxisScore {
                     weight: Weight::Full,
-                    reason: format!("{setting}, on {}{through}", event_names(&open_events)),
+                    reason: format!("{setting}, on {}", event_names(&open_events)),
                 }
             }
             None => AxisScore {
                 weight: Weight::Half,
                 reason: format!(
-                    "on {}, text from outside contributors can reach the agent{through}",
+                    "on {}, text from outside contributors can reach the agent",
                     event_names(events)
                 ),
             },
-        });
+        };
+        if let OutsideText::ThroughCheckout(source) = outside {
+            score.reason = format!("{}; {source}", score.reason);
+        }
+        who_can_trigger = Some(score);
     }
     let mut tool_reasons = Vec::new();
     if let Some(BroadTool { setting, route }) = broad_tool(&step) {
@@ -487,13 +487,13 @@ jobs:
 
     #[test]
     fn gemini_without_a_prompt_counts_where_the_workspace_may_hold_the_pr() {
-        let trigger = |on: &str, steps: &str| {
+        let trigger = |on: &str, condition: &str, steps: &str| {
             assessed(&format!(
                 "on: {on}
 jobs:
   gemini:
     runs-on: ubuntu-latest
-    steps:
+{condition}    steps:
 {steps}      - uses: google-github-actions/run-gemini-cli@v0
         with:
           settings: '{{\"tools\": {{\"core\": [\"read_file\"]}}}}'
@@ -501,35 +501,78 @@ jobs:
             ))
             .trigger
         };
-        let through_head = |on: &str| {
+        let open = |on: &str, source: &str| {
             score(
                 Weight::Full,
-                &format!("no `if:` on the job or step, on {on}{PR_HEAD_TEXT}"),
+                &format!(
+                    "no `if:` on the job or step, on {on}; with no `prompt`, Gemini CLI still reads GEMINI.md files that {source} may bring from a PR"
+                ),
             )
         };
+        let checkout = "`actions/checkout@v6`";
+        let run = "a `run` step";
 
-        assert_eq!(
-            trigger(
-                "issue_comment",
+        for (steps, source) in [
+            (
                 "      - uses: actions/checkout@v6
         with:
           path: pr
           ref: refs/pull/${{ github.event.issue.number }}/head
-"
+",
+                checkout,
             ),
-            through_head("issue_comment")
-        );
+            (
+                "      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+",
+                checkout,
+            ),
+            (
+                "      - uses: actions/checkout@v6
+        with: ${{ fromJSON(vars.CHECKOUT) }}
+",
+                checkout,
+            ),
+            (
+                "      - run: gh pr checkout ${{ github.event.issue.number }}
+",
+                run,
+            ),
+            (
+                "      - run: |
+          git fetch origin pull/${{ github.event.issue.number }}/head:pr
+          git worktree add pr pr
+",
+                run,
+            ),
+        ] {
+            assert_eq!(
+                trigger("issue_comment", "", steps),
+                open("issue_comment", source),
+                "{steps}"
+            );
+        }
+
         assert_eq!(
             trigger(
                 "issue_comment",
+                "    if: github.event.comment.author_association == 'OWNER'
+",
                 "      - run: gh pr checkout ${{ github.event.issue.number }}
 "
             ),
-            through_head("issue_comment")
+            score(
+                Weight::Half,
+                &format!(
+                    "on issue_comment, text from outside contributors can reach the agent; with no `prompt`, Gemini CLI still reads GEMINI.md files that {run} may bring from a PR"
+                )
+            )
         );
         assert_eq!(
             trigger(
                 "pull_request_review",
+                "",
                 "      - uses: actions/checkout@v6
 "
             ),
@@ -540,24 +583,13 @@ jobs:
         );
         assert_eq!(
             trigger(
-                "pull_request_target",
-                "      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-"
-            ),
-            score(
-                Weight::Full,
-                "no `if:` on the job or step, on pull_request_target"
-            )
-        );
-        assert_eq!(
-            trigger(
                 "issues",
+                "",
                 "      - uses: actions/checkout@v6
         with:
           path: docs
           ref: gh-pages
+      - run: npm ci
 "
             ),
             None

@@ -113,16 +113,7 @@ pub fn head_checkout<'w>(
             },
             JobStep::Run(run) => {
                 if head.is_none()
-                    && checks_out_head(
-                        run,
-                        &head_variables(&nearest_env(
-                            workflow,
-                            step.job_id,
-                            step.job,
-                            &run.shared.env,
-                            &route,
-                        )),
-                    )
+                    && checks_out_head(run, &run_head_variables(workflow, step, run, &route))
                 {
                     head = Some((
                         "a `run` step checks out the PR head".to_string(),
@@ -140,9 +131,9 @@ pub fn head_checkout<'w>(
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum OutsideText {
-    Prompt,
-    PrHead,
-    Nothing,
+    MayReach,
+    NeverReaches,
+    ThroughCheckout(String),
 }
 
 pub fn outside_text(
@@ -150,39 +141,33 @@ pub fn outside_text(
     step: &AgentStep,
     events: &[ExternalEvent],
 ) -> OutsideText {
-    let fixed_prompt = step.agent == Agent::GeminiCli
-        && match lookup(step, PROMPT_INPUT) {
-            Input::Missing => true,
-            Input::Text { value, .. } => value.trim().is_empty(),
-            Input::Unreadable => false,
-        };
-    if !fixed_prompt
+    if step.agent != Agent::GeminiCli
+        || !blank_input(step, PROMPT_INPUT)
         || !events
             .iter()
             .all(|event| BASE_WORKSPACE_EVENTS.contains(event))
     {
-        return OutsideText::Prompt;
+        return OutsideText::MayReach;
     }
-    let head_anywhere = job_steps(step.job_id, step.job)
+    let source = job_steps(step.job_id, step.job)
         .into_iter()
         .take_while(|(index, ..)| *index < step.index)
-        .any(|(_, route, earlier)| match earlier {
-            JobStep::Uses(uses) => matches!(checkout_of(uses), RootCheckout::Head(..)),
-            JobStep::Run(run) => checks_out_head(
-                run,
-                &head_variables(&nearest_env(
-                    workflow,
-                    step.job_id,
-                    step.job,
-                    &run.shared.env,
-                    &route,
-                )),
-            ),
+        .find_map(|(_, route, earlier)| match earlier {
+            JobStep::Uses(uses) => (is_root_action(&uses.uses, CHECKOUT_ACTION)
+                && (matches!(lookup_in(&uses.with, "ref"), Input::Unreadable)
+                    || !matches!(checkout_of(uses), RootCheckout::Base)))
+            .then(|| format!("`{}`", uses.uses.raw())),
+            JobStep::Run(run) => {
+                (checks_out_head(run, &run_head_variables(workflow, step, run, &route))
+                    || names_head_commit(&normalized(&run.run)))
+                .then(|| "a `run` step".to_string())
+            }
         });
-    if head_anywhere {
-        OutsideText::PrHead
-    } else {
-        OutsideText::Nothing
+    match source {
+        Some(source) => OutsideText::ThroughCheckout(format!(
+            "with no `prompt`, Gemini CLI still reads GEMINI.md files that {source} may bring from a PR"
+        )),
+        None => OutsideText::NeverReaches,
     }
 }
 
@@ -242,6 +227,21 @@ fn is_workspace_root(path: &str) -> bool {
         .replace(WORKSPACE_EXPRESSION, ".")
         .split('/')
         .all(|component| component.is_empty() || component == ".")
+}
+
+fn run_head_variables<'w>(
+    workflow: &'w Workflow,
+    step: &AgentStep<'w>,
+    run: &'w RunStep,
+    route: &Route<'w>,
+) -> Vec<&'w str> {
+    head_variables(&nearest_env(
+        workflow,
+        step.job_id,
+        step.job,
+        &run.shared.env,
+        route,
+    ))
 }
 
 fn head_variables<'w>(env: &NearestEnv<'w>) -> Vec<&'w str> {
@@ -389,13 +389,16 @@ fn normalized(text: &str) -> String {
         .collect()
 }
 
-fn gemini_loads_workspace_settings(workflow: &Workflow, step: &AgentStep) -> bool {
-    let without_settings = match lookup(step, SETTINGS_INPUT) {
+fn blank_input(step: &AgentStep, name: &str) -> bool {
+    match lookup(step, name) {
         Input::Missing => true,
         Input::Text { value, .. } => value.trim().is_empty(),
         Input::Unreadable => false,
-    };
-    without_settings
+    }
+}
+
+fn gemini_loads_workspace_settings(workflow: &Workflow, step: &AgentStep) -> bool {
+    blank_input(step, SETTINGS_INPUT)
         && agent_env(workflow, step)
             .variables
             .iter()
