@@ -28,8 +28,9 @@
 
 - run-gemini-cli のステップで、`with` に `prompt` の入力(大文字と小文字を区別しない)が無いか、値が空白だけなら、エージェントには決まったプロンプトだけが届くとみなす
 - そのうえで、外部の人が起こせるイベントが `issues`、`issue_comment`、`discussion`、`discussion_comment` だけで、同じジョブの前のステップが PR の head を取り出していなければ、起動できる人の軸を数えず、`unrestricted-trigger` も出さない
-  - PR の head の取り出しは ADR 0014 の `actions/checkout` と `run` の読み方を使うが、`path` は問わない。下のディレクトリの `GEMINI.md` も読まれるため。base への checkout で戻ったともみなさない
-  - 取り出していれば、これまでどおりに数え、理由に、PR の head の `GEMINI.md` が届くことを書く。作業場所の信頼や `settings` は問わない
+  - `actions/checkout` は、`path` を問わず、ADR 0014 で base とみなす取り出し(base のリポジトリの、読める `ref`)でなければ、PR の中身を取り出しうるとみなす。`steps.pr.outputs.sha` のような正体の分からない `ref` や、`with` を式で丸ごと渡したものも含む。下のディレクトリの `GEMINI.md` も読まれるため
+  - `run` は、ADR 0014 の PR の head の checkout に当たるか、PR の head のコミットを指す値(`pull/<番号>/head` など)が書かれていれば、PR の中身を取り出しうるとみなす。`git worktree add` や `git clone` で下のディレクトリに取り出す形を拾うため
+  - 取り出しうるときは、これまでどおりに数え、理由に、そのステップが PR から持ち込みうる `GEMINI.md` が届くことを書く。作業場所の信頼や `settings` は問わない
 - 他のイベント(`pull_request_target`、`pull_request_review`、`pull_request_review_comment`、`workflow_run`)を含むときは、作業場所に PR の中身が入りうるので、これまでどおりに数える
 - `with` を式で丸ごと渡すなど、入力を読めないときは、これまでどおり文面が届くとみなす
 
@@ -46,6 +47,8 @@
 - 作業場所の `GEMINI.md` が、外部の人の issue を読みに行くよう指示している形は見逃す。作業場所は書き込める人が書いたものなので、その指示も書き込める人の判断とみなす
 - 前のステップが issue の本文をファイルに書き出し、それを `GEMINI.md` として置くような形は見逃す
 - `pull_request_target` などで `prompt` を渡さず、PR の中身も取り出さないワークフローは、これまでどおり数えるので誤検知が残る
+- 正体の分からない `ref` の checkout があると、PR を取り出していなくても数えるので、誤検知が残る
+- `pull_request` を一緒に持つワークフローでも軽くする。`pull_request` は、これまでどおり外部の人が起こせるトリガーに数えない(フォークの PR の実行には秘密情報が渡らない)ので、その実行の作業場所は見ない
 - `prompt` を渡していない設定は、多くが入力の名前の間違いで、エージェントは利用者の意図どおりに動いていない。sekimori はその間違いを知らせない
 - 外部の人がエージェントを起動して API の料金を使わせる経路は、起動できる人の軸に数えない
 
