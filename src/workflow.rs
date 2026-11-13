@@ -58,6 +58,20 @@ impl Workflow {
         let (row, column) = feature.location.point_span.0;
         Some((row + 1, column + 1))
     }
+
+    pub fn utf16_position(&self, route: &Route) -> Option<(usize, usize)> {
+        let feature = self.document.query_pretty(route).ok()?;
+        let (row, _) = feature.location.point_span.0;
+        let offset = feature.location.byte_span.0;
+        let source = self.document.source();
+        let line_start = source[..offset]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        Some((
+            row + 1,
+            source[line_start..offset].encode_utf16().count() + 1,
+        ))
+    }
 }
 
 pub fn workflow_paths(inputs: &[PathBuf]) -> Vec<Result<PathBuf, LoadError>> {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use sekimori::report::{plain, sarif_log, sarif_result};
+use sekimori::report::{artifact_uri, plain, sarif_log, sarif_result};
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, workflow_paths};
 
@@ -41,6 +41,10 @@ fn main() -> ExitCode {
             }
         };
         let assessments = assess(&workflow);
+        let uri = match cli.format {
+            Format::Plain => String::new(),
+            Format::Sarif => artifact_uri(&workflow.path),
+        };
         for finding in assessments.iter().flat_map(Assessment::findings) {
             found = true;
             match cli.format {
@@ -49,7 +53,7 @@ fn main() -> ExitCode {
                         return write_failure(&error);
                     }
                 }
-                Format::Sarif => results.push(sarif_result(&workflow, &finding)),
+                Format::Sarif => results.push(sarif_result(&workflow, &uri, &finding)),
             }
         }
     }

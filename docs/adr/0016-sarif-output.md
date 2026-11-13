@@ -28,9 +28,10 @@
 - 引数 `--format` は `plain`(既定)と `sarif` を受け付ける。`sarif` のときは、全てのファイルを検査してから 1 つの SARIF の文書を標準出力に書く
 - 文書は `version` が `2.1.0`、`$schema` が SARIF 2.1.0 の JSON Schema。run は 1 つ
 - `tool.driver` は、`name` が `sekimori`、`version` と `semanticVersion` が Cargo の版、`informationUri` がリポジトリの URL。`rules` には 5 つの規則を全て、ADR 0011 の ID の順に並べる。各規則は `shortDescription` に平文の 1 行目の文、`fullDescription` と `help` に規則が見る設定と軸を書き、`properties.tags` を `security` にする
-- 結果は、指摘ごとに 1 つ。`ruleId` と `ruleIndex`、`level`(`warning` か `error`)、`message.text` に平文の 1 行目の文と軸の内訳、`locations` に 1 つの位置を書く
-- 位置の `artifactLocation.uri` は、渡されたパスを `/` で区切った相対パスにする(`.` は除き、`a/../b` は字面のまま `b` に畳む)。絶対パスは、今の作業場所の下なら相対に直し、そうでなければ `file://` の URI にする。`region` は平文と同じ行と列(1 から数える)
-- 読めないファイルは、平文と同じく標準エラーに出し、加えて `invocations[0].toolExecutionNotifications` に `error` で書き、`executionSuccessful` を偽にする。終了コードは ADR 0010 のとおり
+- 結果は、指摘ごとに 1 つ。`ruleId`、`level`(`warning` か `error`)、`message.text`、`locations` に 1 つの位置を書く。`ruleIndex` は書かない(任意で、規則の一覧とずれたときに壊れた SARIF になるため)
+- `message.text` は、平文の 1 行目の文と、軸ごとに 1 行の `who can trigger: 1 (理由)` の形。GitHub の画面は等幅ではないので、平文の桁揃えは使わない
+- 位置の `artifactLocation.uri` は、ファイルの実際のパス(シンボリックリンクを解いたもの)から、`.git` を持つ最も近い祖先のディレクトリをリポジトリの根とみなし、そこからの相対パスを `/` で区切って書く。根が見つからなければ、渡された相対パスを `.` と `..` を字面で畳んで書き、絶対パスなら `file:///` の URI にする。空白や `#` などはパーセントエンコードする。`region` の行は平文と同じで、列は SARIF の既定に合わせて UTF-16 の単位で数え、run の `columnKind` に `utf16CodeUnits` と書く
+- 読めないファイルは、平文と同じく標準エラーに出し、加えて `invocations[0].toolExecutionNotifications` に `error` で書き、`executionSuccessful` を偽にする。終了コードは ADR 0010 のとおりで、指摘があれば 1。GitHub Actions で `upload-sarif` に渡すときは、送るステップに `if: always()` を付ける
 - `partialFingerprints` と `runAutomationDetails` は書かない。前者は `upload-sarif` が作り、後者は `upload-sarif` の `category` で利用者が決める
 
 ## 理由
@@ -43,6 +44,8 @@
 
 - `security-severity` が無いので、GitHub の画面の重さは critical から low ではなく、`error` と `warning` で出る
 - `partialFingerprints` が無いので、API で直接送ると、行が動いたときに同じ指摘が別の警告になりうる
+- 指摘があると SARIF を書いたステップが失敗するので、送るステップに `if: always()` を付ける必要がある。終了コードを形式で変えると、CI で指摘を見落とすため
+- リポジトリの根は `.git` で探すので、`.git` を持たない取り出し方(アーカイブを展開したものなど)では、渡されたパスがそのまま書かれる
 - SARIF のときは全ての検査が終わるまで何も出さない。ワークフローのファイルの数は多くないので、待つ時間は問題にならない
 - 同じ checkout や秘密情報を複数のエージェントのステップが指すと、同じ位置と規則の結果が複数できる。GitHub は指紋が同じなら 1 つの警告にまとめる
 - `security` の札だけを付けて `security-severity` を付けないときの画面の出方は、文書に書かれていない。実際に送って確かめるまで、この形とする

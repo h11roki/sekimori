@@ -1,4 +1,4 @@
-use std::env;
+use std::fs;
 use std::path::{Component, Path};
 
 use serde_json::{Value, json};
@@ -12,6 +12,9 @@ const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const SARIF_TAGS: [&str; 1] = ["security"];
 const FILE_URI_SCHEME: &str = "file://";
+const COLUMN_KIND: &str = "utf16CodeUnits";
+const REPOSITORY_MARKER: &str = ".git";
+const URI_UNRESERVED: &str = "-._~/";
 
 pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     let (line, column) = position(workflow, finding);
@@ -25,17 +28,24 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     )
 }
 
-pub fn sarif_result(workflow: &Workflow, finding: &Finding) -> Value {
-    let (line, column) = position(workflow, finding);
-    let rule = finding.hit.rule;
+pub fn sarif_result(workflow: &Workflow, uri: &str, finding: &Finding) -> Value {
+    let (line, column) = workflow
+        .utf16_position(&finding.hit.route)
+        .unwrap_or((1, 1));
+    let rows: Vec<String> = axis_rows(finding)
+        .into_iter()
+        .map(|(label, value, reason)| match reason {
+            Some(reason) => format!("{label}: {value} ({reason})"),
+            None => format!("{label}: {value}"),
+        })
+        .collect();
     json!({
-        "ruleId": rule.id(),
-        "ruleIndex": Rule::ALL.iter().position(|known| *known == rule),
+        "ruleId": finding.hit.rule.id(),
         "level": finding.level.to_string(),
-        "message": { "text": format!("{}\n{}", headline(finding), axes(finding)) },
+        "message": { "text": format!("{}\n{}", headline(finding), rows.join("\n")) },
         "locations": [{
             "physicalLocation": {
-                "artifactLocation": { "uri": artifact_uri(&workflow.path) },
+                "artifactLocation": { "uri": uri },
                 "region": { "startLine": line, "startColumn": column },
             },
         }],
@@ -72,6 +82,7 @@ pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
                     "rules": rules,
                 },
             },
+            "columnKind": COLUMN_KIND,
             "invocations": [{
                 "executionSuccessful": errors.is_empty(),
                 "toolExecutionNotifications": notifications,
@@ -95,41 +106,51 @@ fn headline(finding: &Finding) -> String {
     )
 }
 
-fn axes(finding: &Finding) -> String {
+fn axis_rows(finding: &Finding) -> Vec<(&'static str, String, Option<String>)> {
     let assessment = finding.assessment;
-    let axes = [
+    let mut rows: Vec<_> = [
         ("who can trigger", &assessment.who_can_trigger),
         ("allowed tools", &assessment.allowed_tools),
         ("permissions/secrets", &assessment.permissions_and_secrets),
-    ];
-    let mut text = String::new();
-    for (label, score) in axes {
-        let row = match score {
-            Some(score) => format!(
-                "  {label:<LABEL_WIDTH$}{:<VALUE_WIDTH$}{}\n",
-                halves_text(score.weight.halves()),
-                score.reason
-            ),
-            None => format!("  {label:<LABEL_WIDTH$}0\n"),
-        };
-        text.push_str(&row);
-    }
-    text.push_str(&format!(
-        "  {:<LABEL_WIDTH$}{} of {MAX_TOTAL}\n",
+    ]
+    .into_iter()
+    .map(|(label, score)| match score {
+        Some(score) => (
+            label,
+            halves_text(score.weight.halves()),
+            Some(score.reason.clone()),
+        ),
+        None => (label, "0".to_string(), None),
+    })
+    .collect();
+    rows.push((
         "total",
-        halves_text(assessment.total_halves())
+        format!("{} of {MAX_TOTAL}", halves_text(assessment.total_halves())),
+        None,
     ));
-    text
+    rows
 }
 
-fn artifact_uri(path: &Path) -> String {
-    let relative = if path.is_absolute() {
-        env::current_dir()
-            .ok()
-            .and_then(|directory| path.strip_prefix(directory).ok())
-    } else {
-        Some(path)
-    };
+fn axes(finding: &Finding) -> String {
+    axis_rows(finding)
+        .into_iter()
+        .map(|(label, value, reason)| match reason {
+            Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
+            None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
+        })
+        .collect()
+}
+
+pub fn artifact_uri(path: &Path) -> String {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let repository = resolved
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join(REPOSITORY_MARKER).exists());
+    let relative = repository
+        .and_then(|root| resolved.strip_prefix(root).ok())
+        .map(Path::to_path_buf)
+        .or_else(|| path.is_relative().then(|| path.to_path_buf()));
     match relative {
         Some(relative) => {
             let mut parts: Vec<String> = Vec::new();
@@ -142,13 +163,30 @@ fn artifact_uri(path: &Path) -> String {
                     component => parts.push(component.as_os_str().to_string_lossy().into_owned()),
                 }
             }
-            parts.join("/")
+            percent_encoded(&parts.join("/"))
         }
-        None => format!(
-            "{FILE_URI_SCHEME}{}",
-            path.to_string_lossy().replace('\\', "/")
-        ),
+        None => {
+            let path = resolved.to_string_lossy().replace('\\', "/");
+            let rooted = if path.starts_with('/') {
+                path
+            } else {
+                format!("/{path}")
+            };
+            format!("{FILE_URI_SCHEME}{}", percent_encoded(&rooted))
+        }
     }
+}
+
+fn percent_encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || URI_UNRESERVED.as_bytes().contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 fn halves_text(halves: u8) -> String {
@@ -210,7 +248,7 @@ jobs:
     #[test]
     fn sarif_results_carry_the_rule_level_place_and_axes() {
         let workflow = Workflow::parse(
-            Path::new("./.github/workflows/../workflows/claude.yml"),
+            Path::new("claude.yml"),
             "on: issue_comment
 jobs:
   claude:
@@ -226,9 +264,8 @@ jobs:
         .unwrap();
         let assessments = assess(&workflow);
         let findings = assessments[0].findings();
-        let result = sarif_result(&workflow, &findings[0]);
+        let result = sarif_result(&workflow, ".github/workflows/claude.yml", &findings[0]);
         assert_eq!(result["ruleId"], "unrestricted-trigger");
-        assert_eq!(result["ruleIndex"], 0);
         assert_eq!(result["level"], "warning");
         let location = &result["locations"][0]["physicalLocation"];
         assert_eq!(
@@ -239,10 +276,47 @@ jobs:
         assert_eq!(location["region"]["startColumn"], 11);
         assert_eq!(
             result["message"]["text"],
-            plain(&workflow, &findings[0])
-                .split_once(": warning[unrestricted-trigger]: ")
-                .unwrap()
-                .1
+            "anthropics/claude-code-action@v1 in job `claude` can be started without write access
+who can trigger: 1 (allowed_non_write_users: '*', on issue_comment)
+allowed tools: 0
+permissions/secrets: 1 (no permissions are set, so GITHUB_TOKEN gets the repository default)
+total: 2 of 3"
+        );
+    }
+
+    #[test]
+    fn sarif_columns_count_utf16_code_units() {
+        let workflow = Workflow::parse(
+            Path::new("claude.yml"),
+            "on: issues
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: \"日本語\", uses: anthropics/claude-code-action@v1, with: {allowed_bots: '*'}}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        let route = &assessments[0].hits[0].route;
+        let (_, bytes) = workflow.position(route).unwrap();
+        let (_, utf16) = workflow.utf16_position(route).unwrap();
+        assert_eq!(bytes - utf16, 6);
+    }
+
+    #[test]
+    fn artifact_uris_are_relative_to_the_repository_and_encoded() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir(repository.path().join(REPOSITORY_MARKER)).unwrap();
+        let workflows = repository.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        let file = workflows.join("a b#1.yml");
+        fs::write(&file, "").unwrap();
+        assert_eq!(artifact_uri(&file), ".github/workflows/a%20b%231.yml");
+        assert_eq!(
+            artifact_uri(&workflows.join("../workflows/./a b#1.yml")),
+            ".github/workflows/a%20b%231.yml"
         );
     }
 
