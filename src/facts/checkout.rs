@@ -9,6 +9,22 @@ use crate::workflow::Workflow;
 
 const CHECKOUT_ACTION: &str = "actions/checkout";
 const WORKSPACE_EXPRESSION: &str = "${{github.workspace}}";
+const BASE_REPOSITORY_EXPRESSION: &str = "${{github.repository}}";
+const BASE_REFERENCES: [&str; 8] = [
+    "github.sha",
+    "github.ref",
+    "github.base_ref",
+    "github.head_ref",
+    "github.event.pull_request.base.",
+    "github.event.pull_request.head.ref",
+    "github.event.workflow_run.head_branch",
+    "github.event.repository.default_branch",
+];
+const EXPRESSION_START: &str = "${{";
+const EXPRESSION_END: &str = "}}";
+const LINE_CONTINUATION: &str = "\\\n";
+const SHELL_COMMAND_FLAG: &str = "-c";
+const WILDCARD: &str = "*";
 const HEAD_COMMITS: [&str; 3] = [
     "github.event.pull_request.head.sha",
     "github.event.pull_request.merge_commit_sha",
@@ -26,7 +42,16 @@ const PULL_REFSPEC_HEADS: [&str; 2] = ["head", "merge"];
 const GIT: &str = "git";
 const GIT_OPTIONS_WITH_VALUE: [&str; 4] = ["-C", "-c", "--git-dir", "--work-tree"];
 const GIT_FETCH: &str = "fetch";
-const GIT_WORKTREE_COMMANDS: [&str; 4] = ["checkout", "switch", "reset", "pull"];
+const GIT_WORKTREE_COMMANDS: [&str; 8] = [
+    "checkout",
+    "switch",
+    "reset",
+    "pull",
+    "merge",
+    "rebase",
+    "cherry-pick",
+    "restore",
+];
 const GH_PR_CHECKOUT: [&str; 3] = ["gh", "pr", "checkout"];
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
@@ -52,19 +77,15 @@ pub fn head_checkout<'w>(
                 | ExternalEvent::IssueComment
         )
     });
-    if !privileged {
-        return None;
-    }
     let loads = match step.agent {
         Agent::ClaudeCode => events.contains(&ExternalEvent::WorkflowRun).then_some(
             "on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md",
         ),
-        Agent::GeminiCli => gemini_loads_workspace_settings(workflow, step).then_some(
+        Agent::GeminiCli => (privileged && gemini_loads_workspace_settings(workflow, step)).then_some(
             "with no `settings` and GEMINI_CLI_TRUST_WORKSPACE=true, Gemini CLI loads the PR's .gemini/settings.json",
         ),
         Agent::Codex => None,
     }?;
-    let inherited_head_variables = head_variables(&[&step.job.env, &workflow.model.env]);
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
@@ -72,22 +93,25 @@ pub fn head_checkout<'w>(
         }
         match earlier {
             JobStep::Uses(uses) => match root_checkout(uses) {
-                RootCheckout::NotRoot => {}
+                RootCheckout::Untouched => {}
                 RootCheckout::Base => head = None,
                 RootCheckout::Head(key, value) => {
-                    head = Some((
+                    head = head.or(Some((
                         format!(
                             "{} checks out the PR head with `{key}: {value}`",
                             uses.uses.raw()
                         ),
                         route.with_keys([Component::from("with"), Component::from(key)]),
-                    ));
+                    )));
                 }
             },
             JobStep::Run(run) => {
-                let mut variables = head_variables(&[&run.shared.env]);
-                variables.extend(inherited_head_variables.iter().cloned());
-                if head.is_none() && checks_out_head(run, &variables) {
+                if head.is_none()
+                    && checks_out_head(
+                        run,
+                        &head_variables(&[&run.shared.env, &step.job.env, &workflow.model.env]),
+                    )
+                {
                     head = Some((
                         "a `run` step checks out the PR head".to_string(),
                         route.with_key("run"),
@@ -103,14 +127,14 @@ pub fn head_checkout<'w>(
 }
 
 enum RootCheckout<'w> {
-    NotRoot,
+    Untouched,
     Base,
     Head(&'w str, &'w str),
 }
 
 fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
     if !is_root_action(&step.uses, CHECKOUT_ACTION) {
-        return RootCheckout::NotRoot;
+        return RootCheckout::Untouched;
     }
     let into_root = match lookup_in(&step.with, "path") {
         Input::Missing => true,
@@ -118,18 +142,33 @@ fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
         Input::Unreadable => false,
     };
     if !into_root {
-        return RootCheckout::NotRoot;
+        return RootCheckout::Untouched;
     }
     let text = |name| match lookup_in(&step.with, name) {
         Input::Text { key, value } => Some((key, value)),
         Input::Missing | Input::Unreadable => None,
     };
-    let repository =
-        text("repository").filter(|(_, value)| names_head_repository(&normalized(value)));
-    let commit = text("ref").filter(|(_, value)| names_head_commit(&normalized(value)));
-    match repository.or(commit) {
-        Some((key, value)) => RootCheckout::Head(key, value),
-        None => RootCheckout::Base,
+    let repository = text("repository");
+    let reference = text("ref");
+    if let Some((key, value)) = repository
+        .filter(|(_, value)| names_head_repository(&normalized(value)))
+        .or(reference.filter(|(_, value)| names_head_commit(&normalized(value))))
+    {
+        return RootCheckout::Head(key, value);
+    }
+    let base_repository =
+        repository.is_none_or(|(_, value)| normalized(value) == BASE_REPOSITORY_EXPRESSION);
+    let base_reference = reference.is_none_or(|(_, value)| {
+        let value = normalized(value);
+        !value.contains(EXPRESSION_START)
+            || BASE_REFERENCES
+                .iter()
+                .any(|context| value.contains(context))
+    });
+    if base_repository && base_reference {
+        RootCheckout::Base
+    } else {
+        RootCheckout::Untouched
     }
 }
 
@@ -140,22 +179,30 @@ fn is_workspace_root(path: &str) -> bool {
         .all(|component| component.is_empty() || component == ".")
 }
 
-fn head_variables(envs: &[&LoE<Env>]) -> Vec<String> {
-    envs.iter()
-        .filter_map(|env| match env {
-            LoE::Literal(env) => Some(env),
-            LoE::Expr(_) => None,
-        })
-        .flatten()
-        .filter(|(_, value)| names_head_commit(&normalized(&value.to_string())))
-        .map(|(name, _)| name.clone())
-        .collect()
+fn head_variables<'w>(envs: &[&'w LoE<Env>]) -> Vec<&'w str> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut heads = Vec::new();
+    for env in envs {
+        let LoE::Literal(env) = env else {
+            continue;
+        };
+        for (name, value) in env.iter() {
+            if seen.contains(&name.as_str()) {
+                continue;
+            }
+            seen.push(name.as_str());
+            if names_head_commit(&normalized(&value.to_string())) {
+                heads.push(name.as_str());
+            }
+        }
+    }
+    heads
 }
 
-fn checks_out_head(step: &RunStep, head_variables: &[String]) -> bool {
+fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
+    let script = flatten_expressions(&step.run.replace(LINE_CONTINUATION, " "));
     let mut fetched_head = false;
-    let commands = step
-        .run
+    let commands = script
         .lines()
         .map(before_comment)
         .flat_map(|line| line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
@@ -164,30 +211,72 @@ fn checks_out_head(step: &RunStep, head_variables: &[String]) -> bool {
             .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(c))
             .filter(|word| !word.is_empty())
             .collect();
-        if words
-            .windows(GH_PR_CHECKOUT.len())
-            .any(|window| window == GH_PR_CHECKOUT)
-        {
-            return true;
+        for position in program_positions(&words) {
+            let program = &words[position..];
+            if program.len() >= GH_PR_CHECKOUT.len()
+                && program_name(program[0]) == GH_PR_CHECKOUT[0]
+                && program[1..GH_PR_CHECKOUT.len()] == GH_PR_CHECKOUT[1..]
+            {
+                return true;
+            }
+            let Some((subcommand, arguments)) = git_subcommand(program) else {
+                continue;
+            };
+            let names_head = names_head_commit(&normalized(&arguments.concat()))
+                || arguments
+                    .iter()
+                    .any(|argument| refers_to_head_variable(argument, head_variables));
+            if GIT_WORKTREE_COMMANDS.contains(&subcommand) && (names_head || fetched_head) {
+                return true;
+            }
+            fetched_head |= subcommand == GIT_FETCH && names_head;
         }
-        let Some((subcommand, arguments)) = git_subcommand(&words) else {
-            continue;
-        };
-        let names_head = names_head_commit(&normalized(&arguments.concat()))
-            || arguments
-                .iter()
-                .any(|argument| refers_to_head_variable(argument, head_variables));
-        if GIT_WORKTREE_COMMANDS.contains(&subcommand) && (names_head || fetched_head) {
-            return true;
-        }
-        fetched_head |= subcommand == GIT_FETCH && names_head;
     }
     false
 }
 
+fn flatten_expressions(text: &str) -> String {
+    let mut flattened = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(EXPRESSION_START) {
+        flattened.push_str(&rest[..start]);
+        let expression = &rest[start..];
+        let end = expression
+            .find(EXPRESSION_END)
+            .map_or(expression.len(), |end| end + EXPRESSION_END.len());
+        flattened.extend(expression[..end].chars().filter(|c| {
+            !c.is_whitespace() && !COMMAND_SEPARATORS.contains(*c) && !WORD_SEPARATORS.contains(*c)
+        }));
+        rest = &expression[end..];
+    }
+    flattened.push_str(rest);
+    flattened
+}
+
+fn program_positions(words: &[&str]) -> Vec<usize> {
+    let first = words.iter().position(|word| !is_assignment(word));
+    let after_shell_flag = words
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| **word == SHELL_COMMAND_FLAG)
+        .map(|(index, _)| index + 1)
+        .filter(|index| *index < words.len());
+    first.into_iter().chain(after_shell_flag).collect()
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
-    let start = words.iter().position(|word| program_name(word) == GIT)?;
-    let mut next = start + 1;
+    if program_name(words.first()?) != GIT {
+        return None;
+    }
+    let mut next = 1;
     while let Some(word) = words.get(next).filter(|word| word.starts_with('-')) {
         next += if GIT_OPTIONS_WITH_VALUE.contains(word) {
             2
@@ -199,7 +288,7 @@ fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
     Some((subcommand, words[next + 1..].to_vec()))
 }
 
-fn refers_to_head_variable(argument: &str, head_variables: &[String]) -> bool {
+fn refers_to_head_variable(argument: &str, head_variables: &[&str]) -> bool {
     head_variables.iter().any(|name| {
         [format!("${name}"), format!("${{{name}}}")]
             .iter()
@@ -247,7 +336,9 @@ fn followed_by(text: &str, prefix: &str, separator: char, suffixes: &[&str]) -> 
     text.match_indices(prefix).any(|(start, _)| {
         text[start + prefix.len()..]
             .split_once(separator)
-            .is_some_and(|(_, rest)| suffixes.iter().any(|suffix| rest.starts_with(suffix)))
+            .is_some_and(|(segment, rest)| {
+                segment != WILDCARD && suffixes.iter().any(|suffix| rest.starts_with(suffix))
+            })
     })
 }
 
@@ -564,6 +655,73 @@ jobs:
           HEAD_OLD: main
 ";
         assert_eq!(claude_after("workflow_run", longer_name), None);
+    }
+
+    #[test]
+    fn merges_fallbacks_and_continued_lines_still_check_out_the_head() {
+        let cases = [
+            "run: git fetch origin pull/${{ github.event.workflow_run.pull_requests[0].number }}/head && git merge FETCH_HEAD",
+            "run: git restore --source=${{ github.event.workflow_run.head_sha }} -- .",
+            "run: git checkout ${{ inputs.sha || github.event.workflow_run.head_sha }}",
+            "run: |\n          git checkout \\\n            ${{ github.event.workflow_run.head_sha }}",
+        ];
+        for run in cases {
+            let steps = format!("      - {run}\n");
+            assert!(claude_after("workflow_run", &steps).is_some(), "{run}");
+        }
+    }
+
+    #[test]
+    fn echoed_commands_wildcard_refspecs_and_overridden_variables_are_not_checkouts() {
+        let cases = [
+            "run: 'echo \"To test locally: git checkout ${{ github.event.workflow_run.head_sha }}\" >> $GITHUB_STEP_SUMMARY'",
+            "run: echo \"run gh pr checkout 1\"",
+            "run: git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*' && git checkout main",
+            "run: git checkout \"$HEAD\"\n        env:\n          HEAD: main",
+        ];
+        for run in cases {
+            let steps = format!("      - {run}\n");
+            assert_eq!(
+                found(&format!(
+                    "on: workflow_run
+env:
+  HEAD: ${{{{ github.event.workflow_run.head_sha }}}}
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+{steps}      - uses: anthropics/claude-code-action@v1
+"
+                )),
+                None,
+                "{run}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_readable_checkout_of_the_base_puts_the_settings_back() {
+        let after_head = |second: &str| {
+            claude_after(
+                "workflow_run",
+                &format!(
+                    "      - uses: actions/checkout@v6
+        with:
+          ref: ${{{{ github.event.workflow_run.head_sha }}}}
+      - uses: actions/checkout@v6
+        with:
+          {second}
+"
+                ),
+            )
+        };
+        assert!(after_head("ref: ${{ steps.pr.outputs.sha }}").is_some());
+        assert!(after_head("repository: org/tools").is_some());
+        assert_eq!(
+            after_head("ref: ${{ github.event.repository.default_branch }}"),
+            None
+        );
+        assert_eq!(after_head("ref: main"), None);
     }
 
     #[test]

@@ -31,9 +31,9 @@
   - codex-action: 当てない。作業場所の設定は信頼が無いと効かないため
 - PR の head の checkout は次のどれか
   - `actions/checkout` のステップで、`path` が作業場所の根(無い、空、`.`、`./`、`${{ github.workspace }}` など、`.` と空の区切りだけからなるもの)で、`repository` が PR の head のリポジトリ(`github.event.pull_request.head.repo.`、`github.event.workflow_run.head_repository.`、`github.event.workflow_run.pull_requests[...].head.repo.`)を指すか、`ref` が PR の head のコミット(`github.event.pull_request.head.sha`、`github.event.pull_request.merge_commit_sha`、`github.event.workflow_run.head_sha`、`github.event.workflow_run.pull_requests[...].head.sha`、`pull/<番号>/head`、`pull/<番号>/merge`)を指すもの。大文字と小文字と空白を無視して比べる
-  - `run` のステップで、`gh pr checkout` があるもの。または、`git` の `checkout`、`switch`、`reset`、`pull` の引数が PR の head のコミットを指すもの。`git fetch` の引数が PR の head のコミットを指し、その後に `checkout`、`switch`、`reset`、`pull` があるもの。引数は、値を直接書くか、その値を持つ `env` の変数(ステップ、ジョブ、ワークフロー)を `$NAME`、`${NAME}`、`${{ env.NAME }}` で参照するもの
-  - `run` は、行ごとに `#` から後ろのコメントを除き(ADR 0013 の `claude_args` と同じ読み方)、`;`、`&`、`|`、括弧、`` ` `` でコマンドに分け、空白と引用符で語に分ける。`git -C <dir>`、`-c`、`--git-dir`、`--work-tree` のような前に置くオプションは飛ばす。`git fetch` だけでは作業場所が変わらないので当てない
-- エージェントより前のステップを順に見て、作業場所の根への `actions/checkout` は作業場所を入れ替えるものとして扱う。PR の head を取り出した後に、PR の head を指さない checkout が根にあれば、base に戻ったとみなして当てない。`run` は、まだ PR の head を取り出していないときだけ見る
+  - `run` のステップで、`gh pr checkout` があるもの。または、`git` の `checkout`、`switch`、`reset`、`pull`、`merge`、`rebase`、`cherry-pick`、`restore` の引数が PR の head のコミットを指すもの。`git fetch` の引数が PR の head のコミットを指し、その後にそれらの部分コマンドがあるもの。引数は、値を直接書くか、その値を持つ `env` の変数を `$NAME`、`${NAME}`、`${{ env.NAME }}` で参照するもの。変数は、ステップ、ジョブ、ワークフローの順で最初に見つかる値で決める
+  - `run` は、行末の `\` で続く行をつなぎ、`${{ }}` の式の中の空白と区切りの文字を除いてから(式は shell より前に置き換わるため)、行ごとに `#` から後ろのコメントを除き(ADR 0013 の `claude_args` と同じ読み方)、`;`、`&`、`|`、括弧、`` ` `` でコマンドに分け、空白と引用符で語に分ける。コマンドの名前として見るのは、`NAME=value` の代入を除いた最初の語と、`-c` の次の語(`bash -c "..."`)だけで、`echo` の引数の中の `git` は見ない。`git -C <dir>`、`-c`、`--git-dir`、`--work-tree` のような前に置くオプションは飛ばす。`git fetch` だけでは作業場所が変わらないので当てない。`pull/*/head` のように全ての PR を取る refspec は、PR の head とみなさない
+- エージェントより前のステップを順に見て、作業場所の根への `actions/checkout` は作業場所を入れ替えるものとして扱う。PR の head を取り出した後に、base のリポジトリ(`repository` が無いか `${{ github.repository }}`)の、読める `ref`(無い、式を含まない、または `github.sha`、`github.ref`、`github.base_ref`、枝の名前の文脈、`github.event.repository.default_branch` などを含む)の checkout が根にあれば、base に戻ったとみなして当てない。`${{ steps.pr.outputs.sha }}` のように読めない `ref` や、別のリポジトリの checkout では戻ったとみなさない。指摘は、最初に PR の head を取り出したステップを指す
 - エージェントのステップが `parallel:` の中にあるときは、その `parallel:` より前のステップを見る
 - 指摘は checkout のステップの `ref`、`repository`、`run` のどれかを指す。広い道具と両方に当たったときは、許した道具の軸の理由に両方を書く
 
@@ -54,6 +54,7 @@
 - `GEMINI_CLI_TRUST_WORKSPACE` を前のステップで `$GITHUB_ENV` に書くときや、値が式のときは、信頼していないとみなす
 - checkout の `ref` が前のステップの出力(`${{ steps.pr.outputs.sha }}`)のように読めないときは、PR の head と分からないので当てない
 - 部分文字列で比べるので、PR の head を指す値を条件にだけ使う式(`head.repo.fork && 'a' || 'b'`)も PR の head とみなす
+- `sudo git checkout` のように、包みのコマンドの後の `git` は見ない
 - 書き込める人が悪意を持って置いた枝は、枝の名前だけの checkout で取り出されるが、外部の人の脅威を見るこの規則では当てない
 - `run` で作業場所を base に戻すコマンド(`git checkout main`、`git checkout origin/main -- .claude`)は、戻したとみなさない。何に戻したかを静的に決めにくいため
 - `git fetch` で取り出した PR の head と、その後の `git checkout` の引数が同じものかは確かめない
