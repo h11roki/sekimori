@@ -8,7 +8,10 @@ const VALUE_WIDTH: usize = 5;
 const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const SARIF_TAGS: [&str; 1] = ["security"];
+const FILE_SCHEME: &str = "file:";
 const FILE_URI_SCHEME: &str = "file://";
+const UNC_URI_PREFIX: &str = "//";
+const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
 
@@ -20,7 +23,13 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
         finding.level,
         finding.hit.rule.id(),
         headline(finding),
-        axes(finding),
+        axis_rows(finding)
+            .into_iter()
+            .map(|(label, value, reason)| match reason {
+                Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
+                None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
+            })
+            .collect::<String>(),
     )
 }
 
@@ -121,27 +130,18 @@ fn axis_rows(finding: &Finding) -> Vec<(&'static str, String, Option<String>)> {
     rows
 }
 
-fn axes(finding: &Finding) -> String {
-    axis_rows(finding)
-        .into_iter()
-        .map(|(label, value, reason)| match reason {
-            Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
-            None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
-        })
-        .collect()
-}
-
 pub fn artifact_uri(path: &RepositoryPath) -> String {
     match path {
-        RepositoryPath::Relative(relative) => percent_encoded(&uri_path(relative)),
+        RepositoryPath::Relative(relative) => percent_encoded(&uri_path(relative), ""),
         RepositoryPath::Absolute(absolute) => {
-            let path = uri_path(absolute);
-            let rooted = if path.starts_with('/') {
-                path
+            let path = percent_encoded(&uri_path(absolute), DRIVE_SEPARATOR);
+            if path.starts_with(UNC_URI_PREFIX) {
+                format!("{FILE_SCHEME}{path}")
+            } else if path.starts_with('/') {
+                format!("{FILE_URI_SCHEME}{path}")
             } else {
-                format!("/{path}")
-            };
-            format!("{FILE_URI_SCHEME}{}", percent_encoded(&rooted))
+                format!("{FILE_URI_SCHEME}/{path}")
+            }
         }
     }
 }
@@ -150,10 +150,13 @@ fn uri_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn percent_encoded(text: &str) -> String {
+fn percent_encoded(text: &str, also_kept: &str) -> String {
     text.bytes()
         .map(|byte| {
-            if byte.is_ascii_alphanumeric() || URI_UNRESERVED.as_bytes().contains(&byte) {
+            if byte.is_ascii_alphanumeric()
+                || URI_UNRESERVED.as_bytes().contains(&byte)
+                || also_kept.as_bytes().contains(&byte)
+            {
                 char::from(byte).to_string()
             } else {
                 format!("%{byte:02X}")
@@ -271,7 +274,11 @@ total: 2 of 3"
         );
         assert_eq!(
             artifact_uri(&RepositoryPath::Absolute(r"C:\wf\a.yml".into())),
-            "file:///C%3A/wf/a.yml"
+            "file:///C:/wf/a.yml"
+        );
+        assert_eq!(
+            artifact_uri(&RepositoryPath::Absolute(r"\\server\share\a.yml".into())),
+            "file://server/share/a.yml"
         );
     }
 
@@ -289,7 +296,16 @@ total: 2 of 3"
             .iter()
             .map(|rule| rule["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, Rule::ALL.map(Rule::id));
+        assert_eq!(
+            ids,
+            [
+                "unrestricted-trigger",
+                "broad-tools",
+                "long-lived-token",
+                "pr-head-checkout",
+                "other-secrets"
+            ]
+        );
         assert_eq!(run["invocations"][0]["executionSuccessful"], false);
         assert_eq!(
             run["invocations"][0]["toolExecutionNotifications"][0]["message"]["text"],

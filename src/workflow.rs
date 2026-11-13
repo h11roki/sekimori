@@ -23,6 +23,8 @@ const WORKFLOW_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
 const WORKSPACE_VARIABLE: &str = "GITHUB_WORKSPACE";
 const REPOSITORY_MARKER: &str = ".git";
 const VERBATIM_PREFIX: &str = r"\\?\";
+const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+const UNC_PREFIX: &str = r"\\";
 
 pub struct Workflow {
     pub path: PathBuf,
@@ -70,37 +72,20 @@ pub enum RepositoryPath {
 }
 
 pub fn repository_path(path: &Path) -> RepositoryPath {
-    let resolved =
-        fs::canonicalize(path).map_or_else(|_| path.to_path_buf(), without_verbatim_prefix);
-    let workspace = env::var_os(WORKSPACE_VARIABLE)
-        .and_then(|workspace| fs::canonicalize(workspace).ok())
-        .map(without_verbatim_prefix)
-        .filter(|workspace| resolved.starts_with(workspace));
-    let root = workspace.or_else(|| {
-        resolved
-            .ancestors()
-            .skip(1)
-            .find(|directory| directory.join(REPOSITORY_MARKER).exists())
-            .map(Path::to_path_buf)
-    });
-    let relative = match &root {
-        Some(root) => resolved.strip_prefix(root).ok(),
-        None => path.is_relative().then_some(path),
+    let resolved = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .zip(path.file_name())
+        .map_or_else(
+            || path.to_path_buf(),
+            |(parent, name)| without_verbatim_prefix(parent).join(name),
+        );
+    let relative = match repository_root(&resolved) {
+        Some(root) => resolved.strip_prefix(root).ok().map(Path::to_path_buf),
+        None => path.is_relative().then(|| path.to_path_buf()),
     };
-    let folded = relative.map(|relative| {
-        let mut parts: Vec<Component> = Vec::new();
-        for component in relative.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
-                    parts.pop();
-                }
-                component => parts.push(component),
-            }
-        }
-        parts.into_iter().collect::<PathBuf>()
-    });
-    match folded {
+    match relative.map(|relative| lexically_folded(&relative)) {
         Some(folded) if !folded.starts_with(Component::ParentDir) => {
             RepositoryPath::Relative(folded)
         }
@@ -108,13 +93,48 @@ pub fn repository_path(path: &Path) -> RepositoryPath {
     }
 }
 
+fn repository_root(resolved: &Path) -> Option<PathBuf> {
+    let workspace = env::var_os(WORKSPACE_VARIABLE)
+        .and_then(|workspace| fs::canonicalize(workspace).ok())
+        .map(without_verbatim_prefix)
+        .filter(|workspace| resolved.starts_with(workspace));
+    let repository = resolved
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join(REPOSITORY_MARKER).exists());
+    match (repository, workspace) {
+        (Some(repository), Some(workspace)) if !repository.starts_with(&workspace) => {
+            Some(workspace)
+        }
+        (Some(repository), _) => Some(repository.to_path_buf()),
+        (None, workspace) => workspace,
+    }
+}
+
+fn lexically_folded(path: &Path) -> PathBuf {
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
+                parts.pop();
+            }
+            component => parts.push(component),
+        }
+    }
+    parts.into_iter().collect()
+}
+
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
-    match path
-        .to_str()
-        .and_then(|text| text.strip_prefix(VERBATIM_PREFIX))
-    {
-        Some(stripped) => PathBuf::from(stripped),
-        None => path,
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(share) = text.strip_prefix(VERBATIM_UNC_PREFIX) {
+        PathBuf::from(format!("{UNC_PREFIX}{share}"))
+    } else if let Some(local) = text.strip_prefix(VERBATIM_PREFIX) {
+        PathBuf::from(local)
+    } else {
+        path
     }
 }
 
@@ -316,5 +336,35 @@ mod tests {
             repository_path(&loose),
             RepositoryPath::Absolute(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workflow_keeps_the_place_of_the_link() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir(repository.path().join(REPOSITORY_MARKER)).unwrap();
+        let workflows = repository.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let target = shared.path().join("agent.yml");
+        fs::write(&target, "").unwrap();
+        let link = workflows.join("agent.yml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            repository_path(&link),
+            RepositoryPath::Relative(relative) if relative == Path::new(".github/workflows/agent.yml")
+        ));
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_removed() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\repo\a.yml")),
+            PathBuf::from(r"C:\repo\a.yml")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\a.yml")),
+            PathBuf::from(r"\\server\share\a.yml")
+        );
     }
 }

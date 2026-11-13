@@ -30,7 +30,7 @@
 - `tool.driver` は、`name` が `sekimori`、`version` と `semanticVersion` が Cargo の版、`informationUri` がリポジトリの URL。`rules` には 5 つの規則を全て、ADR 0011 の ID の順に並べる。各規則は `shortDescription` に平文の 1 行目の文、`fullDescription` と `help` に規則が見る設定と軸を書き、`properties.tags` を `security` にする
 - 結果は、指摘ごとに 1 つ。`ruleId`、`level`(`warning` か `error`)、`message.text`、`locations` に 1 つの位置を書く。`ruleIndex` は書かない(任意で、規則の一覧とずれたときに壊れた SARIF になるため)
 - `message.text` は、平文の 1 行目の文と、軸ごとに 1 行の `who can trigger: 1 (理由)` の形。GitHub の画面は等幅ではないので、平文の桁揃えは使わない
-- 位置の `artifactLocation.uri` は、ファイルの実際のパス(シンボリックリンクを解いたもの)から、リポジトリの根からの相対パスを `/` で区切って書く。根は、GitHub Actions の上で `GITHUB_WORKSPACE` の下にあればそこ、なければ `.git` を持つ最も近い祖先のディレクトリとする。根が見つからなければ、渡された相対パスを `.` と `..` を字面で畳んで書く。畳んでも `..` で始まるときと絶対パスは、`file:///` の URI にする。空白や `#` などはパーセントエンコードする
+- 位置の `artifactLocation.uri` は、ファイルの置き場所(ディレクトリのシンボリックリンクは解き、ファイル自身のリンクは解かない)から、リポジトリの根からの相対パスを `/` で区切って書く。根は `.git` を持つ最も近い祖先のディレクトリとする。ただし GitHub Actions の上で、その祖先が `GITHUB_WORKSPACE` の外にある(または無い)ときは `GITHUB_WORKSPACE` とする。`actions/checkout` の `path:` でサブディレクトリに取り出したリポジトリでも、根がずれないようにするため。根が見つからなければ、渡された相対パスを `.` と `..` を字面で畳んで書く。畳んでも `..` で始まるときと絶対パスは、`file:///` の URI にする(Windows のドライブの `:` は残し、UNC のパスは `file://server/share/...`)。空白や `#` などはパーセントエンコードする
 - 列は SARIF の既定に合わせて UTF-16 の単位で数え、run の `columnKind` に `utf16CodeUnits` と書く。平文の列も同じ数え方にする(ASCII だけの行では今までと変わらない)
 - 読めないファイルは、平文と同じく標準エラーに出し、加えて `invocations[0].toolExecutionNotifications` に `error` で書き、`executionSuccessful` を偽にする。終了コードは ADR 0010 のとおりで、指摘があれば 1。GitHub Actions で `upload-sarif` に渡すときは、送るステップに `if: always()` を付ける
 - `partialFingerprints` と `runAutomationDetails` は書かない。前者は `upload-sarif` が作り、後者は `upload-sarif` の `category` で利用者が決める

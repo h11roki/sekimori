@@ -60,10 +60,13 @@ fn main() -> ExitCode {
     }
     if let Format::Sarif = cli.format {
         let log = sarif_log(results, &errors);
-        if let Err(error) = serde_json::to_writer_pretty(&mut stdout, &log)
+        let written = serde_json::to_vec_pretty(&log)
             .map_err(io::Error::from)
-            .and_then(|()| writeln!(stdout))
-        {
+            .and_then(|mut document| {
+                document.push(b'\n');
+                stdout.write_all(&document)
+            });
+        if let Err(error) = written {
             return write_failure(&error);
         }
     }
