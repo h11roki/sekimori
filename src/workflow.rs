@@ -1,7 +1,6 @@
 use std::collections::HashSet;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::{env, fs, io};
 
 use yamlpath::{Document, QueryError, Route};
 
@@ -21,6 +20,11 @@ pub enum LoadError {
 }
 
 const WORKFLOW_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
+const WORKSPACE_VARIABLE: &str = "GITHUB_WORKSPACE";
+const REPOSITORY_MARKER: &str = ".git";
+const VERBATIM_PREFIX: &str = r"\\?\";
+const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+const UNC_PREFIX: &str = r"\\";
 
 pub struct Workflow {
     pub path: PathBuf,
@@ -55,8 +59,82 @@ impl Workflow {
 
     pub fn position(&self, route: &Route) -> Option<(usize, usize)> {
         let feature = self.document.query_pretty(route).ok()?;
-        let (row, column) = feature.location.point_span.0;
-        Some((row + 1, column + 1))
+        let (row, byte_column) = feature.location.point_span.0;
+        let offset = feature.location.byte_span.0;
+        let line_before = &self.document.source()[offset - byte_column..offset];
+        Some((row + 1, line_before.encode_utf16().count() + 1))
+    }
+}
+
+pub enum RepositoryPath {
+    Relative(PathBuf),
+    Absolute(PathBuf),
+}
+
+pub fn repository_path(path: &Path) -> RepositoryPath {
+    let resolved = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .zip(path.file_name())
+        .map_or_else(
+            || path.to_path_buf(),
+            |(parent, name)| without_verbatim_prefix(parent).join(name),
+        );
+    let relative = match repository_root(&resolved) {
+        Some(root) => resolved.strip_prefix(root).ok().map(Path::to_path_buf),
+        None => path.is_relative().then(|| path.to_path_buf()),
+    };
+    match relative.map(|relative| lexically_folded(&relative)) {
+        Some(folded) if !folded.starts_with(Component::ParentDir) => {
+            RepositoryPath::Relative(folded)
+        }
+        Some(_) | None => RepositoryPath::Absolute(resolved),
+    }
+}
+
+fn repository_root(resolved: &Path) -> Option<PathBuf> {
+    let workspace = env::var_os(WORKSPACE_VARIABLE)
+        .and_then(|workspace| fs::canonicalize(workspace).ok())
+        .map(without_verbatim_prefix)
+        .filter(|workspace| resolved.starts_with(workspace));
+    let repository = resolved
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join(REPOSITORY_MARKER).exists());
+    match (repository, workspace) {
+        (Some(repository), Some(workspace)) if !repository.starts_with(&workspace) => {
+            Some(workspace)
+        }
+        (Some(repository), _) => Some(repository.to_path_buf()),
+        (None, workspace) => workspace,
+    }
+}
+
+fn lexically_folded(path: &Path) -> PathBuf {
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
+                parts.pop();
+            }
+            component => parts.push(component),
+        }
+    }
+    parts.into_iter().collect()
+}
+
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(share) = text.strip_prefix(VERBATIM_UNC_PREFIX) {
+        PathBuf::from(format!("{UNC_PREFIX}{share}"))
+    } else if let Some(local) = text.strip_prefix(VERBATIM_PREFIX) {
+        PathBuf::from(local)
+    } else {
+        path
     }
 }
 
@@ -223,5 +301,70 @@ mod tests {
     fn yaml_that_is_not_a_workflow_is_a_parse_error() {
         let result = Workflow::load(&Path::new(FIXTURES).join("broken.yml"));
         assert!(matches!(result, Err(LoadError::Parse { .. })));
+    }
+
+    #[test]
+    fn columns_count_utf16_code_units() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issues\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - {name: \"日本語\", uses: x/y@v1, with: {b: c}}\n"
+                .to_string(),
+        )
+        .unwrap();
+        let route = yamlpath::route!["jobs", "a", "steps", 0, "with", "b"];
+        assert_eq!(workflow.position(&route), Some((6, 43)));
+    }
+
+    #[test]
+    fn repository_paths_start_at_the_nearest_git_directory() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir(repository.path().join(REPOSITORY_MARKER)).unwrap();
+        let workflows = repository.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        let file = workflows.join("a.yml");
+        fs::write(&file, "").unwrap();
+        for path in [file.clone(), workflows.join("../workflows/./a.yml")] {
+            assert!(matches!(
+                repository_path(&path),
+                RepositoryPath::Relative(relative) if relative == Path::new(".github/workflows/a.yml")
+            ));
+        }
+        let outside = tempfile::tempdir().unwrap();
+        let loose = outside.path().join("a.yml");
+        fs::write(&loose, "").unwrap();
+        assert!(matches!(
+            repository_path(&loose),
+            RepositoryPath::Absolute(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workflow_keeps_the_place_of_the_link() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir(repository.path().join(REPOSITORY_MARKER)).unwrap();
+        let workflows = repository.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let target = shared.path().join("agent.yml");
+        fs::write(&target, "").unwrap();
+        let link = workflows.join("agent.yml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            repository_path(&link),
+            RepositoryPath::Relative(relative) if relative == Path::new(".github/workflows/agent.yml")
+        ));
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_removed() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\repo\a.yml")),
+            PathBuf::from(r"C:\repo\a.yml")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\a.yml")),
+            PathBuf::from(r"\\server\share\a.yml")
+        );
     }
 }

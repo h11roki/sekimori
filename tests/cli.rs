@@ -88,3 +88,30 @@ fn a_directory_without_workflows_exits_with_two() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("no .yml or .yaml files directly inside"));
 }
+
+#[test]
+fn sarif_gathers_every_file_into_one_log_and_keeps_the_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "sarif"])
+        .args(
+            ["../findings/open-codex.yml", "broken.yml"]
+                .iter()
+                .map(|path| Path::new(FIXTURES).join(path)),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let log: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let run = &log["runs"][0];
+    let results = run["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result["level"] == "error"));
+    let uri = results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        .as_str()
+        .unwrap();
+    assert!(
+        uri.ends_with("tests/fixtures/findings/open-codex.yml"),
+        "{uri}"
+    );
+    assert_eq!(run["invocations"][0]["executionSuccessful"], false);
+}
