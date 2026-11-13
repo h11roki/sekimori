@@ -20,7 +20,8 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
-const WRITER_EVENTS: [&str; 3] = ["push", "workflow_dispatch", "schedule"];
+const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
+const WRITER_BRANCH_EVENT: &str = "push";
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
@@ -232,11 +233,8 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
             let [list, needle] = call.args.as_slice() else {
                 return false;
             };
-            let trusted_list = matches!(&list.inner, Expr::Call(from_json)
-                if matches!(from_json.func, Function::FromJSON)
-                    && matches!(from_json.args.as_slice(), [json]
-                        if matches!(&json.inner, Expr::Literal(Literal::String(text))
-                            if text.trim_start().starts_with('[') && !admits_outsiders(text))));
+            let trusted_list = json_string_list(list)
+                .is_some_and(|names| !names.iter().any(|name| admits_outsiders(name)));
             trusted_list && is_actor_value(needle, event)
         }
         Expr::Literal(Literal::Boolean(runs)) => !runs,
@@ -247,7 +245,7 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum UpstreamOrigin {
     Writers,
-    SameRepository,
+    Restricted,
     Anyone,
 }
 
@@ -255,12 +253,14 @@ enum UpstreamOrigin {
 struct UpstreamPath {
     events: Option<Vec<String>>,
     same_repository: bool,
+    actor_checked: bool,
 }
 
 impl UpstreamPath {
     const ANY: UpstreamPath = UpstreamPath {
         events: None,
         same_repository: false,
+        actor_checked: false,
     };
 
     fn and(&self, other: &UpstreamPath) -> UpstreamPath {
@@ -277,26 +277,22 @@ impl UpstreamPath {
         UpstreamPath {
             events,
             same_repository: self.same_repository || other.same_repository,
+            actor_checked: self.actor_checked || other.actor_checked,
         }
     }
 
     fn origin(&self) -> UpstreamOrigin {
-        let Some(events) = &self.events else {
-            return UpstreamOrigin::Anyone;
+        let writers = |event: &String| WRITER_EVENTS.contains(&event.as_str());
+        let restricted = |event: &String| {
+            writers(event)
+                || event == WRITER_BRANCH_EVENT
+                || (self.same_repository && event == SAME_REPOSITORY_EVENT)
         };
-        if events
-            .iter()
-            .all(|event| WRITER_EVENTS.contains(&event.as_str()))
-        {
-            UpstreamOrigin::Writers
-        } else if self.same_repository
-            && events.iter().all(|event| {
-                WRITER_EVENTS.contains(&event.as_str()) || event == SAME_REPOSITORY_EVENT
-            })
-        {
-            UpstreamOrigin::SameRepository
-        } else {
-            UpstreamOrigin::Anyone
+        match &self.events {
+            Some(events) if events.iter().all(writers) => UpstreamOrigin::Writers,
+            Some(events) if events.iter().all(restricted) => UpstreamOrigin::Restricted,
+            _ if self.actor_checked => UpstreamOrigin::Restricted,
+            _ => UpstreamOrigin::Anyone,
         }
     }
 }
@@ -342,15 +338,40 @@ fn upstream_paths(expression: &SpannedExpr) -> Vec<UpstreamPath> {
             paths.extend(upstream_paths(rhs));
             paths
         }
-        _ if requires_actor_check(expression, ExternalEvent::WorkflowRun) => Vec::new(),
+        _ if excludes_workflow_run(expression) => Vec::new(),
+        _ if requires_actor_check(expression, ExternalEvent::WorkflowRun) => vec![UpstreamPath {
+            actor_checked: true,
+            ..UpstreamPath::ANY
+        }],
         _ => vec![upstream_fact(expression)],
+    }
+}
+
+fn excludes_workflow_run(expression: &SpannedExpr) -> bool {
+    match &expression.inner {
+        Expr::Literal(Literal::Boolean(runs)) => !runs,
+        Expr::BinExpr(BinExpr {
+            op: op @ (BinOp::Eq | BinOp::Neq),
+            lhs,
+            rhs,
+        }) => match (&lhs.inner, &rhs.inner) {
+            (Expr::Context(context), Expr::Literal(Literal::String(name)))
+            | (Expr::Literal(Literal::String(name)), Expr::Context(context))
+                if context.matches(EVENT_NAME_CONTEXT) =>
+            {
+                let same_event = name.eq_ignore_ascii_case(ExternalEvent::WorkflowRun.name());
+                (*op == BinOp::Eq) != same_event
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
 fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
     let events = |events: Vec<String>| UpstreamPath {
         events: Some(events),
-        same_repository: false,
+        ..UpstreamPath::ANY
     };
     match &expression.inner {
         Expr::BinExpr(BinExpr {
@@ -369,8 +390,8 @@ fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
                     || (left.matches(THIS_REPOSITORY) && right.matches(UPSTREAM_REPOSITORY)) =>
             {
                 UpstreamPath {
-                    events: None,
                     same_repository: true,
+                    ..UpstreamPath::ANY
                 }
             }
             _ => UpstreamPath::ANY,
@@ -750,26 +771,25 @@ jobs:
     #[test]
     fn workflow_run_from_writer_only_upstream_events_is_not_an_outside_event() {
         for (events, condition) in [
-            ("workflow_run", "github.event.workflow_run.event == 'push'"),
             (
                 "workflow_run",
-                "github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule'",
+                "github.event.workflow_run.event == 'workflow_dispatch'",
             ),
             (
                 "workflow_run",
-                "contains(fromJSON('[\"push\", \"Workflow_Dispatch\"]'), github.event.workflow_run.event)",
+                "github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'schedule'",
             ),
             (
                 "workflow_run",
-                "(github.event.workflow_run.event == 'pull_request_target' && github.actor == 'octocat') || github.event.workflow_run.event == 'push'",
+                "contains(fromJSON('[\"schedule\", \"Workflow_Dispatch\"]'), github.event.workflow_run.event)",
             ),
             (
                 "workflow_run",
-                "github.event.workflow_run.event == 'push' || false",
+                "github.event.workflow_run.event == 'schedule' || false",
             ),
             (
                 "[workflow_run, push]",
-                "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'push'",
+                "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch'",
             ),
         ] {
             assert_eq!(
@@ -781,8 +801,12 @@ jobs:
     }
 
     #[test]
-    fn workflow_run_from_a_same_repository_pull_request_is_restricted_but_still_outside() {
+    fn workflow_run_whose_upstream_is_restricted_still_lets_outside_text_in() {
         for condition in [
+            "github.event.workflow_run.event == 'push'",
+            "github.actor == 'dependabot[bot]'",
+            "(github.event.workflow_run.event == 'pull_request_target' && github.actor == 'octocat') || github.event.workflow_run.event == 'push'",
+            "contains(fromJSON('[\"push\", \"schedule\"]'), github.event.workflow_run.event)",
             "(github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_repository.full_name == github.repository",
             "github.repository == github.event.workflow_run.head_repository.full_name && github.event.workflow_run.event == 'Pull_Request'",
             "(github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository) || github.event.workflow_run.event == 'push'",

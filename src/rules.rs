@@ -590,7 +590,7 @@ jobs:
 jobs:
   fix:
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.event == 'push'
+    if: github.event.workflow_run.event == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -603,6 +603,42 @@ jobs:
         let assessments = assess(&workflow);
         assert_eq!(assessments[0].who_can_trigger, None);
         assert!(assessments[0].hits.is_empty());
+    }
+
+    #[test]
+    fn workflow_run_restricted_to_an_actor_still_counts_outside_text_and_the_head_checkout() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: workflow_run
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: anthropics/claude-code-action@v1
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        assert_eq!(
+            assessments[0]
+                .who_can_trigger
+                .as_ref()
+                .map(|score| score.weight),
+            Some(Weight::Half)
+        );
+        assert_eq!(
+            assessments[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect::<Vec<_>>(),
+            [Rule::PrHeadCheckout]
+        );
     }
 
     #[test]
