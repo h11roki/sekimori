@@ -12,7 +12,7 @@
 - workflow_run の `github.event.workflow_run` は上流の実行を表す。`event` は上流を起動したイベントの名前、`head_repository` は上流の実行の head のリポジトリ
 - 外部の人が上流を起動できるかは、上流のイベントで決まる
   - `push` と `workflow_dispatch` は、リポジトリに書き込める人しか起こせない。`schedule` は人が起こさない
-  - `pull_request` は fork からも起こせるが、そのときの head のリポジトリは fork になる。同じリポジトリの枝からの `pull_request` は、枝を push できる人、つまり書き込める人しか起こせない
+  - `pull_request` は fork からも起こせるが、そのときの head のリポジトリは fork になる。同じリポジトリの枝からの `pull_request` は、書き込める人しか起こせない。GitHub の文書(Creating a pull request、2026-11-13 に確かめた)は、公開リポジトリで PR を開くには head の枝への書き込み権限が要ると書いている
   - `pull_request_target`、`issues`、`issue_comment` などは外部の人が起こせ、しかも head のリポジトリはこのリポジトリになる。head のリポジトリを比べるだけでは絞れない
 - 残りの 2 件は、上流のワークフローが `push: tags` だけで動くものだった。上流は別のファイルにあり、1 つのファイルの検査では分からない
 
@@ -29,10 +29,12 @@
 - workflow_run の `if:` から、どの経路でも成り立つ 2 つの事実を読む
   - 上流のイベントの候補:`github.event.workflow_run.event == '<名前>'` の比較。`&&` は候補を狭め、`||` は候補を合わせる。比べていなければ、どのイベントもありうる
   - 同じリポジトリ:`github.event.workflow_run.head_repository.full_name == github.repository`(左右はどちらでもよい)。`&&` はどちらかで成り立てばよく、`||` は両方で成り立つ必要がある
+- 経路のうち、ADR 0012 の起動した人の比較で絞っているもの、`github.event_name` の比較で workflow_run では通らないもの、`false` は、外部の人が通れない経路として扱う。`||` で上流のイベントの比較と組み合わせても読めるようにするため
 - 次のどちらかなら、workflow_run を絞っているとみなす
   - 上流のイベントの候補が、`push`、`workflow_dispatch`、`schedule` だけ
   - 上流のイベントの候補が、それらと `pull_request` だけで、同じリポジトリであることも成り立つ
 - ジョブとステップの両方に `if:` があれば、両方が成り立つ(`&&` と同じ)として読む
+- 絞っているときは、そのステップの外部の人が起こせるイベントから workflow_run を外してから、全ての規則に渡す。`unrestricted-trigger` だけでなく、起動できる人の軸の 0.5(外部の人の文面が届く)と、`pr-head-checkout` の workflow_run の条件にも効く
 - これまでの `github.actor` などの比較による絞り方は、そのまま保つ
 - 上流のファイルを探すこと(選択肢 3)は、今回はしない
 
