@@ -22,14 +22,14 @@
 
 高橋さんが判断を任せ(2026-11-12 に「承認取らなくていい」)、Claude が 1 を選んだ。
 
-- 値は、`${{ }}` の式を ADR 0012 と同じ式のパーサーで読み、`secrets.NAME`、`secrets['NAME']`、または `secrets` そのもの(`toJSON(secrets)`、`secrets.*`)を、大文字と小文字を区別せずに探す。文字列の中の `secrets` や、`steps.import-secrets` のような名前の一部は数えない。`secrets[matrix.name]` のように名前が実行時に決まるものは、`GITHUB_TOKEN` かもしれないので数えない。`secrets.GITHUB_TOKEN` は GitHub が作る短命のトークンなので、どちらの規則でも数えない
-- `env` は、ステップ、ジョブ、ワークフローの順で最初に見つかる値で決める。途中の `env` がまるごと式(`env: ${{ fromJSON(...) }}`)なら、それより近い `env` の値は残し、それより外側は見ない。どの名前を上書きするか分からないため。ADR 0014 の `run` の変数と `GEMINI_CLI_TRUST_WORKSPACE` も同じ決め方で読む
+- 値は、`${{ }}` の式を ADR 0012 と同じ式のパーサーで読み、式の値に流れ込むものだけを見る(`a && b` は `b`、`a || b` は両方、`toJSON`、`fromJSON`、`format`、`join` の引数)。`secrets.APP_ID != ''` や `contains(secrets.LIST, 'x')` のように比べるだけのものは、値が出ないので数えない。その上で `secrets.NAME`、`secrets['NAME']`、または `secrets` そのもの(`toJSON(secrets)`、`secrets.*`)を、大文字と小文字を区別せずに探す。文字列の中の `secrets` や、`steps.import-secrets` のような名前の一部は数えない。`secrets[matrix.name]` のように名前が実行時に決まるものは、`GITHUB_TOKEN` かもしれないので数えない。`secrets.GITHUB_TOKEN` は GitHub が作る短命のトークンなので、どちらの規則でも数えない
+- `env` は、ステップ、ジョブ、ワークフローの順で最初に見つかる値で決める。途中の `env` がまるごと式(`env: ${{ fromJSON(...) }}`)なら、それより近い `env` の値は残し、それより外側は見ない。どの名前を上書きするか分からないため。ADR 0014 の `run` の変数と `GEMINI_CLI_TRUST_WORKSPACE` も同じ決め方で読む。ステップの `env` が `${{ env.NAME }}` で外側の `env` の秘密情報を参照するものも、その秘密情報とみなす
 - 期限の無いトークン: GitHub のトークンとしてエージェントに渡る値に、`secrets.GITHUB_TOKEN` 以外の `secrets.*` がある
   - claude-code-action: `with` の `github_token`
   - codex-action と run-gemini-cli: `env` の `GITHUB_TOKEN` と `GH_TOKEN`
   - `github.token`、`steps.*.outputs.*`(App のトークン)、それらを `||` でつないだものは数えない
 - 他の秘密情報: 次の値に、`secrets.GITHUB_TOKEN` 以外の `secrets.*` がある
-  - `with` のうち、エージェント自身の資格情報の入力(claude は `anthropic_api_key`、`claude_code_oauth_token`、`github_token`、`ssh_signing_key`、codex は `openai-api-key`、gemini は `gemini_api_key`、`google_api_key`)を除いたもの。`settings`、`claude_args`、`prompt` に書いた秘密情報もエージェントに届く。`${{ env.NAME }}` で、秘密情報を持つ `env` の変数を参照するものも数える(GitHub のプロパティの参照と同じく、名前の大文字と小文字は区別しない)。GitHub が action に渡す前に値へ置き換えるため
+  - `with` のうち、値がエージェントに届く入力(claude は `prompt`、`settings`、`claude_args`、codex は `prompt`、`codex-args`、gemini は `prompt`、`settings`)。`gcp_workload_identity_provider` のように action が自分で使う入力は、エージェントに届かないので見ない。`${{ env.NAME }}` で秘密情報を持つ `env` の変数を参照するもの、`${{ toJSON(env) }}` のように `env` をまるごと渡すものも数える(GitHub のプロパティの参照と同じく、名前の大文字と小文字は区別しない)。GitHub が action に渡す前に値へ置き換えるため
   - まるごと式の `env` が秘密情報を参照するもの(claude-code-action と codex-action)
   - claude-code-action と codex-action: `env` のうち、エージェント自身の資格情報として読む名前と `GITHUB_TOKEN`、`GH_TOKEN` を除いたもの。claude は上の資格情報の名前、codex は `OPENAI_API_KEY`
   - run-gemini-cli: `env` のうち、`settings` の文字列が `$NAME` か `${NAME}` で参照する名前のもの。それ以外はシェルから消える。`GEMINI_API_KEY`、`GOOGLE_API_KEY`、`GITHUB_TOKEN`、`GH_TOKEN` は除く
@@ -49,6 +49,7 @@
 - run-gemini-cli の `security.environmentVariableRedaction.allowed` で消さない名前を足していても、`settings` から参照していなければ数えない
 - run-gemini-cli の GitHub のトークンは、`settings` から参照しているかに関わらず、`env` にあれば数える。公式の例の書き方で MCP サーバーに渡るため
 - 秘密情報を参照しない値(`vars.*`、直接書いた文字列)は数えない
+- `with` の入力のうち、エージェントに届くとした一覧の外のもの(`plugin_marketplaces` の URL など)に書いた秘密情報は見ない。各社が入力を足したときは一覧を見直す
 
 ## 再検討する条件
 

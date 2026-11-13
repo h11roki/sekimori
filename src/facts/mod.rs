@@ -5,6 +5,7 @@ mod trigger;
 
 use std::ops::Range;
 
+use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue};
 use github_actions_models::workflow::job::NormalJob;
@@ -105,22 +106,35 @@ fn expression_spans(text: &str) -> Vec<Range<usize>> {
     let mut offset = 0;
     while let Some(found) = text[offset..].find(EXPRESSION_START) {
         let start = offset + found;
+        let body = start + EXPRESSION_START.len();
         let mut in_string = false;
-        let mut end = text.len();
-        for index in start + EXPRESSION_START.len()..bytes.len() {
+        let mut outside_strings = None;
+        for index in body..bytes.len() {
             match bytes[index] {
                 b'\'' => in_string = !in_string,
                 b'}' if !in_string && text[index..].starts_with(EXPRESSION_END) => {
-                    end = index + EXPRESSION_END.len();
+                    outside_strings = Some(index);
                     break;
                 }
                 _ => {}
             }
         }
+        let end = outside_strings
+            .or_else(|| text[body..].find(EXPRESSION_END).map(|end| body + end))
+            .map_or(text.len(), |end| end + EXPRESSION_END.len());
         spans.push(start..end);
         offset = end;
     }
     spans
+}
+
+fn parse_expression(text: &str) -> Option<SpannedExpr<'_>> {
+    let trimmed = text.trim();
+    let body = trimmed
+        .strip_prefix(EXPRESSION_START)
+        .map(|body| body.strip_suffix(EXPRESSION_END).unwrap_or(body))
+        .unwrap_or(trimmed);
+    Expr::parse(body.trim()).ok()
 }
 
 struct EnvVariable<'w> {

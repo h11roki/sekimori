@@ -767,4 +767,12 @@ jobs:
             None
         );
     }
+    #[test]
+    fn a_stray_quote_in_an_expression_does_not_swallow_later_lines() {
+        let steps = "      - run: |
+          echo ${{ github.event.pull_request.title || 'none }}
+          git checkout ${{ github.event.workflow_run.head_sha }}
+";
+        assert!(claude_after("workflow_run", steps).is_some());
+    }
 }

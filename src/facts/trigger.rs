@@ -6,7 +6,7 @@ use github_actions_models::common::If;
 use github_actions_models::workflow::event::Events;
 use yamlpath::Route;
 
-use super::{input, input_route};
+use super::{input, input_route, parse_expression};
 use crate::agent::{Agent, AgentStep};
 
 const ACTOR_CONTEXTS: [&str; 3] = [
@@ -169,14 +169,7 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
         .flatten()
         .map(|condition| match condition {
             If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
-            If::Expr(raw) => {
-                let trimmed = raw.trim();
-                let bare = trimmed
-                    .strip_prefix("${{")
-                    .and_then(|body| body.strip_suffix("}}"))
-                    .map_or(trimmed, str::trim);
-                Expr::parse(bare).ok()
-            }
+            If::Expr(raw) => parse_expression(raw),
         })
         .collect()
 }
