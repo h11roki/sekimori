@@ -17,6 +17,12 @@ const ACTOR_CONTEXTS: [&str; 3] = [
 const EVENT_NAME_CONTEXT: &str = "github.event_name";
 const EVENT_PAYLOAD: &str = "github.event";
 const EVENT_SENDER: &str = "github.event.sender";
+const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
+const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
+const THIS_REPOSITORY: &str = "github.repository";
+const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
+const WRITER_BRANCH_EVENT: &str = "push";
+const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
     "FIRST_TIMER",
@@ -109,6 +115,16 @@ pub fn external_events(events: &Events) -> Vec<ExternalEvent> {
     .collect()
 }
 
+pub fn outside_events(step: &AgentStep, events: &[ExternalEvent]) -> Vec<ExternalEvent> {
+    let writers_only = events.contains(&ExternalEvent::WorkflowRun)
+        && upstream_origin(step) == UpstreamOrigin::Writers;
+    events
+        .iter()
+        .copied()
+        .filter(|event| !(*event == ExternalEvent::WorkflowRun && writers_only))
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct OpenTrigger<'w> {
     pub setting: String,
@@ -146,9 +162,12 @@ pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Optio
             (setting.to_string(), step.route.clone())
         }
     };
+    let upstream_restricted = events.contains(&ExternalEvent::WorkflowRun)
+        && upstream_origin(step) != UpstreamOrigin::Anyone;
     let open_events: Vec<ExternalEvent> = events
         .iter()
         .copied()
+        .filter(|event| !(*event == ExternalEvent::WorkflowRun && upstream_restricted))
         .filter(|event| {
             !conditions
                 .iter()
@@ -214,16 +233,192 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
             let [list, needle] = call.args.as_slice() else {
                 return false;
             };
-            let trusted_list = matches!(&list.inner, Expr::Call(from_json)
-                if matches!(from_json.func, Function::FromJSON)
-                    && matches!(from_json.args.as_slice(), [json]
-                        if matches!(&json.inner, Expr::Literal(Literal::String(text))
-                            if text.trim_start().starts_with('[') && !admits_outsiders(text))));
+            let trusted_list = json_string_list(list)
+                .is_some_and(|names| !names.iter().any(|name| admits_outsiders(name)));
             trusted_list && is_actor_value(needle, event)
         }
         Expr::Literal(Literal::Boolean(runs)) => !runs,
         _ => false,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UpstreamOrigin {
+    Writers,
+    Restricted,
+    Anyone,
+}
+
+#[derive(Clone)]
+struct UpstreamPath {
+    events: Option<Vec<String>>,
+    same_repository: bool,
+    actor_checked: bool,
+}
+
+impl UpstreamPath {
+    const ANY: UpstreamPath = UpstreamPath {
+        events: None,
+        same_repository: false,
+        actor_checked: false,
+    };
+
+    fn and(&self, other: &UpstreamPath) -> UpstreamPath {
+        let events = match (&self.events, &other.events) {
+            (Some(left), Some(right)) => Some(
+                left.iter()
+                    .filter(|event| right.contains(event))
+                    .cloned()
+                    .collect(),
+            ),
+            (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+            (None, None) => None,
+        };
+        UpstreamPath {
+            events,
+            same_repository: self.same_repository || other.same_repository,
+            actor_checked: self.actor_checked || other.actor_checked,
+        }
+    }
+
+    fn origin(&self) -> UpstreamOrigin {
+        let writers = |event: &String| WRITER_EVENTS.contains(&event.as_str());
+        let restricted = |event: &String| {
+            writers(event)
+                || event == WRITER_BRANCH_EVENT
+                || (self.same_repository && event == SAME_REPOSITORY_EVENT)
+        };
+        match &self.events {
+            Some(events) if events.iter().all(writers) => UpstreamOrigin::Writers,
+            Some(events) if events.iter().all(restricted) => UpstreamOrigin::Restricted,
+            _ if self.actor_checked => UpstreamOrigin::Restricted,
+            _ => UpstreamOrigin::Anyone,
+        }
+    }
+}
+
+fn upstream_origin(step: &AgentStep) -> UpstreamOrigin {
+    conditions(step)
+        .iter()
+        .map(|condition| match condition {
+            Some(condition) => upstream_paths(condition),
+            None => vec![UpstreamPath::ANY],
+        })
+        .fold(vec![UpstreamPath::ANY], |paths, condition| {
+            paths
+                .iter()
+                .flat_map(|path| condition.iter().map(|other| path.and(other)))
+                .collect()
+        })
+        .iter()
+        .map(UpstreamPath::origin)
+        .max()
+        .unwrap_or(UpstreamOrigin::Writers)
+}
+
+fn upstream_paths(expression: &SpannedExpr) -> Vec<UpstreamPath> {
+    match &expression.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => {
+            let right = upstream_paths(rhs);
+            upstream_paths(lhs)
+                .iter()
+                .flat_map(|left| right.iter().map(|other| left.and(other)))
+                .collect()
+        }
+        Expr::BinExpr(BinExpr {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+        }) => {
+            let mut paths = upstream_paths(lhs);
+            paths.extend(upstream_paths(rhs));
+            paths
+        }
+        _ if excludes_workflow_run(expression) => Vec::new(),
+        _ if requires_actor_check(expression, ExternalEvent::WorkflowRun) => vec![UpstreamPath {
+            actor_checked: true,
+            ..UpstreamPath::ANY
+        }],
+        _ => vec![upstream_fact(expression)],
+    }
+}
+
+fn excludes_workflow_run(expression: &SpannedExpr) -> bool {
+    match &expression.inner {
+        Expr::Literal(Literal::Boolean(runs)) => !runs,
+        Expr::BinExpr(BinExpr {
+            op: op @ (BinOp::Eq | BinOp::Neq),
+            lhs,
+            rhs,
+        }) => match (&lhs.inner, &rhs.inner) {
+            (Expr::Context(context), Expr::Literal(Literal::String(name)))
+            | (Expr::Literal(Literal::String(name)), Expr::Context(context))
+                if context.matches(EVENT_NAME_CONTEXT) =>
+            {
+                let same_event = name.eq_ignore_ascii_case(ExternalEvent::WorkflowRun.name());
+                (*op == BinOp::Eq) != same_event
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
+    let events = |events: Vec<String>| UpstreamPath {
+        events: Some(events),
+        ..UpstreamPath::ANY
+    };
+    match &expression.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+        }) => match (&lhs.inner, &rhs.inner) {
+            (Expr::Context(context), Expr::Literal(Literal::String(name)))
+            | (Expr::Literal(Literal::String(name)), Expr::Context(context))
+                if context.matches(UPSTREAM_EVENT) =>
+            {
+                events(vec![name.to_ascii_lowercase()])
+            }
+            (Expr::Context(left), Expr::Context(right))
+                if (left.matches(UPSTREAM_REPOSITORY) && right.matches(THIS_REPOSITORY))
+                    || (left.matches(THIS_REPOSITORY) && right.matches(UPSTREAM_REPOSITORY)) =>
+            {
+                UpstreamPath {
+                    same_repository: true,
+                    ..UpstreamPath::ANY
+                }
+            }
+            _ => UpstreamPath::ANY,
+        },
+        Expr::Call(call) if matches!(call.func, Function::Contains) => match call.args.as_slice() {
+            [list, needle] if matches!(&needle.inner, Expr::Context(context) if context.matches(UPSTREAM_EVENT)) => {
+                json_string_list(list).map_or(UpstreamPath::ANY, |names| {
+                    events(names.iter().map(|name| name.to_ascii_lowercase()).collect())
+                })
+            }
+            _ => UpstreamPath::ANY,
+        },
+        _ => UpstreamPath::ANY,
+    }
+}
+
+fn json_string_list(expression: &SpannedExpr) -> Option<Vec<String>> {
+    let Expr::Call(from_json) = &expression.inner else {
+        return None;
+    };
+    let (Function::FromJSON, [json]) = (&from_json.func, from_json.args.as_slice()) else {
+        return None;
+    };
+    let Expr::Literal(Literal::String(text)) = &json.inner else {
+        return None;
+    };
+    serde_json::from_str(text).ok()
 }
 
 fn admits_outsiders(text: &str) -> bool {
@@ -549,6 +744,121 @@ jobs:
                 "{events} {condition}"
             );
         }
+    }
+
+    fn outside_on(events: &str, condition: &str) -> Vec<&'static str> {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            format!(
+                "on: {events}
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    if: {condition}
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+            ),
+        )
+        .unwrap();
+        let steps = agent_steps(&workflow);
+        outside_events(&steps[0], &external_events(&workflow.model.on.events))
+            .into_iter()
+            .map(ExternalEvent::name)
+            .collect()
+    }
+
+    #[test]
+    fn workflow_run_from_writer_only_upstream_events_is_not_an_outside_event() {
+        for (events, condition) in [
+            (
+                "workflow_run",
+                "github.event.workflow_run.event == 'workflow_dispatch'",
+            ),
+            (
+                "workflow_run",
+                "github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'schedule'",
+            ),
+            (
+                "workflow_run",
+                "contains(fromJSON('[\"schedule\", \"Workflow_Dispatch\"]'), github.event.workflow_run.event)",
+            ),
+            (
+                "workflow_run",
+                "github.event.workflow_run.event == 'schedule' || false",
+            ),
+            (
+                "[workflow_run, push]",
+                "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch'",
+            ),
+        ] {
+            assert_eq!(
+                outside_on(events, condition),
+                Vec::<&str>::new(),
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_run_whose_upstream_is_restricted_still_lets_outside_text_in() {
+        for condition in [
+            "github.event.workflow_run.event == 'push'",
+            "github.actor == 'dependabot[bot]'",
+            "(github.event.workflow_run.event == 'pull_request_target' && github.actor == 'octocat') || github.event.workflow_run.event == 'push'",
+            "contains(fromJSON('[\"push\", \"schedule\"]'), github.event.workflow_run.event)",
+            "(github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_repository.full_name == github.repository",
+            "github.repository == github.event.workflow_run.head_repository.full_name && github.event.workflow_run.event == 'Pull_Request'",
+            "(github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository) || github.event.workflow_run.event == 'push'",
+            "(github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'push') && (github.event.workflow_run.head_repository.full_name == github.repository || github.event.workflow_run.event == 'push')",
+        ] {
+            assert_eq!(
+                outside_on("workflow_run", condition),
+                ["workflow_run"],
+                "{condition}"
+            );
+            assert_eq!(gemini_on("workflow_run", condition), None, "{condition}");
+        }
+    }
+
+    #[test]
+    fn workflow_run_that_outsiders_can_start_upstream_stays_open() {
+        for condition in [
+            "github.event.workflow_run.head_repository.full_name == github.repository",
+            "github.event.workflow_run.event == 'pull_request'",
+            "github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'pull_request_target'",
+            "github.event.workflow_run.event == 'push' || contains(github.event.workflow_run.head_branch, 'x')",
+            "github.event.workflow_run.event != 'pull_request_target'",
+            "(github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository) || github.event.workflow_run.event == 'issue_comment'",
+            "contains(fromJSON('[\"push\", \"issue_comment\"]'), github.event.workflow_run.event)",
+            "github.event.workflow_run.conclusion == 'success'",
+        ] {
+            assert_eq!(
+                outside_on("workflow_run", condition),
+                ["workflow_run"],
+                "{condition}"
+            );
+            assert!(
+                gemini_on("workflow_run", condition).is_some(),
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_run_job_and_step_conditions_are_read_together() {
+        let setting = open_setting(
+            "on: workflow_run
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request'
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        if: github.event.workflow_run.head_repository.full_name == github.repository
+",
+        );
+        assert_eq!(setting, None);
     }
 
     #[test]
