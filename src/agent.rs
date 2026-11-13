@@ -20,20 +20,21 @@ const AGENT_ACTIONS: [(&str, Agent); 3] = [
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
-        let Uses::Repository(repository) = uses else {
-            return None;
-        };
-        if repository
-            .subpath()
-            .is_some_and(|subpath| !subpath.is_empty())
-        {
-            return None;
-        }
         AGENT_ACTIONS
             .iter()
-            .find(|(action, _)| action.eq_ignore_ascii_case(repository.slug()))
+            .find(|(action, _)| is_root_action(uses, action))
             .map(|(_, agent)| *agent)
     }
+}
+
+pub(crate) fn is_root_action(uses: &Uses, action: &str) -> bool {
+    let Uses::Repository(repository) = uses else {
+        return false;
+    };
+    repository
+        .subpath()
+        .is_none_or(|subpath| subpath.is_empty())
+        && action.eq_ignore_ascii_case(repository.slug())
 }
 
 #[derive(Debug)]
@@ -41,6 +42,7 @@ pub struct AgentStep<'w> {
     pub agent: Agent,
     pub job_id: &'w str,
     pub job: &'w NormalJob,
+    pub index: usize,
     pub step: &'w UsesStep,
     pub route: Route<'w>,
 }
@@ -60,6 +62,7 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
                             agent,
                             job_id,
                             job,
+                            index,
                             step,
                             route: steps.with_key(index),
                         });
@@ -74,6 +77,7 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
                                 agent,
                                 job_id,
                                 job,
+                                index,
                                 step,
                                 route: steps.with_keys([
                                     Component::from(index),
