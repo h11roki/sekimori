@@ -110,7 +110,7 @@ sekimori --format sarif > sekimori.sarif
 
 | ID | Axis | What it reports |
 |---|---|---|
-| `unrestricted-trigger` | who can trigger | The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it. On `workflow_run`, an `if:` that limits the upstream run to `push`, `workflow_dispatch`, `schedule` or a same-repository `pull_request` also counts as a check. |
+| `unrestricted-trigger` | who can trigger | The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor, author association or label). On `workflow_run`, an `if:` that limits the upstream run to `push`, `workflow_dispatch`, `schedule` or a same-repository `pull_request` also counts as a check. |
 | `broad-tools` | allowed tools | The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a `tools.core` allow-list under `--yolo`. |
 | `pr-head-checkout` | allowed tools | A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. |
 | `long-lived-token` | permissions/secrets | The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of `GITHUB_TOKEN` or a short-lived app token. |

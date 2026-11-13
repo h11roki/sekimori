@@ -23,6 +23,12 @@ const THIS_REPOSITORY: &str = "github.repository";
 const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
 const WRITER_BRANCH_EVENT: &str = "push";
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
+const LABEL_NAME: &str = "github.event.label.name";
+const LABEL_LISTS: [&str; 3] = [
+    "github.event.issue.labels.*.name",
+    "github.event.pull_request.labels.*.name",
+    "github.event.discussion.labels.*.name",
+];
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
     "FIRST_TIMER",
@@ -225,9 +231,12 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
                 let same_event = matches!(value, Literal::String(name) if name.eq_ignore_ascii_case(event.name()));
                 return (*op == BinOp::Eq) != same_event;
             }
+            let label = matches!(&subject.inner, Expr::Context(context) if context.matches(LABEL_NAME))
+                && matches!(value, Literal::String(_));
             *op == BinOp::Eq
-                && is_actor_value(subject, event)
-                && !matches!(value, Literal::String(text) if admits_outsiders(text))
+                && (label
+                    || (is_actor_value(subject, event)
+                        && !matches!(value, Literal::String(text) if admits_outsiders(text))))
         }
         Expr::Call(call) if matches!(call.func, Function::Contains) => {
             let [list, needle] = call.args.as_slice() else {
@@ -235,7 +244,10 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
             };
             let trusted_list = json_string_list(list)
                 .is_some_and(|names| !names.iter().any(|name| admits_outsiders(name)));
-            trusted_list && is_actor_value(needle, event)
+            let labels = matches!(&list.inner, Expr::Context(context)
+                if LABEL_LISTS.into_iter().any(|pattern| context.matches(pattern)))
+                && matches!(&needle.inner, Expr::Literal(Literal::String(_)));
+            labels || (trusted_list && is_actor_value(needle, event))
         }
         Expr::Literal(Literal::Boolean(runs)) => !runs,
         _ => false,
@@ -693,6 +705,40 @@ jobs:
             ),
         ] {
             assert_eq!(gemini_on(events, condition), None, "{events} {condition}");
+        }
+    }
+
+    #[test]
+    fn a_label_that_needs_triage_restricts_who_can_start_it() {
+        for (events, condition) in [
+            ("issues", "github.event.label.name == 'agent:gemini'"),
+            (
+                "pull_request_target",
+                "${{ 'safe to test' == github.event.label.name }}",
+            ),
+            (
+                "[issues, issue_comment]",
+                "contains(github.event.issue.labels.*.name, 'gemini')",
+            ),
+            (
+                "pull_request_target",
+                "contains(github.event.pull_request.labels.*.name, 'gemini') && github.event.action == 'labeled'",
+            ),
+        ] {
+            assert_eq!(gemini_on(events, condition), None, "{condition}");
+        }
+    }
+
+    #[test]
+    fn a_label_that_anyone_can_satisfy_leaves_it_open() {
+        for condition in [
+            "github.event.label.name != 'skip'",
+            "${{ !contains(github.event.issue.labels.*.name, 'skip') }}",
+            "contains(github.event.issue.labels.*.name, github.event.comment.body)",
+            "contains(github.event.issue.title, 'gemini')",
+            "contains(github.event.issue.labels.*.name, 'gemini') || github.event.action == 'opened'",
+        ] {
+            assert!(gemini_on("issues", condition).is_some(), "{condition}");
         }
     }
 

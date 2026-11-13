@@ -61,7 +61,7 @@ impl Rule {
     pub fn description(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => {
-                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it. On `workflow_run`, an `if:` that limits the upstream run to `push`, `workflow_dispatch`, `schedule` or a same-repository `pull_request` also counts as a check. Fills the who-can-trigger axis."
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor, author association or label). On `workflow_run`, an `if:` that limits the upstream run to `push`, `workflow_dispatch`, `schedule` or a same-repository `pull_request` also counts as a check. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
