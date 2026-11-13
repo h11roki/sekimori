@@ -4,11 +4,6 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
 
 permissions: {}
 
@@ -24,19 +19,24 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
             suffix: ""
+            rustflags: ""
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             suffix: ""
+            rustflags: ""
           - runner: macos-latest
             target: aarch64-apple-darwin
             suffix: ""
+            rustflags: ""
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: .exe
+            rustflags: -C target-feature=+crt-static
     env:
       TARGET: ${{ matrix.target }}
       ASSET: sekimori-${{ matrix.target }}${{ matrix.suffix }}
       BINARY: target/${{ matrix.target }}/release/sekimori${{ matrix.suffix }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
     defaults:
       run:
         shell: bash
@@ -55,6 +55,14 @@ jobs:
       - run: cargo build --release --locked --target "$TARGET"
       - run: cp "$BINARY" "$ASSET"
       - run: '"./$ASSET" --version'
+      - name: Check that the tag matches the built version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          built=$("./$ASSET" --version)
+          if [ "$built" != "sekimori ${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the built version: $built"
+            exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ASSET }}
@@ -71,16 +79,6 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check that the tag matches the crate version
-        run: |
-          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
-            exit 1
-          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
