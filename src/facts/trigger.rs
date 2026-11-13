@@ -23,6 +23,7 @@ const THIS_REPOSITORY: &str = "github.repository";
 const WRITER_EVENTS: [&str; 2] = ["workflow_dispatch", "schedule"];
 const WRITER_BRANCH_EVENT: &str = "push";
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
+const LABEL_NAME: &str = "github.event.label.name";
 const OUTSIDER_ASSOCIATIONS: [&str; 5] = [
     "NONE",
     "FIRST_TIMER",
@@ -172,7 +173,7 @@ pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Optio
             !conditions
                 .iter()
                 .flatten()
-                .any(|condition| requires_actor_check(condition, *event))
+                .any(|condition| gates_who_starts(condition, *event))
         })
         .collect();
     (!open_events.is_empty()).then_some(OpenTrigger {
@@ -198,18 +199,18 @@ fn wildcard<'w>(step: &AgentStep<'w>, name: &str) -> Option<(String, Route<'w>)>
     (value.trim() == "*").then(|| (format!("{key}: '*'"), input_route(step, key)))
 }
 
-fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool {
+fn gates_who_starts(expression: &SpannedExpr, event: ExternalEvent) -> bool {
     match &expression.inner {
         Expr::BinExpr(BinExpr {
             op: BinOp::And,
             lhs,
             rhs,
-        }) => requires_actor_check(lhs, event) || requires_actor_check(rhs, event),
+        }) => gates_who_starts(lhs, event) || gates_who_starts(rhs, event),
         Expr::BinExpr(BinExpr {
             op: BinOp::Or,
             lhs,
             rhs,
-        }) => requires_actor_check(lhs, event) && requires_actor_check(rhs, event),
+        }) => gates_who_starts(lhs, event) && gates_who_starts(rhs, event),
         Expr::BinExpr(BinExpr {
             op: op @ (BinOp::Eq | BinOp::Neq),
             lhs,
@@ -225,9 +226,14 @@ fn requires_actor_check(expression: &SpannedExpr, event: ExternalEvent) -> bool 
                 let same_event = matches!(value, Literal::String(name) if name.eq_ignore_ascii_case(event.name()));
                 return (*op == BinOp::Eq) != same_event;
             }
-            *op == BinOp::Eq
-                && is_actor_value(subject, event)
-                && !matches!(value, Literal::String(text) if admits_outsiders(text))
+            if *op != BinOp::Eq {
+                return false;
+            }
+            let label = matches!(&subject.inner, Expr::Context(context) if context.matches(LABEL_NAME))
+                && matches!(value, Literal::String(_));
+            label
+                || (is_actor_value(subject, event)
+                    && !matches!(value, Literal::String(text) if admits_outsiders(text)))
         }
         Expr::Call(call) if matches!(call.func, Function::Contains) => {
             let [list, needle] = call.args.as_slice() else {
@@ -253,14 +259,14 @@ enum UpstreamOrigin {
 struct UpstreamPath {
     events: Option<Vec<String>>,
     same_repository: bool,
-    actor_checked: bool,
+    gated: bool,
 }
 
 impl UpstreamPath {
     const ANY: UpstreamPath = UpstreamPath {
         events: None,
         same_repository: false,
-        actor_checked: false,
+        gated: false,
     };
 
     fn and(&self, other: &UpstreamPath) -> UpstreamPath {
@@ -277,7 +283,7 @@ impl UpstreamPath {
         UpstreamPath {
             events,
             same_repository: self.same_repository || other.same_repository,
-            actor_checked: self.actor_checked || other.actor_checked,
+            gated: self.gated || other.gated,
         }
     }
 
@@ -291,7 +297,7 @@ impl UpstreamPath {
         match &self.events {
             Some(events) if events.iter().all(writers) => UpstreamOrigin::Writers,
             Some(events) if events.iter().all(restricted) => UpstreamOrigin::Restricted,
-            _ if self.actor_checked => UpstreamOrigin::Restricted,
+            _ if self.gated => UpstreamOrigin::Restricted,
             _ => UpstreamOrigin::Anyone,
         }
     }
@@ -339,8 +345,8 @@ fn upstream_paths(expression: &SpannedExpr) -> Vec<UpstreamPath> {
             paths
         }
         _ if excludes_workflow_run(expression) => Vec::new(),
-        _ if requires_actor_check(expression, ExternalEvent::WorkflowRun) => vec![UpstreamPath {
-            actor_checked: true,
+        _ if gates_who_starts(expression, ExternalEvent::WorkflowRun) => vec![UpstreamPath {
+            gated: true,
             ..UpstreamPath::ANY
         }],
         _ => vec![upstream_fact(expression)],
@@ -361,6 +367,12 @@ fn excludes_workflow_run(expression: &SpannedExpr) -> bool {
             {
                 let same_event = name.eq_ignore_ascii_case(ExternalEvent::WorkflowRun.name());
                 (*op == BinOp::Eq) != same_event
+            }
+            (Expr::Context(context), Expr::Literal(Literal::String(_)))
+            | (Expr::Literal(Literal::String(_)), Expr::Context(context))
+                if context.matches(LABEL_NAME) =>
+            {
+                *op == BinOp::Eq
             }
             _ => false,
         },
@@ -693,6 +705,48 @@ jobs:
             ),
         ] {
             assert_eq!(gemini_on(events, condition), None, "{events} {condition}");
+        }
+    }
+
+    #[test]
+    fn adding_a_label_that_needs_triage_restricts_who_can_start_it() {
+        for (events, condition) in [
+            ("issues", "github.event.label.name == 'agent:gemini'"),
+            (
+                "pull_request_target",
+                "${{ 'safe to test' == github.event.label.name }}",
+            ),
+        ] {
+            assert_eq!(gemini_on(events, condition), None, "{condition}");
+        }
+        assert!(
+            outside_on(
+                "[workflow_run, issues]",
+                "github.event.label.name == 'agent'"
+            )
+            .iter()
+            .all(|event| *event != "workflow_run")
+        );
+    }
+
+    #[test]
+    fn a_label_that_stays_on_the_issue_or_is_missing_leaves_it_open() {
+        for (events, condition) in [
+            (
+                "[issues, issue_comment]",
+                "contains(github.event.issue.labels.*.name, 'gemini')",
+            ),
+            (
+                "pull_request_target",
+                "contains(github.event.pull_request.labels.*.name, 'gemini')",
+            ),
+            ("issues", "github.event.label.name != 'skip'"),
+            (
+                "issues",
+                "github.event.label.name == 'gemini' || github.event.action == 'opened'",
+            ),
+        ] {
+            assert!(gemini_on(events, condition).is_some(), "{condition}");
         }
     }
 
