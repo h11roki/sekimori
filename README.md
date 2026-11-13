@@ -41,7 +41,7 @@ jobs:
         with:
           persist-credentials: false
       - id: sekimori
-        uses: h11roki/sekimori@de939eae8f92c2d9d97204ce4f7a1332415ad818 # v0.1.0
+        uses: h11roki/sekimori@68892dc99b538f63a843e57aead2a72bf45c30ca # v0.2.0
       - if: >-
           !cancelled()
           && steps.sekimori.outputs.sarif-file != ''
@@ -70,18 +70,18 @@ The action downloads the release binary that matches its own version and checks 
 Download a binary from [Releases](https://github.com/h11roki/sekimori/releases) and verify it:
 
 ```sh
-gh release download v0.1.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
+gh release download v0.2.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
 gh attestation verify sekimori-aarch64-apple-darwin \
   --repo h11roki/sekimori \
   --signer-workflow h11roki/sekimori/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.0
+  --source-ref refs/tags/v0.2.0
 chmod +x sekimori-aarch64-apple-darwin
 ```
 
 Or build it from source with Rust 1.99.1:
 
 ```sh
-cargo install --locked --git https://github.com/h11roki/sekimori --tag v0.1.0
+cargo install --locked --git https://github.com/h11roki/sekimori --tag v0.2.0
 ```
 
 Then run it in your repository:
