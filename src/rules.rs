@@ -7,7 +7,8 @@ use yamlpath::Route;
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
     BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, broad_tool, external_events,
-    head_checkout, long_lived_token, never_runs, open_trigger, other_secret, secret_env,
+    head_checkout, long_lived_token, never_runs, open_trigger, other_secret, outside_events,
+    secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -60,7 +61,7 @@ impl Rule {
     pub fn description(self) -> &'static str {
         match self {
             Rule::UnrestrictedTrigger => {
-                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it. Fills the who-can-trigger axis."
+                "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it. On `workflow_run`, an `if:` that limits the upstream run to `push`, `workflow_dispatch`, `schedule` or a same-repository `pull_request` also counts as a check. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
@@ -177,7 +178,10 @@ pub fn assess(workflow: &Workflow) -> Vec<Assessment<'_>> {
     agent_steps(workflow)
         .into_iter()
         .filter(|step| !never_runs(step))
-        .map(|step| assess_step(workflow, step, &events))
+        .map(|step| {
+            let events = outside_events(&step, &events);
+            assess_step(workflow, step, &events)
+        })
         .collect()
 }
 
@@ -576,6 +580,29 @@ jobs:
             )
         );
         assert_eq!(assessment.level(), Some(Level::Warning));
+    }
+
+    #[test]
+    fn workflow_run_started_only_by_writers_reaches_no_rule_about_outsiders() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: workflow_run
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'push'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: anthropics/claude-code-action@v1
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow);
+        assert_eq!(assessments[0].who_can_trigger, None);
+        assert!(assessments[0].hits.is_empty());
     }
 
     #[test]

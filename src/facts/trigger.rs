@@ -114,6 +114,21 @@ pub fn external_events(events: &Events) -> Vec<ExternalEvent> {
     .collect()
 }
 
+pub fn outside_events(step: &AgentStep, events: &[ExternalEvent]) -> Vec<ExternalEvent> {
+    let only_writers_start_upstream = events.contains(&ExternalEvent::WorkflowRun)
+        && conditions(step)
+            .iter()
+            .flatten()
+            .map(upstream)
+            .reduce(Upstream::both)
+            .is_some_and(|upstream| upstream.only_writers_start_it());
+    events
+        .iter()
+        .copied()
+        .filter(|event| !(*event == ExternalEvent::WorkflowRun && only_writers_start_upstream))
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct OpenTrigger<'w> {
     pub setting: String,
@@ -151,16 +166,9 @@ pub fn open_trigger<'w>(step: &AgentStep<'w>, events: &[ExternalEvent]) -> Optio
             (setting.to_string(), step.route.clone())
         }
     };
-    let only_writers = conditions
-        .iter()
-        .flatten()
-        .map(upstream)
-        .reduce(Upstream::both)
-        .is_some_and(|upstream| upstream.only_writers_start_it());
     let open_events: Vec<ExternalEvent> = events
         .iter()
         .copied()
-        .filter(|event| !(*event == ExternalEvent::WorkflowRun && only_writers))
         .filter(|event| {
             !conditions
                 .iter()
@@ -285,6 +293,12 @@ impl Upstream {
 }
 
 fn upstream(expression: &SpannedExpr) -> Upstream {
+    if requires_actor_check(expression, ExternalEvent::WorkflowRun) {
+        return Upstream {
+            events: Some(Vec::new()),
+            same_repository: true,
+        };
+    }
     let unknown = Upstream {
         events: None,
         same_repository: false,
@@ -324,10 +338,6 @@ fn upstream(expression: &SpannedExpr) -> Upstream {
                 }
             }
             _ => unknown,
-        },
-        Expr::Literal(Literal::Boolean(false)) => Upstream {
-            events: Some(Vec::new()),
-            same_repository: false,
         },
         _ => unknown,
     }
@@ -658,32 +668,79 @@ jobs:
         }
     }
 
+    fn outside_on(events: &str, condition: &str) -> Vec<&'static str> {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            format!(
+                "on: {events}
+jobs:
+  gemini:
+    runs-on: ubuntu-latest
+    if: {condition}
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+            ),
+        )
+        .unwrap();
+        let steps = agent_steps(&workflow);
+        outside_events(&steps[0], &external_events(&workflow.model.on.events))
+            .into_iter()
+            .map(ExternalEvent::name)
+            .collect()
+    }
+
     #[test]
-    fn workflow_run_from_writer_only_upstream_events_is_restricted() {
-        for condition in [
-            "github.event.workflow_run.event == 'push'",
-            "github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule'",
-            "(github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_repository.full_name == github.repository",
-            "github.repository == github.event.workflow_run.head_repository.full_name && github.event.workflow_run.event == 'Pull_Request'",
-            "github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'workflow_dispatch'",
+    fn workflow_run_from_writer_only_upstream_events_is_not_an_outside_event() {
+        for (events, condition) in [
+            ("workflow_run", "github.event.workflow_run.event == 'push'"),
+            (
+                "workflow_run",
+                "github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule'",
+            ),
+            (
+                "workflow_run",
+                "(github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_repository.full_name == github.repository",
+            ),
+            (
+                "workflow_run",
+                "github.repository == github.event.workflow_run.head_repository.full_name && github.event.workflow_run.event == 'Pull_Request'",
+            ),
+            (
+                "workflow_run",
+                "(github.event.workflow_run.event == 'pull_request_target' && github.actor == 'octocat') || github.event.workflow_run.event == 'push'",
+            ),
+            (
+                "workflow_run",
+                "(github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository) || false",
+            ),
+            (
+                "[workflow_run, push]",
+                "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'push'",
+            ),
         ] {
-            assert_eq!(gemini_on("workflow_run", condition), None, "{condition}");
+            assert_eq!(
+                outside_on(events, condition),
+                Vec::<&str>::new(),
+                "{condition}"
+            );
         }
     }
 
     #[test]
-    fn workflow_run_that_outsiders_can_start_upstream_stays_open() {
+    fn workflow_run_that_outsiders_can_start_upstream_stays_an_outside_event() {
         for condition in [
             "github.event.workflow_run.head_repository.full_name == github.repository",
             "github.event.workflow_run.event == 'pull_request'",
             "github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'pull_request_target'",
-            "github.event.workflow_run.event == 'push' || github.actor == 'octocat'",
+            "github.event.workflow_run.event == 'push' || contains(github.event.workflow_run.head_branch, 'x')",
             "github.event.workflow_run.event != 'pull_request_target'",
             "(github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository) || github.event.workflow_run.event == 'issue_comment'",
             "github.event.workflow_run.conclusion == 'success'",
         ] {
-            assert!(
-                gemini_on("workflow_run", condition).is_some(),
+            assert_eq!(
+                outside_on("workflow_run", condition),
+                ["workflow_run"],
                 "{condition}"
             );
         }
@@ -691,7 +748,8 @@ jobs:
 
     #[test]
     fn workflow_run_job_and_step_conditions_are_read_together() {
-        let setting = open_setting(
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
             "on: workflow_run
 jobs:
   gemini:
@@ -700,9 +758,13 @@ jobs:
     steps:
       - uses: google-github-actions/run-gemini-cli@v0
         if: github.event.workflow_run.head_repository.full_name == github.repository
-",
-        );
-        assert_eq!(setting, None);
+"
+            .to_string(),
+        )
+        .unwrap();
+        let steps = agent_steps(&workflow);
+        let events = external_events(&workflow.model.on.events);
+        assert!(outside_events(&steps[0], &events).is_empty());
     }
 
     #[test]
