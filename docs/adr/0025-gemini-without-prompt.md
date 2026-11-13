@@ -1,4 +1,4 @@
-# 0025. `prompt` を渡さない run-gemini-cli は、PR の head を読まない限り、起動できる人の軸を数えない
+# 0025. `prompt` を渡さない run-gemini-cli は、作業場所が既定のブランチのままなら、起動できる人の軸を数えない
 
 - ステータス: 承認
 - 日付: 2026-11-13
@@ -13,12 +13,12 @@
   - CLI は `gemini --yolo --prompt "${PROMPT}"` で動き、`PROMPT` は `inputs.prompt` だけから作る。ステップの `env` の `PROMPT` は、中のステップの `env` で上書きされる
   - `github_issue_number` と `github_pr_number` は、イベントの番号を既定に持つが、使い道は遠隔測定の記録とインストールの環境変数だけで、本文は読まない
   - GitHub は、Action に無い名前の入力を警告するだけで、Action には渡さない
-- Gemini CLI は、作業場所の `GEMINI.md` と `.gemini/settings.json` を読む。issue やコメントのイベントでは作業場所は既定のブランチで、外部の人は書けない。PR の head を checkout したときだけ、外部の人が書いたものになる。ADR 0014 は、`.gemini/settings.json` を読むのは作業場所を信頼したときだけと確かめて `pr-head-checkout` を当て、`GEMINI.md` のような指示のファイルは起動できる人の軸で数えるとした。`GEMINI.md` を信頼の無い作業場所でも読むかは、確かめていない
+- Gemini CLI は、作業場所の `.gemini/settings.json` と、作業場所とその下のディレクトリの `GEMINI.md` を読む。`issues`、`issue_comment`、`discussion`、`discussion_comment` では、既定の checkout は既定のブランチで、外部の人は書けない。PR の head をどこかのディレクトリに取り出したときだけ、外部の人が書いたものが混ざる。`pull_request_review` と `pull_request_review_comment` では、既定の checkout が PR の merge ref を取り出す。`workflow_run` では、PR の実行の成果物を展開する形がある。ADR 0014 は、`.gemini/settings.json` を読むのは作業場所を信頼したときだけと確かめて `pr-head-checkout` を当て、`GEMINI.md` のような指示のファイルは起動できる人の軸で数えるとした。`GEMINI.md` を信頼の無い作業場所でも読むかは、確かめていない
 - codex-action は、`prompt` も `prompt-file` も無いと `codex exec` を動かさない。claude-code-action は、`prompt` が無いとコメントを読んで動く。この 2 つは今回の対象にしない
 
 ## 検討した選択肢
 
-1. run-gemini-cli のステップに `prompt` の入力が無く、前のステップで PR の head を checkout していなければ、起動できる人の軸を数えない
+1. run-gemini-cli のステップに `prompt` の入力が無く、作業場所が既定のブランチのまま(上の 4 つのイベントだけで動き、前のステップで PR の head を取り出していない)なら、起動できる人の軸を数えない
 2. 1 と同じ形で、起動できる人の軸を 0.5 に下げる
 3. プロンプトの文に `github.event` などの外部の値が含まれないときも、軸を数えない
 
@@ -26,20 +26,26 @@
 
 高橋さんが判断を任せ(2026-11-13 に「承認を求めないでどんどん続けていい」)、Claude が 1 を選んだ。
 
-- run-gemini-cli のステップで、`with` に `prompt` の入力(大文字と小文字を区別しない)が無ければ、エージェントには決まった既定のプロンプトだけが届くとみなす
-- ADR 0014 の PR の head の checkout(`pull_request_target`、`workflow_run`、`issue_comment` で、同じジョブの前のステップが作業場所の根に PR の head を取り出す)が無ければ、起動できる人の軸を数えず、`unrestricted-trigger` も出さない。checkout があれば、作業場所の信頼や `settings` に関わらず、これまでどおりに数える
-- `with` を式で丸ごと渡すなど、入力を読めないときは、これまでどおり文面が届くとみなす。`prompt` が空の文字列でも、渡しているので、これまでどおりに数える
+- run-gemini-cli のステップで、`with` に `prompt` の入力(大文字と小文字を区別しない)が無いか、値が空白だけなら、エージェントには決まったプロンプトだけが届くとみなす
+- そのうえで、外部の人が起こせるイベントが `issues`、`issue_comment`、`discussion`、`discussion_comment` だけで、同じジョブの前のステップが PR の head を取り出していなければ、起動できる人の軸を数えず、`unrestricted-trigger` も出さない
+  - PR の head の取り出しは ADR 0014 の `actions/checkout` と `run` の読み方を使うが、`path` は問わない。下のディレクトリの `GEMINI.md` も読まれるため。base への checkout で戻ったともみなさない
+  - 取り出していれば、これまでどおりに数え、理由に、PR の head の `GEMINI.md` が届くことを書く。作業場所の信頼や `settings` は問わない
+- 他のイベント(`pull_request_target`、`pull_request_review`、`pull_request_review_comment`、`workflow_run`)を含むときは、作業場所に PR の中身が入りうるので、これまでどおりに数える
+- `with` を式で丸ごと渡すなど、入力を読めないときは、これまでどおり文面が届くとみなす
 
 ## 理由
 
 - 起動できる人の軸は、外部の人がエージェントに指示を混ぜられるかを測るもので、ADR 0007 の 1 も 0.5 も文面が届くことが前提になっている。文面が届かないなら、どちらにも当たらない
 - 2 は、0.5 を「起動は絞っているが文面は届く」と決めた ADR 0007 の意味と食い違う
 - 3 は、run-gemini-cli の公式の例のように、プロンプトを `/gemini-review` のような作業場所のコマンドにし、そのコマンドが環境変数から issue の本文を読む形を見逃す。プロンプトに外部の値が無くても、エージェントが自分で issue を読みに行く指示もありうる
-- PR の head を checkout すると、外部の人が書いた `GEMINI.md` がプロンプトに加わりうるので、その場合は数え続ける。信頼の無い作業場所で `GEMINI.md` を読むかは確かめていないので、指摘を出す側に倒し、`pr-head-checkout` の条件(信頼と `settings`)は使わない
+- PR の head を取り出すと、外部の人が書いた `GEMINI.md` がプロンプトに加わりうるので、その場合は数え続ける。信頼の無い作業場所で `GEMINI.md` を読むかは確かめていないので、指摘を出す側に倒し、`pr-head-checkout` の条件(根への取り出し、信頼と `settings`)は使わない
+- 作業場所に PR の中身が入りうるイベントを、取り出し方ごとに読み分けるのは、成果物の展開のように経路が多く、見逃しやすい。既定のブランチのままと言えるイベントだけを軽くする
 
 ## 受け入れたトレードオフ
 
 - 作業場所の `GEMINI.md` が、外部の人の issue を読みに行くよう指示している形は見逃す。作業場所は書き込める人が書いたものなので、その指示も書き込める人の判断とみなす
+- 前のステップが issue の本文をファイルに書き出し、それを `GEMINI.md` として置くような形は見逃す
+- `pull_request_target` などで `prompt` を渡さず、PR の中身も取り出さないワークフローは、これまでどおり数えるので誤検知が残る
 - `prompt` を渡していない設定は、多くが入力の名前の間違いで、エージェントは利用者の意図どおりに動いていない。sekimori はその間違いを知らせない
 - 外部の人がエージェントを起動して API の料金を使わせる経路は、起動できる人の軸に数えない
 
