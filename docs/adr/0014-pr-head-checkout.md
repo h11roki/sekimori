@@ -29,9 +29,9 @@
   - run-gemini-cli: `settings` が無いか空で、ステップ、ジョブ、ワークフローの順で最初に見つかる `env` の `GEMINI_CLI_TRUST_WORKSPACE` が `true`
   - codex-action: 当てない。作業場所の設定は信頼が無いと効かないため
 - PR の head の checkout は次のどれか
-  - `actions/checkout` のステップで、`ref` か `repository` の値に、PR の head を指す値(`github.event.pull_request.head.`、`github.head_ref`、`github.event.workflow_run.head_`、`refs/pull/`)があり、`path` が無いか、空か、`.` か `./`
-  - `run` のステップで、`gh pr checkout` があるか、`git checkout`、`git switch`、`git fetch`、`git pull`、`git reset` のどれかがあり、スクリプトかそのステップの `env` の値に、PR の head を指す値か `pull/<番号>/head` や `pull/<番号>/merge` の形がある
-  - 値の比べ方は、大文字と小文字と空白を無視した部分文字列とする
+  - `actions/checkout` のステップで、`ref` か `repository` の値が PR の head を指し、`path` が作業場所の根(無い、空、`.`、`./`、`${{ github.workspace }}` など、`.` と空の区切りだけからなるもの)。PR の head を指す値は、`github.event.pull_request.head.`、`github.event.pull_request.merge_commit_sha`、`github.head_ref`、`github.event.workflow_run.head_`、`github.event.workflow_run.pull_requests[...].head.` を含むもの、または `pull/<番号>/head` や `pull/<番号>/merge` の形。大文字と小文字と空白を無視して比べる
+  - `run` のステップで、`gh pr checkout` があるか、`git` の `checkout`、`switch`、`fetch`、`pull`、`reset` があり、スクリプトか、そのステップ、ジョブ、ワークフローの `env` の値が PR の head を指すもの。コマンドは空白とシェルの区切り(`;`、`&`、`|`、括弧、`` ` ``)で語に分けて読み、`git -C <dir>` や `git -c <name>=<value>` のような前に置くオプションは飛ばす
+- エージェントより前のステップを順に見て、作業場所の根への `actions/checkout` は作業場所を入れ替えるものとして扱う。PR の head を取り出した後に、PR の head を指さない checkout が根にあれば、base に戻ったとみなして当てない。`run` は、まだ PR の head を取り出していないときだけ見る
 - エージェントのステップが `parallel:` の中にあるときは、その `parallel:` より前のステップを見る
 - 指摘は checkout のステップの `ref`、`repository`、`run` のどれかを指す。広い道具と両方に当たったときは、許した道具の軸の理由に両方を書く
 
@@ -51,6 +51,8 @@
 - `GEMINI_CLI_TRUST_WORKSPACE` を前のステップで `$GITHUB_ENV` に書くときや、値が式のときは、信頼していないとみなす
 - checkout の `ref` が前のステップの出力(`${{ steps.pr.outputs.sha }}`)のように読めないときは、PR の head と分からないので当てない
 - 部分文字列で比べるので、PR の head を指す値を条件にだけ使う式(`head.repo.fork && 'a' || 'b'`)も PR の head とみなす
+- `run` の `git checkout -b <名前>` のように、PR の head の名前で枝を作るだけのコマンドも、PR の head を取り出したとみなす。`git checkout origin/main -- .claude` のように一部のファイルだけ base に戻すコマンドは、戻したとみなさない
+- 同じ checkout の後に複数のエージェントがあれば、エージェントのステップごとに同じ場所を指す指摘が出る
 - checkout のステップの `if:` は見ない。`if: false` の checkout も数える
 - `run` のステップの `working-directory` は見ず、作業場所の根に取り出したとみなす
 
