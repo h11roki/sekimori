@@ -1,16 +1,28 @@
 mod checkout;
+mod secrets;
 mod tools;
 mod trigger;
 
+use std::ops::Range;
+
+use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue};
-use yamlpath::{Component, Route};
+use github_actions_models::workflow::job::NormalJob;
+use yamlpath::{Component, Route, route};
 
 use crate::agent::AgentStep;
+use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout};
+pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{ExternalEvent, OpenTrigger, external_events, never_runs, open_trigger};
+
+const EXPRESSION_START: &str = "${{";
+const EXPRESSION_END: &str = "}}";
+const ENV_CONTEXT: &str = "env";
+const SETTINGS_INPUT: &str = "settings";
 
 enum Input<'w> {
     Missing,
@@ -73,4 +85,115 @@ fn before_comment(text: &str) -> &str {
 
 fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+fn ends_word(text: &str, reference: &str) -> bool {
+    text.match_indices(reference).any(|(start, _)| {
+        !text[start + reference.len()..]
+            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn references_variable(text: &str, name: &str) -> bool {
+    [format!("${name}"), format!("${{{name}}}")]
+        .iter()
+        .any(|reference| ends_word(text, reference))
+}
+
+fn expression_spans(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find(EXPRESSION_START) {
+        let start = offset + found;
+        let body = start + EXPRESSION_START.len();
+        let mut in_string = false;
+        let mut outside_strings = None;
+        for index in body..bytes.len() {
+            match bytes[index] {
+                b'\'' => in_string = !in_string,
+                b'}' if !in_string && text[index..].starts_with(EXPRESSION_END) => {
+                    outside_strings = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let end = outside_strings
+            .or_else(|| text[body..].find(EXPRESSION_END).map(|end| body + end))
+            .map_or(text.len(), |end| end + EXPRESSION_END.len());
+        spans.push(start..end);
+        offset = end;
+    }
+    spans
+}
+
+fn parse_expression(text: &str) -> Option<SpannedExpr<'_>> {
+    let trimmed = text.trim();
+    let body = trimmed
+        .strip_prefix(EXPRESSION_START)
+        .map(|body| body.strip_suffix(EXPRESSION_END).unwrap_or(body))
+        .unwrap_or(trimmed);
+    Expr::parse(body.trim()).ok()
+}
+
+struct EnvVariable<'w> {
+    name: &'w str,
+    value: String,
+    route: Route<'w>,
+}
+
+struct NearestEnv<'w> {
+    variables: Vec<EnvVariable<'w>>,
+    expression: Option<(&'w str, Route<'w>)>,
+}
+
+fn nearest_env<'w>(
+    workflow: &'w Workflow,
+    job_id: &'w str,
+    job: &'w NormalJob,
+    step_env: &'w LoE<Env>,
+    step_route: &Route<'w>,
+) -> NearestEnv<'w> {
+    let scopes = [
+        (step_env, step_route.with_key(ENV_CONTEXT)),
+        (&job.env, route!["jobs", job_id, ENV_CONTEXT]),
+        (&workflow.model.env, route![ENV_CONTEXT]),
+    ];
+    let mut variables: Vec<EnvVariable<'w>> = Vec::new();
+    for (env, scope) in scopes {
+        let env = match env {
+            LoE::Literal(env) => env,
+            LoE::Expr(expression) => {
+                return NearestEnv {
+                    variables,
+                    expression: Some((expression.as_raw(), scope)),
+                };
+            }
+        };
+        for (name, value) in env {
+            if variables.iter().any(|variable| variable.name == name) {
+                continue;
+            }
+            variables.push(EnvVariable {
+                name,
+                value: value.to_string(),
+                route: scope.with_key(name.as_str()),
+            });
+        }
+    }
+    NearestEnv {
+        variables,
+        expression: None,
+    }
+}
+
+fn agent_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> NearestEnv<'w> {
+    nearest_env(
+        workflow,
+        step.job_id,
+        step.job,
+        &step.step.shared.env,
+        &step.route,
+    )
 }

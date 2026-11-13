@@ -2,7 +2,7 @@ use json_comments::CommentSettings;
 use serde_json::Value;
 use yamlpath::Route;
 
-use super::{Input, before_comment, input, input_route, lookup, program_name};
+use super::{Input, SETTINGS_INPUT, before_comment, input, input_route, lookup, program_name};
 use crate::agent::{Agent, AgentStep};
 
 const CLAUDE_ALLOWED_TOOLS_FLAGS: [&str; 2] = ["--allowedTools", "--allowed-tools"];
@@ -87,7 +87,7 @@ impl<'w> ClaudePermissions<'w> {
         if let Some((key, value)) = input(step, "claude_args") {
             permissions.read_args(key, value, &input_route(step, key));
         }
-        if let Some((key, value)) = input(step, "settings") {
+        if let Some((key, value)) = input(step, SETTINGS_INPUT) {
             permissions.read_settings(key, value, &input_route(step, key));
         }
         if let Some((key, value)) = input(step, CLAUDE_LEGACY_ALLOWED_INPUT) {
@@ -282,7 +282,7 @@ fn opens_any_command(prefix: &str) -> bool {
 }
 
 fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
-    let (key, value) = match lookup(step, "settings") {
+    let (key, value) = match lookup(step, SETTINGS_INPUT) {
         Input::Unreadable => return None,
         Input::Text { key, value } if !value.trim().is_empty() => (key, value),
         Input::Missing | Input::Text { .. } => {

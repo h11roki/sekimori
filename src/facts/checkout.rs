@@ -1,9 +1,11 @@
-use github_actions_models::common::Env;
-use github_actions_models::common::expr::LoE;
 use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
-use super::{ExternalEvent, Input, before_comment, lookup, lookup_in, program_name};
+use super::{
+    ENV_CONTEXT, EXPRESSION_START, ExternalEvent, Input, NearestEnv, SETTINGS_INPUT, agent_env,
+    before_comment, ends_word, expression_spans, lookup, lookup_in, nearest_env, program_name,
+    references_variable,
+};
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
@@ -20,8 +22,6 @@ const BASE_REFERENCES: [&str; 8] = [
     "github.event.workflow_run.head_branch",
     "github.event.repository.default_branch",
 ];
-const EXPRESSION_START: &str = "${{";
-const EXPRESSION_END: &str = "}}";
 const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const WILDCARD: &str = "*";
@@ -55,7 +55,6 @@ const GIT_WORKTREE_COMMANDS: [&str; 8] = [
 const GH_PR_CHECKOUT: [&str; 3] = ["gh", "pr", "checkout"];
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
-const ENV_CONTEXT: &str = "env.";
 const GEMINI_TRUST_VARIABLE: &str = "GEMINI_CLI_TRUST_WORKSPACE";
 
 #[derive(Debug)]
@@ -109,7 +108,13 @@ pub fn head_checkout<'w>(
                 if head.is_none()
                     && checks_out_head(
                         run,
-                        &head_variables(&[&run.shared.env, &step.job.env, &workflow.model.env]),
+                        &head_variables(&nearest_env(
+                            workflow,
+                            step.job_id,
+                            step.job,
+                            &run.shared.env,
+                            &route,
+                        )),
                     )
                 {
                     head = Some((
@@ -179,24 +184,12 @@ fn is_workspace_root(path: &str) -> bool {
         .all(|component| component.is_empty() || component == ".")
 }
 
-fn head_variables<'w>(envs: &[&'w LoE<Env>]) -> Vec<&'w str> {
-    let mut seen: Vec<&str> = Vec::new();
-    let mut heads = Vec::new();
-    for env in envs {
-        let LoE::Literal(env) = env else {
-            continue;
-        };
-        for (name, value) in env.iter() {
-            if seen.contains(&name.as_str()) {
-                continue;
-            }
-            seen.push(name.as_str());
-            if names_head_commit(&normalized(&value.to_string())) {
-                heads.push(name.as_str());
-            }
-        }
-    }
-    heads
+fn head_variables<'w>(env: &NearestEnv<'w>) -> Vec<&'w str> {
+    env.variables
+        .iter()
+        .filter(|variable| names_head_commit(&normalized(&variable.value)))
+        .map(|variable| variable.name)
+        .collect()
 }
 
 fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
@@ -237,19 +230,15 @@ fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
 
 fn flatten_expressions(text: &str) -> String {
     let mut flattened = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(EXPRESSION_START) {
-        flattened.push_str(&rest[..start]);
-        let expression = &rest[start..];
-        let end = expression
-            .find(EXPRESSION_END)
-            .map_or(expression.len(), |end| end + EXPRESSION_END.len());
-        flattened.extend(expression[..end].chars().filter(|c| {
+    let mut last = 0;
+    for span in expression_spans(text) {
+        flattened.push_str(&text[last..span.start]);
+        flattened.extend(text[span.clone()].chars().filter(|c| {
             !c.is_whitespace() && !COMMAND_SEPARATORS.contains(*c) && !WORD_SEPARATORS.contains(*c)
         }));
-        rest = &expression[end..];
+        last = span.end;
     }
-    flattened.push_str(rest);
+    flattened.push_str(&text[last..]);
     flattened
 }
 
@@ -290,20 +279,11 @@ fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
 
 fn refers_to_head_variable(argument: &str, head_variables: &[&str]) -> bool {
     head_variables.iter().any(|name| {
-        [format!("${name}"), format!("${{{name}}}")]
-            .iter()
-            .any(|reference| ends_word(argument, reference))
+        references_variable(argument, name)
             || ends_word(
                 &normalized(argument),
-                &format!("{ENV_CONTEXT}{}", name.to_lowercase()),
+                &format!("{ENV_CONTEXT}.{}", name.to_lowercase()),
             )
-    })
-}
-
-fn ends_word(text: &str, reference: &str) -> bool {
-    text.match_indices(reference).any(|(start, _)| {
-        !text[start + reference.len()..]
-            .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
     })
 }
 
@@ -350,21 +330,17 @@ fn normalized(text: &str) -> String {
 }
 
 fn gemini_loads_workspace_settings(workflow: &Workflow, step: &AgentStep) -> bool {
-    let without_settings = match lookup(step, "settings") {
+    let without_settings = match lookup(step, SETTINGS_INPUT) {
         Input::Missing => true,
         Input::Text { value, .. } => value.trim().is_empty(),
         Input::Unreadable => false,
     };
     without_settings
-        && [&step.step.shared.env, &step.job.env, &workflow.model.env]
-            .into_iter()
-            .find_map(|env| match env {
-                LoE::Literal(env) => env
-                    .get(GEMINI_TRUST_VARIABLE)
-                    .map(|value| value.to_string() == "true"),
-                LoE::Expr(_) => Some(false),
-            })
-            .unwrap_or(false)
+        && agent_env(workflow, step)
+            .variables
+            .iter()
+            .find(|variable| variable.name == GEMINI_TRUST_VARIABLE)
+            .is_some_and(|variable| variable.value == "true")
 }
 
 #[cfg(test)]
@@ -790,5 +766,13 @@ jobs:
             ),
             None
         );
+    }
+    #[test]
+    fn a_stray_quote_in_an_expression_does_not_swallow_later_lines() {
+        let steps = "      - run: |
+          echo ${{ github.event.pull_request.title || 'none }}
+          git checkout ${{ github.event.workflow_run.head_sha }}
+";
+        assert!(claude_after("workflow_run", steps).is_some());
     }
 }
