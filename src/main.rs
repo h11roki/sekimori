@@ -32,8 +32,11 @@ fn main() -> ExitCode {
     let mut results = Vec::new();
     let mut found = false;
     let mut workflows = Vec::new();
+    let mut unreadable = Vec::new();
     for path in workflow_paths(&cli.paths) {
-        match path.and_then(|path| Workflow::load(&path)) {
+        let loaded = path
+            .and_then(|path| Workflow::load(&path).inspect_err(|_| unreadable.push(path.clone())));
+        match loaded {
             Ok(workflow) => workflows.push(workflow),
             Err(error) => {
                 eprintln!("error: {error}");
@@ -41,7 +44,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    let upstreams = Upstreams::new(&workflows);
+    let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();

@@ -24,13 +24,16 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
-const WRITER_EVENTS: [&str; 4] = [
-    "workflow_dispatch",
-    "schedule",
-    "repository_dispatch",
-    "release",
+const UPSTREAM_EVENTS: [(&str, UpstreamOrigin); 8] = [
+    ("workflow_dispatch", UpstreamOrigin::Writers),
+    ("schedule", UpstreamOrigin::Writers),
+    ("repository_dispatch", UpstreamOrigin::Writers),
+    ("release", UpstreamOrigin::Writers),
+    ("push", UpstreamOrigin::Restricted),
+    ("create", UpstreamOrigin::Restricted),
+    ("delete", UpstreamOrigin::Restricted),
+    ("merge_group", UpstreamOrigin::Restricted),
 ];
-const RESTRICTED_EVENTS: [&str; 4] = ["push", "create", "delete", "merge_group"];
 const SAME_REPOSITORY_EVENT: &str = "pull_request";
 const LABEL_NAME: &str = "github.event.label.name";
 const GLOB_CHARACTERS: [char; 6] = ['*', '?', '+', '!', '[', '\\'];
@@ -328,38 +331,65 @@ impl UpstreamPath {
 
 #[derive(Debug, Default)]
 pub struct Upstreams {
-    origins: HashMap<(PathBuf, String), UpstreamOrigin>,
+    directories: HashMap<PathBuf, UpstreamDirectory>,
+}
+
+#[derive(Debug, Default)]
+struct UpstreamDirectory {
+    origins: HashMap<String, UpstreamOrigin>,
+    has_unreadable: bool,
 }
 
 impl Upstreams {
-    pub fn new<'w>(workflows: impl IntoIterator<Item = &'w Workflow>) -> Upstreams {
-        let mut origins: HashMap<(PathBuf, String), UpstreamOrigin> = HashMap::new();
+    pub fn new<'w>(
+        workflows: impl IntoIterator<Item = &'w Workflow>,
+        unreadable: impl IntoIterator<Item = &'w Path>,
+    ) -> Upstreams {
+        let mut upstreams = Upstreams::default();
         for workflow in workflows {
-            let Some(name) = workflow.model.name.clone() else {
+            let Some(name) = &workflow.model.name else {
                 continue;
             };
             let origin = trigger_origin(&workflow.model.on.events);
-            origins
-                .entry((directory(workflow), name))
+            upstreams
+                .directories
+                .entry(directory(&workflow.path))
+                .or_default()
+                .origins
+                .entry(name.to_lowercase())
                 .and_modify(|known| *known = (*known).max(origin))
                 .or_insert(origin);
         }
-        Upstreams { origins }
+        for path in unreadable {
+            upstreams
+                .directories
+                .entry(directory(path))
+                .or_default()
+                .has_unreadable = true;
+        }
+        upstreams
     }
 
     pub fn origin_of(&self, workflow: &Workflow) -> UpstreamOrigin {
         let OptionalBody::Body(run) = &workflow.model.on.events.workflow_run else {
             return UpstreamOrigin::Anyone;
         };
-        let directory = directory(workflow);
+        let Some(directory) = self
+            .directories
+            .get(&directory(&workflow.path))
+            .filter(|directory| !directory.has_unreadable)
+        else {
+            return UpstreamOrigin::Anyone;
+        };
         run.workflows
             .iter()
             .map(|name| {
                 if name.contains(GLOB_CHARACTERS) {
                     return UpstreamOrigin::Anyone;
                 }
-                self.origins
-                    .get(&(directory.clone(), name.clone()))
+                directory
+                    .origins
+                    .get(&name.to_lowercase())
                     .copied()
                     .unwrap_or(UpstreamOrigin::Anyone)
             })
@@ -368,56 +398,47 @@ impl Upstreams {
     }
 }
 
-fn directory(workflow: &Workflow) -> PathBuf {
-    let parent = workflow.path.parent().unwrap_or(Path::new(""));
+fn directory(path: &Path) -> PathBuf {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
     parent
         .canonicalize()
         .unwrap_or_else(|_| parent.to_path_buf())
 }
 
 fn event_origin(event: &str) -> UpstreamOrigin {
-    if WRITER_EVENTS.contains(&event) {
-        UpstreamOrigin::Writers
-    } else if RESTRICTED_EVENTS.contains(&event) {
-        UpstreamOrigin::Restricted
-    } else {
-        UpstreamOrigin::Anyone
-    }
+    UPSTREAM_EVENTS
+        .iter()
+        .find(|(name, _)| *name == event)
+        .map_or(UpstreamOrigin::Anyone, |(_, origin)| *origin)
 }
 
 fn trigger_origin(events: &Events) -> UpstreamOrigin {
-    let known = [
-        ("workflow_dispatch", events.workflow_dispatch.is_present()),
-        ("schedule", events.schedule.is_present()),
-        (
-            "repository_dispatch",
-            events.repository_dispatch.is_present(),
-        ),
-        ("release", events.release.is_present()),
-        ("push", events.push.is_present()),
-        ("create", events.create.is_present()),
-        ("delete", events.delete.is_present()),
-        ("merge_group", events.merge_group.is_present()),
-    ];
-    let present: Vec<&str> = known
-        .into_iter()
-        .filter_map(|(name, present)| present.then_some(name))
+    let present = |name: &str| match name {
+        "workflow_dispatch" => events.workflow_dispatch.is_present(),
+        "schedule" => events.schedule.is_present(),
+        "repository_dispatch" => events.repository_dispatch.is_present(),
+        "release" => events.release.is_present(),
+        "push" => events.push.is_present(),
+        "create" => events.create.is_present(),
+        "delete" => events.delete.is_present(),
+        "merge_group" => events.merge_group.is_present(),
+        _ => false,
+    };
+    let origins: Vec<UpstreamOrigin> = UPSTREAM_EVENTS
+        .iter()
+        .filter(|(name, _)| present(name))
+        .map(|(_, origin)| *origin)
         .collect();
-    if events.count() == 0 || (present.len() as u32) < events.count() {
-        return UpstreamOrigin::Anyone;
+    match origins.iter().max() {
+        Some(widest) if origins.len() as u32 == events.count() => *widest,
+        _ => UpstreamOrigin::Anyone,
     }
-    present
-        .into_iter()
-        .map(event_origin)
-        .max()
-        .unwrap_or(UpstreamOrigin::Anyone)
 }
 
-pub fn upstream_origin(step: &AgentStep, from_files: UpstreamOrigin) -> UpstreamOrigin {
-    condition_origin(step).min(from_files)
-}
-
-fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
+pub fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
     conditions(step)
         .iter()
         .map(|condition| match condition {
@@ -607,7 +628,7 @@ mod tests {
         let events = external_events(&workflow.model.on.events);
         let steps = agent_steps(&workflow);
         assert_eq!(steps.len(), 1);
-        let upstream = upstream_origin(&steps[0], UpstreamOrigin::Anyone);
+        let upstream = condition_origin(&steps[0]);
         open_trigger(&steps[0], &events, upstream).map(|open| {
             let (line, _) = workflow.position(&open.route).unwrap();
             format!("{line}: {}", open.setting)
@@ -923,7 +944,7 @@ jobs:
         let steps = agent_steps(&workflow);
         outside_events(
             &external_events(&workflow.model.on.events),
-            upstream_origin(&steps[0], UpstreamOrigin::Anyone),
+            condition_origin(&steps[0]),
         )
         .into_iter()
         .map(ExternalEvent::name)
@@ -1049,7 +1070,7 @@ jobs:
             let upstream = parsed(&format!("name: Up\non: {on}\njobs: {{}}\n"));
             let downstream = parsed("on: {workflow_run: {workflows: [Up]}}\njobs: {}\n");
             assert_eq!(
-                Upstreams::new([&upstream]).origin_of(&downstream),
+                Upstreams::new([&upstream], []).origin_of(&downstream),
                 origin,
                 "{on}"
             );
@@ -1057,15 +1078,15 @@ jobs:
     }
 
     #[test]
-    fn upstream_names_are_matched_exactly_and_the_widest_one_wins() {
+    fn upstream_names_are_matched_ignoring_case_and_the_widest_one_wins() {
         let release = parsed("name: Release Notes\non: {push: {tags: ['*']}}\njobs: {}\n");
         let manual = parsed("name: Manual\non: workflow_dispatch\njobs: {}\n");
-        let upstreams = Upstreams::new([&release, &manual]);
+        let upstreams = Upstreams::new([&release, &manual], []);
         for (workflows, origin) in [
             ("[Manual]", UpstreamOrigin::Writers),
             ("[Manual, Release Notes]", UpstreamOrigin::Restricted),
             ("[Manual, Missing]", UpstreamOrigin::Anyone),
-            ("[manual]", UpstreamOrigin::Anyone),
+            ("[manual]", UpstreamOrigin::Writers),
             ("['Release*']", UpstreamOrigin::Anyone),
         ] {
             let downstream = parsed(&format!(
@@ -1090,7 +1111,17 @@ jobs:
             "name: Notes\non: workflow_dispatch\njobs: {}\n",
         );
         let empty = at("a/empty.yml", "name: Empty\non: {}\njobs: {}\n");
-        let upstreams = Upstreams::new([&manual, &forks, &elsewhere, &empty]);
+        let upstreams = Upstreams::new([&manual, &forks, &elsewhere, &empty], []);
+        let broken = Upstreams::new([&elsewhere], [Path::new("b/broken.yml")]);
+        let in_b = at(
+            "b/down.yml",
+            "on: {workflow_run: {workflows: [Notes]}}\njobs: {}\n",
+        );
+        assert_eq!(
+            Upstreams::new([&elsewhere], []).origin_of(&in_b),
+            UpstreamOrigin::Writers
+        );
+        assert_eq!(broken.origin_of(&in_b), UpstreamOrigin::Anyone);
         for (workflows, origin) in [
             ("[CI]", UpstreamOrigin::Anyone),
             ("[Notes]", UpstreamOrigin::Anyone),
