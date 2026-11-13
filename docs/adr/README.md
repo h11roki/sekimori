@@ -63,3 +63,4 @@
 | [0022](0022-workflow-run-origin.md) | workflow_run は、上流の実行のイベントと head のリポジトリを `if:` で絞っていれば、書き込める人だけが起動できるとみなす | 承認(上流のイベントの段の分け方は 0024 で置き換え) |
 | [0023](0023-label-gate.md) | 付けたラベルの名前で絞った `if:` は、起動した人を絞ったものとして扱う | 承認 |
 | [0024](0024-upstream-workflow-files.md) | workflow_run の上流は、同じ検査に渡されたワークフローから名前で探し、そのトリガーで起こせる人を決める | 承認 |
+| [0025](0025-gemini-without-prompt.md) | `prompt` を渡さない run-gemini-cli は、PR の head を読まない限り、起動できる人の軸を数えない | 承認 |
