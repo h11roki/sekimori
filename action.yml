@@ -1,0 +1,73 @@
+name: sekimori
+description: Check GitHub Actions workflows that run AI coding agents
+author: h11roki
+
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  paths:
+    description: Workflow files or directories to check, separated by whitespace or newlines.
+    required: false
+    default: .github/workflows
+  token:
+    description: Token used to download the sekimori release and verify its attestation.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  sarif-file:
+    description: Path to the findings in SARIF format.
+    value: ${{ steps.check.outputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SEKIMORI_REPOSITORY: h11roki/sekimori
+      run: |
+        if ! command -v gh > /dev/null; then
+          echo "::error::sekimori needs the GitHub CLI (gh) to download and verify its release"
+          exit 1
+        fi
+        version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml")
+        if [ -z "$version" ]; then
+          echo "::error::could not read the sekimori version from $GITHUB_ACTION_PATH/Cargo.toml"
+          exit 1
+        fi
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) asset=sekimori-x86_64-unknown-linux-musl ;;
+          Linux/ARM64) asset=sekimori-aarch64-unknown-linux-musl ;;
+          macOS/ARM64) asset=sekimori-aarch64-apple-darwin ;;
+          Windows/X64) asset=sekimori-x86_64-pc-windows-msvc.exe ;;
+          *)
+            echo "::error::sekimori has no release binary for $RUNNER_OS $RUNNER_ARCH"
+            exit 1
+            ;;
+        esac
+        directory="$RUNNER_TEMP/sekimori-$version"
+        gh release download "v$version" --repo "$SEKIMORI_REPOSITORY" --pattern "$asset" --dir "$directory" --clobber
+        gh attestation verify "$directory/$asset" \
+          --repo "$SEKIMORI_REPOSITORY" \
+          --signer-workflow "$SEKIMORI_REPOSITORY/.github/workflows/release.yml" \
+          --source-ref "refs/tags/v$version"
+        chmod +x "$directory/$asset"
+        echo "binary=$directory/$asset" >> "$GITHUB_OUTPUT"
+    - id: check
+      shell: bash
+      env:
+        SEKIMORI: ${{ steps.install.outputs.binary }}
+        SEKIMORI_PATHS: ${{ inputs.paths }}
+      run: |
+        read -r -d '' -a paths <<< "$SEKIMORI_PATHS" || true
+        sarif="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")/sekimori.sarif"
+        status=0
+        "$SEKIMORI" -- "${paths[@]}" || status=$?
+        sarif_status=0
+        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$sarif" || sarif_status=$?
+        echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
+        exit $(( status > sarif_status ? status : sarif_status ))
