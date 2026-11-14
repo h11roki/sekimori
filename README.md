@@ -132,7 +132,7 @@ Every rule that matched the step is reported with the step's level. In SARIF, re
 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
 - It only knows the settings of the three actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
-- `if:` conditions on earlier jobs in `needs:` count only when every waiting job needs them to succeed: its `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
+- `if:` conditions on earlier jobs in `needs:` count when the agent job waits for them to succeed, directly or through other jobs: a waiting job's `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. `needs:` names must match job IDs exactly, including case. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
 
 ## Survey
 

@@ -244,9 +244,7 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
             }
             Some(None) => false,
         };
-        let awaited: Vec<&String> = needs.iter().filter(|need| waits_for(need)).collect();
-        found.extend(parsed);
-        for name in awaited {
+        for name in needs.iter().filter(|need| waits_for(need)) {
             if !visited.insert(name.as_str()) {
                 continue;
             }
@@ -257,6 +255,7 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
             };
             waiting.push((condition.as_ref(), needs));
         }
+        found.extend(parsed);
     }
     found
 }
@@ -296,15 +295,8 @@ fn requires_success_of(expression: &SpannedExpr, need: &str) -> bool {
             else {
                 return false;
             };
-            let result_of_need = context.as_pattern().is_some_and(|pattern| {
-                matches!(
-                    pattern.split('.').collect::<Vec<_>>().as_slice(),
-                    [head, job, tail] if head.eq_ignore_ascii_case(NEEDS_CONTEXT)
-                        && job.eq_ignore_ascii_case(need)
-                        && tail.eq_ignore_ascii_case(RESULT_FIELD)
-                )
-            });
-            result_of_need && value.eq_ignore_ascii_case(SUCCEEDED)
+            context.matches(format!("{NEEDS_CONTEXT}.{need}.{RESULT_FIELD}").as_str())
+                && value.eq_ignore_ascii_case(SUCCEEDED)
         }
         Expr::Call(call) => call.func == Function::Success,
         _ => false,
@@ -372,7 +364,7 @@ pub enum UpstreamOrigin {
     Anyone,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct UpstreamPath {
     events: Option<Vec<String>>,
     same_repository: bool,
@@ -536,10 +528,16 @@ pub fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
             None => vec![UpstreamPath::ANY],
         })
         .fold(vec![UpstreamPath::ANY], |paths, condition| {
-            paths
+            let mut combined: Vec<UpstreamPath> = Vec::new();
+            for path in paths
                 .iter()
                 .flat_map(|path| condition.iter().map(|other| path.and(other)))
-                .collect()
+            {
+                if !combined.contains(&path) {
+                    combined.push(path);
+                }
+            }
+            combined
         })
         .iter()
         .map(UpstreamPath::origin)
@@ -1256,6 +1254,25 @@ jobs:
         assert_eq!(
             condition_origin(&agent_steps(&workflow)[0]),
             UpstreamOrigin::Writers
+        );
+    }
+
+    #[test]
+    fn a_long_needs_chain_of_alternatives_keeps_the_upstream_paths_small() {
+        let mut source = String::from("on: workflow_run\njobs:\n");
+        for index in 0..40 {
+            source.push_str(&format!(
+                "  job{index}:\n    runs-on: ubuntu-latest\n    needs: job{}\n    if: github.ref == 'a' || github.ref == 'b' || github.ref == 'c'\n    steps:\n      - run: true\n",
+                index + 1
+            ));
+        }
+        source.push_str(
+            "  job40:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  gemini:\n    runs-on: ubuntu-latest\n    needs: job0\n    steps:\n      - uses: google-github-actions/run-gemini-cli@v0\n",
+        );
+        let workflow = parsed(&source);
+        assert_eq!(
+            condition_origin(&agent_steps(&workflow)[0]),
+            UpstreamOrigin::Anyone
         );
     }
 
