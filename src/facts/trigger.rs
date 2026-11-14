@@ -20,12 +20,9 @@ const ACTOR_CONTEXTS: [&str; 3] = [
     "github.event.sender.login",
 ];
 const EVENT_NAME_CONTEXT: &str = "github.event_name";
-const STATUS_FUNCTIONS: [Function; 4] = [
-    Function::Success,
-    Function::Always,
-    Function::Failure,
-    Function::Cancelled,
-];
+const NEEDS_CONTEXT: &str = "needs";
+const RESULT_FIELD: &str = "result";
+const SUCCEEDED: &str = "success";
 const EVENT_PAYLOAD: &str = "github.event";
 const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
@@ -240,18 +237,16 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
     let mut waiting = vec![(step.job.r#if.as_ref(), &step.job.needs)];
     while let Some((condition, needs)) = waiting.pop() {
         let parsed = condition.map(parse);
-        let skipped_with_needs = match &parsed {
+        let waits_for = |need: &str| match &parsed {
             None => true,
             Some(Some(expression)) => {
-                !has_status_function(expression) || requires_success(expression)
+                !has_status_function(expression) || requires_success_of(expression, need)
             }
             Some(None) => false,
         };
+        let awaited: Vec<&String> = needs.iter().filter(|need| waits_for(need)).collect();
         found.extend(parsed);
-        if !skipped_with_needs {
-            continue;
-        }
-        for name in needs {
+        for name in awaited {
             if !visited.insert(name.as_str()) {
                 continue;
             }
@@ -269,7 +264,10 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
 fn has_status_function(expression: &SpannedExpr) -> bool {
     match &expression.inner {
         Expr::Call(call) => {
-            STATUS_FUNCTIONS.contains(&call.func) || call.args.iter().any(has_status_function)
+            matches!(
+                call.func,
+                Function::Success | Function::Always | Function::Failure | Function::Cancelled
+            ) || call.args.iter().any(has_status_function)
         }
         Expr::BinExpr(BinExpr { lhs, rhs, .. }) => {
             has_status_function(lhs) || has_status_function(rhs)
@@ -280,13 +278,34 @@ fn has_status_function(expression: &SpannedExpr) -> bool {
     }
 }
 
-fn requires_success(expression: &SpannedExpr) -> bool {
+fn requires_success_of(expression: &SpannedExpr, need: &str) -> bool {
     match &expression.inner {
         Expr::BinExpr(BinExpr {
             op: BinOp::And,
             lhs,
             rhs,
-        }) => requires_success(lhs) || requires_success(rhs),
+        }) => requires_success_of(lhs, need) || requires_success_of(rhs, need),
+        Expr::BinExpr(BinExpr {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+        }) => {
+            let ((Expr::Context(context), Expr::Literal(Literal::String(value)))
+            | (Expr::Literal(Literal::String(value)), Expr::Context(context))) =
+                (&lhs.inner, &rhs.inner)
+            else {
+                return false;
+            };
+            let result_of_need = context.as_pattern().is_some_and(|pattern| {
+                matches!(
+                    pattern.split('.').collect::<Vec<_>>().as_slice(),
+                    [head, job, tail] if head.eq_ignore_ascii_case(NEEDS_CONTEXT)
+                        && job.eq_ignore_ascii_case(need)
+                        && tail.eq_ignore_ascii_case(RESULT_FIELD)
+                )
+            });
+            result_of_need && value.eq_ignore_ascii_case(SUCCEEDED)
+        }
         Expr::Call(call) => call.func == Function::Success,
         _ => false,
     }
@@ -897,6 +916,8 @@ jobs:
             "github.event.issue.pull_request == null",
             "success() && github.event.issue.pull_request == null",
             "github.event.issue.pull_request == null && success() && always()",
+            "always() && needs.gate.result == 'success'",
+            "${{ !cancelled() && 'Success' == needs['gate'].result }}",
         ] {
             assert_eq!(
                 gemini_after_jobs(ACTOR_GATE, condition),
@@ -924,6 +945,9 @@ jobs:
             "contains(toJSON(always()), 'true')",
             "success() || github.event.issue.pull_request == null",
             "${{ !success() }}",
+            "always() && needs.other.result == 'success'",
+            "always() && needs.gate.result != 'failure'",
+            "always() && (needs.gate.result == 'success' || github.event.issue.pull_request == null)",
         ] {
             assert!(
                 gemini_after_jobs(ACTOR_GATE, condition).is_some(),
