@@ -1,6 +1,6 @@
 use github_actions_models::common::Uses;
-use github_actions_models::workflow::Job;
 use github_actions_models::workflow::job::{NormalJob, ParallelStep, RunStep, Step, UsesStep};
+use github_actions_models::workflow::{Job, Workflow as WorkflowModel};
 use yamlpath::{Component, Route, route};
 
 use crate::workflow::Workflow;
@@ -40,6 +40,7 @@ pub(crate) fn is_root_action(uses: &Uses, action: &str) -> bool {
 #[derive(Debug)]
 pub struct AgentStep<'w> {
     pub agent: Agent,
+    pub model: &'w WorkflowModel,
     pub job_id: &'w str,
     pub job: &'w NormalJob,
     pub index: usize,
@@ -59,6 +60,7 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
             {
                 found.push(AgentStep {
                     agent,
+                    model: &workflow.model,
                     job_id,
                     job,
                     index,

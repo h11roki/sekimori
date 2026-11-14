@@ -3,9 +3,10 @@ use github_actions_expressions::literal::Literal;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::If;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use github_actions_models::workflow::Job;
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
@@ -19,6 +20,8 @@ const ACTOR_CONTEXTS: [&str; 3] = [
     "github.event.sender.login",
 ];
 const EVENT_NAME_CONTEXT: &str = "github.event_name";
+const STATUS_FUNCTIONS_PAST_NEEDS: [Function; 3] =
+    [Function::Always, Function::Failure, Function::Cancelled];
 const EVENT_PAYLOAD: &str = "github.event";
 const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
@@ -217,14 +220,60 @@ pub fn open_trigger<'w>(
 }
 
 fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
-    [step.job.r#if.as_ref(), step.step.shared.r#if.as_ref()]
+    let parse = |condition: &'w If| match condition {
+        If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
+        If::Expr(raw) => parse_expression(raw),
+    };
+    let mut found: Vec<Option<SpannedExpr<'w>>> = step
+        .step
+        .shared
+        .r#if
+        .as_ref()
+        .map(parse)
         .into_iter()
-        .flatten()
-        .map(|condition| match condition {
-            If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
-            If::Expr(raw) => parse_expression(raw),
-        })
-        .collect()
+        .collect();
+    let mut visited = HashSet::from([step.job_id]);
+    let mut waiting = vec![(step.job.r#if.as_ref(), &step.job.needs)];
+    while let Some((condition, needs)) = waiting.pop() {
+        let parsed = condition.map(parse);
+        let skipped_with_needs = match &parsed {
+            None => true,
+            Some(Some(expression)) => !runs_after_failed_needs(expression),
+            Some(None) => false,
+        };
+        found.extend(parsed);
+        if !skipped_with_needs {
+            continue;
+        }
+        for name in needs {
+            if !visited.insert(name.as_str()) {
+                continue;
+            }
+            match step.model.jobs.get(name) {
+                Some(Job::NormalJob(job)) => waiting.push((job.r#if.as_ref(), &job.needs)),
+                Some(Job::ReusableWorkflowCallJob(job)) => {
+                    waiting.push((job.r#if.as_ref(), &job.needs))
+                }
+                None => {}
+            }
+        }
+    }
+    found
+}
+
+fn runs_after_failed_needs(expression: &SpannedExpr) -> bool {
+    match &expression.inner {
+        Expr::Call(call) => {
+            STATUS_FUNCTIONS_PAST_NEEDS.contains(&call.func)
+                || call.args.iter().any(runs_after_failed_needs)
+        }
+        Expr::BinExpr(BinExpr { lhs, rhs, .. }) => {
+            runs_after_failed_needs(lhs) || runs_after_failed_needs(rhs)
+        }
+        Expr::UnExpr { expr, .. } | Expr::Index(expr) => runs_after_failed_needs(expr),
+        Expr::Context(context) => context.parts.iter().any(runs_after_failed_needs),
+        Expr::Literal(_) | Expr::Star | Expr::Identifier(_) => false,
+    }
 }
 
 fn wildcard<'w>(step: &AgentStep<'w>, name: &str) -> Option<(String, Route<'w>)> {
@@ -804,6 +853,105 @@ jobs:
         assert!(!never("true"));
     }
 
+    fn gemini_after_jobs(jobs: &str, condition: &str) -> Option<String> {
+        open_setting(&format!(
+            "on: issue_comment
+jobs:
+{jobs}
+  gemini:
+    runs-on: ubuntu-latest
+    needs: [gate]
+    if: {condition}
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+        ))
+    }
+
+    const ACTOR_GATE: &str = "  gate:
+    runs-on: ubuntu-latest
+    if: github.actor == 'octocat'
+    steps:
+      - run: true";
+
+    #[test]
+    fn an_actor_check_on_a_needed_job_restricts_the_agent() {
+        for condition in [
+            "true",
+            "github.event.issue.pull_request == null",
+            "success() && github.event.issue.pull_request == null",
+        ] {
+            assert_eq!(
+                gemini_after_jobs(ACTOR_GATE, condition),
+                None,
+                "{condition}"
+            );
+        }
+        let chained = "  gate:
+    runs-on: ubuntu-latest
+    needs: dispatch
+    steps:
+      - run: true
+  dispatch:
+    if: github.actor == 'octocat'
+    uses: ./.github/workflows/dispatch.yml";
+        assert_eq!(gemini_after_jobs(chained, "true"), None);
+    }
+
+    #[test]
+    fn a_job_that_runs_past_its_needs_does_not_inherit_their_check() {
+        for condition in [
+            "always()",
+            "${{ !cancelled() }}",
+            "failure() || github.event.issue.pull_request == null",
+            "contains(toJSON(always()), 'true')",
+        ] {
+            assert!(
+                gemini_after_jobs(ACTOR_GATE, condition).is_some(),
+                "{condition}"
+            );
+        }
+        let past_the_gate = "  gate:
+    runs-on: ubuntu-latest
+    needs: dispatch
+    if: always()
+    steps:
+      - run: true
+  dispatch:
+    runs-on: ubuntu-latest
+    if: github.actor == 'octocat'
+    steps:
+      - run: true";
+        assert!(gemini_after_jobs(past_the_gate, "true").is_some());
+        let unknown_or_open = "  gate:
+    runs-on: ubuntu-latest
+    needs: [missing, gemini]
+    if: github.event.issue.pull_request == null
+    steps:
+      - run: true";
+        assert!(gemini_after_jobs(unknown_or_open, "true").is_some());
+    }
+
+    #[test]
+    fn a_needed_job_that_never_runs_stops_the_agent() {
+        let workflow = parsed(
+            "on: issues
+jobs:
+  gate:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  gemini:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+",
+        );
+        assert!(never_runs(&agent_steps(&workflow)[0]));
+    }
+
     #[test]
     fn gemini_conditions_that_must_check_the_actor_restrict_it() {
         for (events, condition) in [
@@ -995,6 +1143,29 @@ jobs:
                 "{condition}"
             );
         }
+    }
+
+    #[test]
+    fn a_needed_job_that_checks_the_upstream_event_decides_the_upstream() {
+        let workflow = parsed(
+            "on: workflow_run
+jobs:
+  gate:
+    if: github.event.workflow_run.event == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  gemini:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+",
+        );
+        assert_eq!(
+            condition_origin(&agent_steps(&workflow)[0]),
+            UpstreamOrigin::Writers
+        );
     }
 
     #[test]
