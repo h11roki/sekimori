@@ -20,8 +20,12 @@ const ACTOR_CONTEXTS: [&str; 3] = [
     "github.event.sender.login",
 ];
 const EVENT_NAME_CONTEXT: &str = "github.event_name";
-const STATUS_FUNCTIONS_PAST_NEEDS: [Function; 3] =
-    [Function::Always, Function::Failure, Function::Cancelled];
+const STATUS_FUNCTIONS: [Function; 4] = [
+    Function::Success,
+    Function::Always,
+    Function::Failure,
+    Function::Cancelled,
+];
 const EVENT_PAYLOAD: &str = "github.event";
 const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
@@ -192,7 +196,7 @@ pub fn open_trigger<'w>(
         }
         Agent::Codex => wildcard(step, "allow-users")?,
         Agent::GeminiCli => {
-            let setting = if conditions.is_empty() {
+            let setting = if step.job.r#if.is_none() && step.step.shared.r#if.is_none() {
                 "no `if:` on the job or step"
             } else {
                 "the `if:` does not check who triggered it"
@@ -238,7 +242,9 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
         let parsed = condition.map(parse);
         let skipped_with_needs = match &parsed {
             None => true,
-            Some(Some(expression)) => !runs_after_failed_needs(expression),
+            Some(Some(expression)) => {
+                !has_status_function(expression) || requires_success(expression)
+            }
             Some(None) => false,
         };
         found.extend(parsed);
@@ -249,30 +255,40 @@ fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
             if !visited.insert(name.as_str()) {
                 continue;
             }
-            match step.model.jobs.get(name) {
-                Some(Job::NormalJob(job)) => waiting.push((job.r#if.as_ref(), &job.needs)),
-                Some(Job::ReusableWorkflowCallJob(job)) => {
-                    waiting.push((job.r#if.as_ref(), &job.needs))
-                }
-                None => {}
-            }
+            let (condition, needs) = match step.model.jobs.get(name) {
+                Some(Job::NormalJob(job)) => (&job.r#if, &job.needs),
+                Some(Job::ReusableWorkflowCallJob(job)) => (&job.r#if, &job.needs),
+                None => continue,
+            };
+            waiting.push((condition.as_ref(), needs));
         }
     }
     found
 }
 
-fn runs_after_failed_needs(expression: &SpannedExpr) -> bool {
+fn has_status_function(expression: &SpannedExpr) -> bool {
     match &expression.inner {
         Expr::Call(call) => {
-            STATUS_FUNCTIONS_PAST_NEEDS.contains(&call.func)
-                || call.args.iter().any(runs_after_failed_needs)
+            STATUS_FUNCTIONS.contains(&call.func) || call.args.iter().any(has_status_function)
         }
         Expr::BinExpr(BinExpr { lhs, rhs, .. }) => {
-            runs_after_failed_needs(lhs) || runs_after_failed_needs(rhs)
+            has_status_function(lhs) || has_status_function(rhs)
         }
-        Expr::UnExpr { expr, .. } | Expr::Index(expr) => runs_after_failed_needs(expr),
-        Expr::Context(context) => context.parts.iter().any(runs_after_failed_needs),
+        Expr::UnExpr { expr, .. } | Expr::Index(expr) => has_status_function(expr),
+        Expr::Context(context) => context.parts.iter().any(has_status_function),
         Expr::Literal(_) | Expr::Star | Expr::Identifier(_) => false,
+    }
+}
+
+fn requires_success(expression: &SpannedExpr) -> bool {
+    match &expression.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => requires_success(lhs) || requires_success(rhs),
+        Expr::Call(call) => call.func == Function::Success,
+        _ => false,
     }
 }
 
@@ -880,6 +896,7 @@ jobs:
             "true",
             "github.event.issue.pull_request == null",
             "success() && github.event.issue.pull_request == null",
+            "github.event.issue.pull_request == null && success() && always()",
         ] {
             assert_eq!(
                 gemini_after_jobs(ACTOR_GATE, condition),
@@ -905,6 +922,8 @@ jobs:
             "${{ !cancelled() }}",
             "failure() || github.event.issue.pull_request == null",
             "contains(toJSON(always()), 'true')",
+            "success() || github.event.issue.pull_request == null",
+            "${{ !success() }}",
         ] {
             assert!(
                 gemini_after_jobs(ACTOR_GATE, condition).is_some(),
@@ -930,6 +949,54 @@ jobs:
     steps:
       - run: true";
         assert!(gemini_after_jobs(unknown_or_open, "true").is_some());
+    }
+
+    #[test]
+    fn a_gate_reached_by_any_path_that_waits_for_it_restricts_the_agent() {
+        for needs in ["[gate, side]", "[side, gate]"] {
+            let setting = open_setting(&format!(
+                "on: issue_comment
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    if: github.actor == 'octocat'
+    steps:
+      - run: true
+  side:
+    runs-on: ubuntu-latest
+    needs: gate
+    if: always()
+    steps:
+      - run: true
+  gemini:
+    runs-on: ubuntu-latest
+    needs: {needs}
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+"
+            ));
+            assert_eq!(setting, None, "{needs}");
+        }
+    }
+
+    #[test]
+    fn gemini_without_its_own_if_says_so_even_after_a_needed_job_with_one() {
+        let setting = open_setting(
+            "on: issues
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    if: github.event.issue.pull_request == null
+    steps:
+      - run: true
+  gemini:
+    runs-on: ubuntu-latest
+    needs: gate
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+",
+        );
+        assert_eq!(setting.as_deref(), Some("12: no `if:` on the job or step"));
     }
 
     #[test]
