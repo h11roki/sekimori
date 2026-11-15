@@ -64,8 +64,8 @@ The action downloads the release binary that matches its own version and checks 
 
 | Output | Description |
 |---|---|
-| `sarif-file` | Path to the findings in SARIF 2.1.0 |
-| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run, another non-zero value if it crashed; empty when sekimori was not installed |
+| `sarif-file` | Path to the findings in SARIF 2.1.0; empty when the file could not be written |
+| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file, could not write the SARIF file or the job summary, or could not run, another non-zero value if it crashed; empty when sekimori was not installed |
 
 ## Use it from the command line
 
