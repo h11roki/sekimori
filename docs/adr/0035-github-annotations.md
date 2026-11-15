@@ -24,7 +24,7 @@
 - 注釈は `::error` か `::warning`(指摘の重さ)。`file` はリポジトリの根からの相対のパス(SARIF の `uri` と同じ求め方)、`line` と `col` は平文と同じ位置、`title` は `sekimori 規則の ID`、本文は SARIF の本文と同じ文(見出し、エージェントのステップの行、`軸: 値 (理由)` の内訳)。注釈は等幅の字で出ないので、平文の桁揃えは使わない
 - ADR 0033 の抑える指示の警告は、`--format github` では `::warning` の注釈として標準出力に出す
 - 終了コードは平文と同じ
-- Action は `--format github` で動かし(注釈と終了コード)、平文の出力(指摘、警告、読めないファイル)があれば `$GITHUB_STEP_SUMMARY` に書き、SARIF も作る
+- Action は `--format github` で動かし(注釈と終了コード)、平文の出力(指摘、警告、読めないファイル)があれば `$GITHUB_STEP_SUMMARY` に書き、SARIF も作る。Action はリリースのバイナリを使う(ADR 0017)ので、この変更は `--format github` を持つ版を出したあとに入れる
 
 ## 理由
 

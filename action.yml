@@ -64,18 +64,10 @@ runs:
         SEKIMORI_PATHS: ${{ inputs.paths }}
       run: |
         read -r -d '' -a paths <<< "$SEKIMORI_PATHS" || true
-        output="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")"
+        sarif="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")/sekimori.sarif"
         status=0
-        "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
-        "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
-        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$output/plain.txt" ]; then
-          {
-            echo "## sekimori"
-            echo
-            tr '\r' '\n' < "$output/plain.txt" | sed 's/^/    /'
-          } >> "$GITHUB_STEP_SUMMARY"
-        fi
+        "$SEKIMORI" -- "${paths[@]}" || status=$?
         sarif_status=0
-        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$output/sekimori.sarif" || sarif_status=$?
-        echo "sarif-file=$output/sekimori.sarif" >> "$GITHUB_OUTPUT"
+        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$sarif" || sarif_status=$?
+        echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
         exit $(( status > sarif_status ? status : sarif_status ))
