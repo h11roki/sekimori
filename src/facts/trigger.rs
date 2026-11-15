@@ -9,7 +9,7 @@ use github_actions_models::workflow::Job;
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
-use super::{constant_false, input, input_route, parse_condition};
+use super::{constant_false, input, input_route, json_string_list, parse_condition};
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
 
@@ -633,19 +633,6 @@ fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
         },
         _ => UpstreamPath::ANY,
     }
-}
-
-fn json_string_list(expression: &SpannedExpr) -> Option<Vec<String>> {
-    let Expr::Call(from_json) = &expression.inner else {
-        return None;
-    };
-    let (Function::FromJSON, [json]) = (&from_json.func, from_json.args.as_slice()) else {
-        return None;
-    };
-    let Expr::Literal(Literal::String(text)) = &json.inner else {
-        return None;
-    };
-    serde_json::from_str(text).ok()
 }
 
 fn admits_outsiders(text: &str) -> bool {

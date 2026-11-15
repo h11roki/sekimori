@@ -508,6 +508,65 @@ jobs:
     }
 
     #[test]
+    fn later_steps_that_cannot_run_with_the_agent_do_not_count() {
+        let found_with = |agent_condition: &str, later_condition: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{{{ {agent_condition} }}}}
+        uses: anthropics/claude-code-action@v1
+      - if: ${{{{ {later_condition} }}}}
+        run: npm test
+        env:
+          TOKEN: ${{{{ secrets.TOKEN }}}}
+"
+                ),
+            )
+            .unwrap();
+            agent_code_with_secrets(&workflow, &agent_steps(&workflow)[0], &[]).is_some()
+        };
+        for (agent_condition, later_condition) in [
+            (
+                "needs.prep.outputs.provider == 'anthropic'",
+                "needs.prep.outputs.provider == 'openai' && always()",
+            ),
+            (
+                "contains(fromJSON('[\"a\", \"b\"]'), inputs.mode)",
+                "inputs.mode == 'c'",
+            ),
+            (
+                "!contains(fromJSON('[\"a\"]'), inputs.mode)",
+                "github.event_name == 'issue_comment' && inputs.mode == 'A'",
+            ),
+            ("matrix.agent == 'claude'", "matrix.agent != 'claude'"),
+        ] {
+            assert!(
+                !found_with(agent_condition, later_condition),
+                "{agent_condition} / {later_condition}"
+            );
+        }
+        for (agent_condition, later_condition) in [
+            ("env.PROVIDER == 'anthropic'", "env.PROVIDER == 'openai'"),
+            ("inputs.mode == 'a'", "inputs.mode != 'b'"),
+            (
+                "inputs.mode == 'a' || inputs.mode == 'b'",
+                "inputs.mode == 'c'",
+            ),
+            ("inputs.mode != 'a'", "inputs.mode != 'b'"),
+        ] {
+            assert!(
+                found_with(agent_condition, later_condition),
+                "{agent_condition} / {later_condition}"
+            );
+        }
+    }
+
+    #[test]
     fn steps_before_the_agent_do_not_count() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

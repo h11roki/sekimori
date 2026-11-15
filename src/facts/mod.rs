@@ -7,7 +7,10 @@ mod workspace;
 
 use std::ops::Range;
 
+use github_actions_expressions::call::Function;
 use github_actions_expressions::context::Context;
+use github_actions_expressions::literal::Literal;
+use github_actions_expressions::op::{BinExpr, BinOp, UnOp};
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue, If};
@@ -37,6 +40,7 @@ const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
+const STABLE_CONTEXTS: [&str; 5] = ["inputs.", "github.", "vars.", "needs.", "matrix."];
 const HEREDOC: &str = "<<";
 const HERE_STRING: &str = "<<<";
 const SHELL_KEYWORDS: [&str; 9] = [
@@ -103,6 +107,7 @@ fn before_comment(text: &str) -> &str {
 }
 
 fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)> {
+    let agent_condition = step.step.shared.r#if.as_ref().and_then(parse_condition);
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
@@ -111,14 +116,116 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
                 JobStep::Run(run) => &run.shared,
                 JobStep::Uses(uses) => &uses.shared,
             };
-            !shared
-                .r#if
-                .as_ref()
-                .and_then(parse_condition)
-                .is_some_and(|condition| constant_false(&condition))
+            let Some(condition) = shared.r#if.as_ref().and_then(parse_condition) else {
+                return true;
+            };
+            !constant_false(&condition)
+                && !agent_condition
+                    .as_ref()
+                    .is_some_and(|agent| exclusive(agent, &condition))
         })
         .map(|(_, route, later)| (route, later))
         .collect()
+}
+
+fn exclusive(first: &SpannedExpr, second: &SpannedExpr) -> bool {
+    let mut facts = value_facts(first);
+    facts.extend(value_facts(second));
+    facts.iter().any(|(value, ..)| {
+        let mut possible: Option<Vec<String>> = None;
+        let mut excluded: Vec<String> = Vec::new();
+        for (_, within, constants) in facts.iter().filter(|(other, ..)| other == value) {
+            if *within {
+                possible = Some(match possible {
+                    None => constants.clone(),
+                    Some(possible) => possible
+                        .into_iter()
+                        .filter(|constant| constants.contains(constant))
+                        .collect(),
+                });
+            } else {
+                excluded.extend(constants.iter().cloned());
+            }
+        }
+        possible.is_some_and(|possible| possible.iter().all(|constant| excluded.contains(constant)))
+    })
+}
+
+fn value_facts(condition: &SpannedExpr) -> Vec<(String, bool, Vec<String>)> {
+    let stable = |expression: &SpannedExpr| match &expression.inner {
+        Expr::Context(context) => context
+            .as_pattern()
+            .map(|pattern| pattern.to_ascii_lowercase())
+            .filter(|pattern| {
+                STABLE_CONTEXTS
+                    .iter()
+                    .any(|prefix| pattern.starts_with(prefix))
+            }),
+        _ => None,
+    };
+    let lowercase = |constants: Vec<String>| {
+        constants
+            .into_iter()
+            .map(|constant| constant.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    };
+    let membership = |expression: &SpannedExpr| match &expression.inner {
+        Expr::Call(call) if call.func == Function::Contains => match call.args.as_slice() {
+            [list, value] => Some((stable(value)?, lowercase(json_string_list(list)?))),
+            _ => None,
+        },
+        _ => None,
+    };
+    match &condition.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => {
+            let mut facts = value_facts(lhs);
+            facts.extend(value_facts(rhs));
+            facts
+        }
+        Expr::BinExpr(BinExpr {
+            op: op @ (BinOp::Eq | BinOp::Neq),
+            lhs,
+            rhs,
+        }) => {
+            let (value, constant) = match (&lhs.inner, &rhs.inner) {
+                (_, Expr::Literal(Literal::String(constant))) => (stable(lhs), constant),
+                (Expr::Literal(Literal::String(constant)), _) => (stable(rhs), constant),
+                _ => return Vec::new(),
+            };
+            value
+                .map(|value| (value, *op == BinOp::Eq, vec![constant.to_ascii_lowercase()]))
+                .into_iter()
+                .collect()
+        }
+        Expr::UnExpr {
+            op: UnOp::Not,
+            expr,
+        } => membership(expr)
+            .map(|(value, constants)| (value, false, constants))
+            .into_iter()
+            .collect(),
+        _ => membership(condition)
+            .map(|(value, constants)| (value, true, constants))
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn json_string_list(expression: &SpannedExpr) -> Option<Vec<String>> {
+    let Expr::Call(from_json) = &expression.inner else {
+        return None;
+    };
+    let (Function::FromJSON, [json]) = (&from_json.func, from_json.args.as_slice()) else {
+        return None;
+    };
+    let Expr::Literal(Literal::String(text)) = &json.inner else {
+        return None;
+    };
+    serde_json::from_str(text).ok()
 }
 
 fn shell_programs(run: &str) -> Vec<Vec<String>> {
