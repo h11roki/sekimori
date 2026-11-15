@@ -27,6 +27,9 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
+const UPSTREAM_BRANCH: &str = "github.event.workflow_run.head_branch";
+const THIS_REPOSITORY_NAMES: [&str; 2] = [THIS_REPOSITORY, "github.event.repository.full_name"];
+const DEFAULT_BRANCH: &str = "github.event.repository.default_branch";
 type EventPresent = fn(&Events) -> bool;
 const UPSTREAM_EVENTS: [(&str, UpstreamOrigin, EventPresent); 8] = [
     ("workflow_dispatch", UpstreamOrigin::Writers, |events| {
@@ -512,6 +515,46 @@ fn trigger_origin(events: &Events) -> UpstreamOrigin {
     }
 }
 
+pub(super) fn upstream_on_default_branch(step: &AgentStep) -> bool {
+    let conditions = conditions(step);
+    let required = |first: &str, second: &str| {
+        conditions
+            .iter()
+            .flatten()
+            .any(|condition| requires_equal(condition, first, second))
+    };
+    THIS_REPOSITORY_NAMES
+        .iter()
+        .any(|this| required(UPSTREAM_REPOSITORY, this))
+        && required(UPSTREAM_BRANCH, DEFAULT_BRANCH)
+}
+
+fn requires_equal(expression: &SpannedExpr, first: &str, second: &str) -> bool {
+    match &expression.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => requires_equal(lhs, first, second) || requires_equal(rhs, first, second),
+        _ => equal_contexts(expression, first, second),
+    }
+}
+
+fn equal_contexts(expression: &SpannedExpr, first: &str, second: &str) -> bool {
+    let Expr::BinExpr(BinExpr {
+        op: BinOp::Eq,
+        lhs,
+        rhs,
+    }) = &expression.inner
+    else {
+        return false;
+    };
+    let (Expr::Context(left), Expr::Context(right)) = (&lhs.inner, &rhs.inner) else {
+        return false;
+    };
+    (left.matches(first) && right.matches(second)) || (left.matches(second) && right.matches(first))
+}
+
 pub fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
     conditions(step)
         .iter()
@@ -612,15 +655,10 @@ fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
             {
                 events(vec![name.to_ascii_lowercase()])
             }
-            (Expr::Context(left), Expr::Context(right))
-                if (left.matches(UPSTREAM_REPOSITORY) && right.matches(THIS_REPOSITORY))
-                    || (left.matches(THIS_REPOSITORY) && right.matches(UPSTREAM_REPOSITORY)) =>
-            {
-                UpstreamPath {
-                    same_repository: true,
-                    ..UpstreamPath::ANY
-                }
-            }
+            _ if equal_contexts(expression, UPSTREAM_REPOSITORY, THIS_REPOSITORY) => UpstreamPath {
+                same_repository: true,
+                ..UpstreamPath::ANY
+            },
             _ => UpstreamPath::ANY,
         },
         Expr::Call(call) if matches!(call.func, Function::Contains) => match call.args.as_slice() {

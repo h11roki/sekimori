@@ -1,6 +1,7 @@
 use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
+use super::trigger::upstream_on_default_branch;
 use super::{
     ENV_CONTEXT, EXPRESSION_START, ExternalEvent, Input, NearestEnv, SETTINGS_INPUT, agent_env,
     ends_word, lookup, lookup_in, nearest_env, program_name, references_variable, shell_programs,
@@ -39,6 +40,11 @@ const HEAD_REPOSITORIES: [&str; 2] = [
     "github.event.workflow_run.head_repository.",
 ];
 const WORKFLOW_RUN_PULL_REQUESTS: &str = "github.event.workflow_run.pull_requests[";
+const UPSTREAM_HEAD: &str = "github.event.workflow_run.head_";
+const TRUSTED_UPSTREAM_VALUES: [&str; 2] = [
+    "${{github.event.workflow_run.head_sha}}",
+    "${{github.event.workflow_run.head_repository.full_name}}",
+];
 const PULL_REQUEST_HEAD_COMMIT: &str = ".head.sha";
 const PULL_REQUEST_HEAD_REPOSITORY: &str = ".head.repo.";
 const PULL_REFSPEC: &str = "pull/";
@@ -90,13 +96,15 @@ pub fn head_checkout<'w>(
         ),
         Agent::Codex => None,
     }?;
+    let trusted_upstream =
+        events.contains(&ExternalEvent::WorkflowRun) && upstream_on_default_branch(step);
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
             break;
         }
         match earlier {
-            JobStep::Uses(uses) => match root_checkout(uses) {
+            JobStep::Uses(uses) => match root_checkout(uses, trusted_upstream) {
                 RootCheckout::Untouched => {}
                 RootCheckout::Base => head = None,
                 RootCheckout::Head(key, value) => {
@@ -113,13 +121,11 @@ pub fn head_checkout<'w>(
                 if head.is_none()
                     && checks_out_head(
                         run,
-                        &head_variables(&nearest_env(
-                            workflow,
-                            step.job_id,
-                            step.job,
-                            &run.shared.env,
-                            &route,
-                        )),
+                        &head_variables(
+                            &nearest_env(workflow, step.job_id, step.job, &run.shared.env, &route),
+                            trusted_upstream,
+                        ),
+                        trusted_upstream,
                     )
                 {
                     head = Some((
@@ -141,7 +147,7 @@ pub fn outside_text_cannot_reach(step: &AgentStep, events: &[ExternalEvent]) -> 
         let reference = match lookup_in(&earlier.with, "ref") {
             Input::Missing => true,
             Input::Text { value, .. } => {
-                !value.contains(EXPRESSION_START) && !names_head_commit(&normalized(value))
+                !value.contains(EXPRESSION_START) && !names_head_commit(&normalized(value), false)
             }
             Input::Unreadable => false,
         };
@@ -174,7 +180,7 @@ enum RootCheckout<'w> {
     Head(&'w str, &'w str),
 }
 
-fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
+fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
     if !is_root_action(&step.uses, CHECKOUT_ACTION) {
         return RootCheckout::Untouched;
     }
@@ -190,11 +196,14 @@ fn root_checkout(step: &UsesStep) -> RootCheckout<'_> {
         Input::Text { key, value } => Some((key, value)),
         Input::Missing | Input::Unreadable => None,
     };
-    let repository = text("repository");
-    let reference = text("ref");
+    let trusted = |value: &str| {
+        trusted_upstream && TRUSTED_UPSTREAM_VALUES.contains(&normalized(value).as_str())
+    };
+    let repository = text("repository").filter(|(_, value)| !trusted(value));
+    let reference = text("ref").filter(|(_, value)| !trusted(value));
     if let Some((key, value)) = repository
-        .filter(|(_, value)| names_head_repository(&normalized(value)))
-        .or(reference.filter(|(_, value)| names_head_commit(&normalized(value))))
+        .filter(|(_, value)| names_head_repository(&normalized(value), false))
+        .or(reference.filter(|(_, value)| names_head_commit(&normalized(value), false)))
     {
         return RootCheckout::Head(key, value);
     }
@@ -221,15 +230,15 @@ fn is_workspace_root(path: &str) -> bool {
         .all(|component| component.is_empty() || component == ".")
 }
 
-fn head_variables<'w>(env: &NearestEnv<'w>) -> Vec<&'w str> {
+fn head_variables<'w>(env: &NearestEnv<'w>, trusted_upstream: bool) -> Vec<&'w str> {
     env.variables
         .iter()
-        .filter(|variable| names_head_commit(&normalized(&variable.value)))
+        .filter(|variable| names_head_commit(&normalized(&variable.value), trusted_upstream))
         .map(|variable| variable.name)
         .collect()
 }
 
-fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
+fn checks_out_head(step: &RunStep, head_variables: &[&str], trusted_upstream: bool) -> bool {
     let mut fetched_head = false;
     for words in shell_programs(&step.run) {
         let program: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -242,7 +251,7 @@ fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
         let Some((subcommand, arguments)) = git_subcommand(&program) else {
             continue;
         };
-        let names_head = names_head_commit(&normalized(&arguments.concat()))
+        let names_head = names_head_commit(&normalized(&arguments.concat()), trusted_upstream)
             || arguments
                 .iter()
                 .any(|argument| refers_to_head_variable(argument, head_variables));
@@ -280,9 +289,10 @@ fn refers_to_head_variable(argument: &str, head_variables: &[&str]) -> bool {
     })
 }
 
-fn names_head_commit(normalized: &str) -> bool {
+fn names_head_commit(normalized: &str, trusted_upstream: bool) -> bool {
     HEAD_COMMITS
         .iter()
+        .filter(|context| !(trusted_upstream && context.starts_with(UPSTREAM_HEAD)))
         .any(|context| normalized.contains(context))
         || followed_by(
             normalized,
@@ -293,9 +303,10 @@ fn names_head_commit(normalized: &str) -> bool {
         || followed_by(normalized, PULL_REFSPEC, '/', &PULL_REFSPEC_HEADS)
 }
 
-fn names_head_repository(normalized: &str) -> bool {
+fn names_head_repository(normalized: &str, trusted_upstream: bool) -> bool {
     HEAD_REPOSITORIES
         .iter()
+        .filter(|context| !(trusted_upstream && context.starts_with(UPSTREAM_HEAD)))
         .any(|context| normalized.contains(context))
         || followed_by(
             normalized,
@@ -399,6 +410,113 @@ jobs:
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn a_workflow_run_limited_to_the_default_branch_of_this_repository_checks_out_no_pr_head() {
+        let with_condition = |condition: &str| {
+            found(&format!(
+                "on: workflow_run
+jobs:
+  agent:
+    if: {condition}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{{{ github.event.workflow_run.head_sha }}}}
+      - uses: anthropics/claude-code-base-action@beta
+"
+            ))
+        };
+        assert_eq!(
+            with_condition(
+                "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.repository.default_branch == github.event.workflow_run.head_branch"
+            ),
+            None
+        );
+        assert_eq!(
+            with_condition(
+                "github.event.workflow_run.head_repository.full_name == github.event.repository.full_name && github.event.workflow_run.head_branch == github.event.repository.default_branch"
+            ),
+            None
+        );
+        let checked_out_by = |steps: &str| {
+            found(&format!(
+                "on: workflow_run
+jobs:
+  agent:
+    if: github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+{steps}      - uses: anthropics/claude-code-base-action@beta
+"
+            ))
+        };
+        assert!(checked_out_by("      - run: gh pr checkout \"$(cat pr_number)\"\n").is_some());
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.pull_requests[0].head.sha }}\n"
+            )
+            .is_some()
+        );
+        assert!(
+            checked_out_by(
+                "      - run: gh pr checkout \"$PR\"\n      - uses: actions/checkout@v6\n        with:\n          ref: ${{ steps.pr.outputs.sha || github.event.workflow_run.head_sha }}\n"
+            )
+            .is_some()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}\n"
+            )
+            .is_some()
+        );
+        assert!(
+            checked_out_by("      - run: git checkout ${{ github.event.workflow_run.head_sha }}\n")
+                .is_none()
+        );
+        assert!(
+            checked_out_by(
+                "      - run: git checkout \"$HEAD_SHA\"\n        env:\n          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n"
+            )
+            .is_none()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          repository: ${{ github.event.workflow_run.head_repository.full_name }}\n"
+            )
+            .is_none()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.pull_requests[0].head.sha }}\n      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n"
+            )
+            .is_none()
+        );
+        assert!(
+            found(
+                "on: [workflow_run, pull_request_target]
+jobs:
+  agent:
+    if: github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: anthropics/claude-code-base-action@beta
+"
+            )
+            .is_none()
+        );
+        for condition in [
+            "github.event.workflow_run.head_repository.full_name == github.repository",
+            "github.event.workflow_run.head_branch == github.event.repository.default_branch",
+            "github.event.workflow_run.head_repository.full_name == github.repository || github.event.workflow_run.head_branch == github.event.repository.default_branch",
+        ] {
+            assert!(with_condition(condition).is_some(), "{condition}");
+        }
     }
 
     #[test]
