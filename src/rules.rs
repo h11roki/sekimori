@@ -916,7 +916,7 @@ jobs:
     }
 
     #[test]
-    fn the_codex_bedrock_key_is_only_reported_where_later_code_runs_with_it() {
+    fn the_codex_bedrock_key_is_already_in_the_agents_hands() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
             "on: issue_comment
@@ -935,8 +935,7 @@ jobs:
         )
         .unwrap();
         let assessments = assess(&workflow, &Upstreams::default());
-        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
-        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+        assert!(assessments[0].hits.is_empty());
     }
 
     #[test]

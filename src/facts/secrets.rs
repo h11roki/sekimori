@@ -100,6 +100,7 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
             .filter(|(variable, _)| {
                 reaches_agent(step.agent, variable.name, gemini_settings)
                     || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
+                    || (step.agent == Agent::Codex && codex_credential(variable.name))
             })
             .filter_map(|(_, secret)| secret.cloned()),
     );
@@ -206,6 +207,13 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     from_input.or_else(from_variable).or_else(from_expression)
 }
 
+fn codex_credential(name: &str) -> bool {
+    CODEX_CREDENTIAL_VARIABLES.contains(&name)
+        || CODEX_CREDENTIAL_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
 fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
     if TOKEN_VARIABLES.contains(&name) {
         return false;
@@ -217,12 +225,7 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                     .iter()
                     .any(|prefix| name.starts_with(prefix))
         }
-        Agent::Codex => {
-            !CODEX_CREDENTIAL_VARIABLES.contains(&name)
-                && !CODEX_CREDENTIAL_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-        }
+        Agent::Codex => !codex_credential(name),
         Agent::GeminiCli => {
             !GEMINI_CREDENTIAL_VARIABLES.contains(&name)
                 && references_variable(gemini_settings, name)
