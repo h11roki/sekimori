@@ -214,13 +214,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
 }
 
 fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
-    match agent {
-        Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::Codex => true,
-        Agent::GeminiCli => {
-            GEMINI_CREDENTIAL_VARIABLES.contains(&name)
-                || references_variable(gemini_settings, name)
-        }
-    }
+    agent != Agent::GeminiCli || references_variable(gemini_settings, name)
 }
 
 fn is_credential(agent: Agent, name: &str) -> bool {

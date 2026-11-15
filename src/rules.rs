@@ -916,6 +916,29 @@ jobs:
     }
 
     #[test]
+    fn the_agents_own_key_is_not_reported_for_later_code() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}
+    steps:
+      - uses: openai/codex-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        assert!(assessments[0].hits.is_empty());
+    }
+
+    #[test]
     fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
