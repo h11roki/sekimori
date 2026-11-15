@@ -378,3 +378,21 @@ fn a_sarif_path_that_is_a_directory_is_reported_and_left_alone() {
             .contains("sekimori.sarif")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_sarif_file_that_cannot_be_opened_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let sarif = directory.path().join("sekimori.sarif");
+    std::fs::write(&sarif, "earlier").unwrap();
+    std::fs::set_permissions(&sarif, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg("--sarif-file")
+        .arg(&sarif)
+        .arg(Path::new(FIXTURES).join("ci.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(std::fs::read_to_string(&sarif).unwrap(), "earlier");
+}

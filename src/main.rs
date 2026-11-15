@@ -1,7 +1,7 @@
 use std::cell::LazyCell;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -142,26 +142,31 @@ fn main() -> ExitCode {
         {
             return write_failure(&error);
         }
-        if let Some(file) = &sarif_file
-            && let Err(error) = fs::write(file, &document)
-        {
-            failed = true;
-            report_failure(
-                &mut stdout,
-                cli.format,
-                &format!("failed to write {}: {error}", file.display()),
-            );
-            if file.is_file()
-                && let Err(error) = fs::remove_file(file)
-            {
-                report_failure(
-                    &mut stdout,
-                    cli.format,
-                    &format!(
-                        "failed to remove the partly written {}: {error}",
-                        file.display()
-                    ),
-                );
+        if let Some(file) = &sarif_file {
+            let failure = match File::create(file) {
+                Err(error) => Some((error, false)),
+                Ok(mut opened) => opened
+                    .write_all(&document)
+                    .err()
+                    .map(|error| (error, file.is_file())),
+            };
+            if let Some((error, truncated)) = failure {
+                failed = true;
+                let message = format!("failed to write {}: {error}", file.display());
+                report_failure(&mut stdout, cli.format, &message);
+                if let Some(text) = &mut summary_text {
+                    text.push_str(&format!("error: {message}\n"));
+                }
+                if truncated && let Err(error) = fs::remove_file(file) {
+                    report_failure(
+                        &mut stdout,
+                        cli.format,
+                        &format!(
+                            "failed to remove the partly written {}: {error}",
+                            file.display()
+                        ),
+                    );
+                }
             }
         }
     }
