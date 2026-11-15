@@ -77,5 +77,5 @@
 | [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え) |
 | [0037](0037-output-files.md) | CLI は `--sarif-file` と `--summary-file` で SARIF とジョブの要約もファイルに書き、Action は sekimori を 1 回だけ動かす | 承認(書きかけの SARIF と、書けなかったことの出し方は 0038 で置き換え) |
 | [0038](0038-output-file-failures.md) | 書きかけの SARIF のファイルは消し、書けなかったことは `--format github` で注釈にする | 承認 |
-| [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認(後のステップの指摘での扱いと、その理由は 0040 で置き換え) |
-| [0040](0040-codex-credentials-in-hand.md) | Codex の資格情報は、エージェントがすでに持つ秘密情報として後のステップの指摘から除く | 承認 |
+| [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認(`AWS_` の接頭辞、後のステップの指摘での扱いと、その理由は 0040 で置き換え) |
+| [0040](0040-codex-credentials-in-hand.md) | Codex の資格情報は、エージェントがすでに持つ秘密情報として後のステップの指摘から除き、資格情報の名前は Bedrock の鍵に絞る | 承認 |

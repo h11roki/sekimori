@@ -941,9 +941,13 @@ jobs:
                 .collect()
         };
         assert_eq!(rules(source.to_string()), [Rule::AgentCodeWithSecrets]);
-        assert!(
-            rules(source.replace("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", "CI: true")).is_empty()
+        let without_npm = source.replace("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", "CI: true");
+        assert!(rules(without_npm.clone()).is_empty());
+        let separate_user = without_npm.replace(
+            "- uses: openai/codex-action@v1",
+            "- uses: openai/codex-action@v1\n        with:\n          safety-strategy: unprivileged-user",
         );
+        assert_eq!(rules(separate_user), [Rule::AgentCodeWithSecrets]);
     }
 
     #[test]

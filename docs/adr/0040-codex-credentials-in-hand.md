@@ -1,4 +1,4 @@
-# 0040. Codex の資格情報は、エージェントがすでに持つ秘密情報として後のステップの指摘から除く
+# 0040. Codex の資格情報は、エージェントがすでに持つ秘密情報として後のステップの指摘から除き、資格情報の名前は Bedrock の鍵に絞る
 
 - ステータス: 承認
 - 日付: 2026-11-15
@@ -18,7 +18,9 @@
 
 高橋さんが判断を任せ(2026-11-15 に「プロダクトとして使えるレベルまで進めていい」)、Claude が 1 を選んだ。
 
-- Codex のステップの `env` は、資格情報に限らず全てエージェントの手にあるとみなす(これまでどおり)。資格情報もそこに入れる
+- Codex のステップの `env` は、資格情報に限らず全てエージェントの手にあるとみなす。資格情報もそこに入れる
+- ただし `safety-strategy: unprivileged-user` では、codex-action は `sudo -u <ユーザー> --` で Codex を動かし(`-E` が無く、sudo が `env` を消す)、`env` は Codex に届かない。このときは何も手にないとみなす
+- ADR 0039 の `AWS_` の接頭辞をやめ、Codex の資格情報は `OPENAI_API_KEY` と `AWS_BEARER_TOKEN_BEDROCK` だけにする。`env` が全て手にあるので、接頭辞のままだと Bedrock と関係のない AWS の鍵(配備用など)がどの規則にも出なくなる。`AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` は Bedrock の鍵にも使えるが、配備用の鍵と見分けられないので数える
 - claude と gemini の資格情報は今のまま除かない。claude-code-action は `allowed_non_write_users` のときに資格情報をシェルから消し、run-gemini-cli は `settings` が参照しない `env` をシェルに渡さないため
 
 ## 理由
@@ -28,6 +30,5 @@
 
 ## 受け入れたトレードオフ
 
-- Codex のステップの `env` にある、Bedrock と関係のない AWS の秘密情報(配備用の鍵など)は、ADR 0039 で `other-secrets` から、この ADR で後のステップの指摘からも外れ、どの規則にも出ない
-- `safety-strategy: unprivileged-user` で Codex を別のユーザーとして動かすとき、`env` が Codex まで届くかは確かめていない。届かない構成では、後のステップの指摘を見逃す
-- 利用者が `codex-args` や設定で `ignore_default_excludes = false` にしてシェルから鍵を消していても、除いたままにする。設定まで読むと判定が複雑になり、調査ではその形を見ていない
+- `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY` で Bedrock を使う Codex は、`other-secrets` に出る
+- Codex の設定(`shell_environment_policy`)でシェルに渡す `env` を絞っていても、全て手にあるとみなす。codex-action は既定の `safety-strategy` では `codex-args` でこの設定を変えさせない(`runCodexExec.ts` の `validateProtectedExtraArgs`)が、設定ファイルで変えた形は読まない
