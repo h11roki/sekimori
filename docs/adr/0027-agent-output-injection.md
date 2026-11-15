@@ -31,9 +31,9 @@
 - エージェントのステップに `id` があり、同じジョブでそれより後のステップ(`parallel:` の中も含む)が次のどちらかを持つとき
   - `run` の `${{ }}` の値に、`steps.<id>.outputs.<出力>` が流れ込む。値に流れ込むかは、ADR 0015 と同じく式のパーサーの `dataflow_contexts` で決め、`fromJSON(...)` の中もたどる。比べるだけの式(`steps.x.outputs.summary != ''`)は数えない
   - `actions/github-script` の `script` の入力に、同じく流れ込む
-- 出力をまとめて展開する `toJSON(steps.<id>.outputs)` や `toJSON(steps.<id>)` も、モデルの文を含むので数える
+- 出力をまとめて `toJSON` で展開する形(`toJSON(steps.<id>.outputs)`、`toJSON(steps.<id>)`、`toJSON(steps)`)も、モデルの文を含むので数える。`toJSON` を通さずにまとめて展開すると `Object` という文字になるだけなので数えない
 - 後のステップの `if:` が定数で偽(`if: false` など)なら、動かないので数えない
-- 展開する後のステップに届く秘密情報(そのステップ、ジョブ、ワークフローの `env` と、`run` の本文や github-script の入力の `${{ secrets.* }}`。`GITHUB_TOKEN` は除く)は、権限と秘密情報の軸の理由に足す。注入されたコードはそのステップの秘密情報で動くため
+- 展開する後のステップに届く秘密情報(そのステップ、ジョブ、ワークフローの `env`、式で書いた `env`、`run` の本文や github-script の入力の `${{ secrets.* }}`。`GITHUB_TOKEN` は除く)は、権限と秘密情報の軸の理由に足す。注入されたコードはそのステップの秘密情報で動くため。展開する後のステップが複数あれば、全てから探す
 - 指摘の位置は、後のステップの `run` か `script`。複数あれば最初のもの
 
 ## 理由
@@ -47,6 +47,7 @@
 
 ## 受け入れたトレードオフ
 
+- `steps.*.outputs.summary` のようにワイルドカードで全てのステップの出力を集める形は読まない
 - 後のステップの `shell:` と `working-directory:` も展開されるが、調査で見つからなかったので読まない
 - `${{ env.NAME }}` やジョブの `outputs` を経由する展開、他のジョブ、github-script 以外の Action の入力(コマンドを受け取る Action など)は読まない
 - エージェントのステップに `id` が無いと、出力は参照できないので数えない

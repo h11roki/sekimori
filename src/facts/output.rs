@@ -1,11 +1,14 @@
-use github_actions_expressions::SpannedExpr;
-use github_actions_models::common::If;
+use github_actions_expressions::call::Function;
+use github_actions_expressions::op::{BinExpr, BinOp};
+use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
-use github_actions_models::workflow::job::SharedStepFields;
 use yamlpath::{Component, Route};
 
 use super::secrets::shell_secret;
-use super::{Input, expression_spans, flowing_contexts, lookup_in, nearest_env, parse_expression};
+use super::{
+    Input, expression_spans, flowing_contexts, lookup_in, nearest_env, parse_condition,
+    parse_expression,
+};
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
@@ -13,6 +16,7 @@ const SCRIPT_ACTION: &str = "actions/github-script";
 const SCRIPT_INPUT: &str = "script";
 const RUN_KEY: &str = "run";
 const WITH_KEY: &str = "with";
+const STEPS_CONTEXT: &str = "steps";
 
 #[derive(Debug)]
 pub struct OutputInjection<'w> {
@@ -31,77 +35,113 @@ pub fn output_injection<'w>(
         Agent::Codex => &["final-message"],
         Agent::GeminiCli => &["summary", "error"],
     };
-    let outputs: Vec<String> = model_text
+    let text_outputs: Vec<String> = model_text
         .iter()
         .map(|output| format!("steps.{id}.outputs.{output}"))
-        .chain([format!("steps.{id}.outputs"), format!("steps.{id}")])
         .collect();
-    job_steps(step.job_id, step.job)
+    let aggregates = [
+        format!("steps.{id}.outputs"),
+        format!("steps.{id}"),
+        STEPS_CONTEXT.to_string(),
+    ];
+    let mut expansions = job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
-        .find_map(|(_, route, later)| {
-            let (shared, key, code, inputs, code_route) = match later {
+        .filter_map(|(_, route, later)| {
+            let (shared, key, code, code_route) = match later {
                 JobStep::Run(run) => (
                     &run.shared,
                     RUN_KEY,
                     run.run.as_str(),
-                    String::new(),
                     route.with_key(RUN_KEY),
                 ),
                 JobStep::Uses(uses) if is_root_action(&uses.uses, SCRIPT_ACTION) => {
                     let Input::Text { key, value } = lookup_in(&uses.with, SCRIPT_INPUT) else {
                         return None;
                     };
-                    let inputs = match &uses.with {
-                        LoE::Literal(with) => with
-                            .values()
-                            .map(|value| value.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        LoE::Expr(_) => String::new(),
-                    };
                     (
                         &uses.shared,
                         key,
                         value,
-                        inputs,
                         route.with_keys([Component::from(WITH_KEY), Component::from(key)]),
                     )
                 }
                 JobStep::Uses(_) => return None,
             };
-            if never_runs(shared) {
+            let never_runs = shared
+                .r#if
+                .as_ref()
+                .and_then(parse_condition)
+                .and_then(|condition| condition.consteval())
+                .is_some_and(|value| !value.as_boolean());
+            if never_runs {
                 return None;
             }
             let output = expression_spans(code).into_iter().find_map(|span| {
                 let expression = parse_expression(&code[span])?;
-                outputs
+                let contexts = flowing_contexts(&expression);
+                text_outputs
                     .iter()
-                    .find(|output| flows_into(&expression, output))
+                    .find(|output| {
+                        contexts
+                            .iter()
+                            .any(|context| context.matches(output.as_str()))
+                    })
+                    .or_else(|| {
+                        aggregates
+                            .iter()
+                            .find(|aggregate| expands_as_json(&expression, aggregate))
+                    })
             })?;
+            let secret_source = match later {
+                JobStep::Run(_) => code.to_string(),
+                JobStep::Uses(uses) => match &uses.with {
+                    LoE::Literal(with) => with
+                        .values()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    LoE::Expr(expression) => expression.as_raw().to_string(),
+                },
+            };
             let env = nearest_env(workflow, step.job_id, step.job, &shared.env, &route);
             Some(OutputInjection {
                 setting: format!("a later step expands `{output}` into its `{key}`"),
-                secret: shell_secret(env, &format!("{code}\n{inputs}")),
+                secret: shell_secret(env, &secret_source),
                 route: code_route,
             })
-        })
+        });
+    let first = expansions.next()?;
+    let secret = first
+        .secret
+        .clone()
+        .or_else(|| expansions.find_map(|later| later.secret));
+    Some(OutputInjection { secret, ..first })
 }
 
-fn never_runs(step: &SharedStepFields) -> bool {
-    match &step.r#if {
-        Some(If::Bool(runs)) => !runs,
-        Some(If::Expr(raw)) => parse_expression(raw)
-            .and_then(|expression| expression.consteval())
-            .is_some_and(|value| !value.as_boolean()),
-        None => false,
+fn expands_as_json(expression: &SpannedExpr, aggregate: &str) -> bool {
+    match &expression.inner {
+        Expr::Call(call) if call.func == Function::ToJSON => call.args.iter().any(|argument| {
+            flowing_contexts(argument)
+                .iter()
+                .any(|context| context.matches(aggregate))
+        }),
+        Expr::Call(call) if matches!(call.func, Function::Format | Function::Join) => call
+            .args
+            .iter()
+            .any(|argument| expands_as_json(argument, aggregate)),
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            rhs,
+            ..
+        }) => expands_as_json(rhs, aggregate),
+        Expr::BinExpr(BinExpr {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+        }) => expands_as_json(lhs, aggregate) || expands_as_json(rhs, aggregate),
+        _ => false,
     }
-}
-
-fn flows_into(expression: &SpannedExpr, output: &str) -> bool {
-    flowing_contexts(expression)
-        .into_iter()
-        .any(|context| context.matches(output))
 }
 
 #[cfg(test)]
@@ -165,6 +205,11 @@ jobs:
                 "      - run: echo '${{ toJSON(steps.agent.outputs) }}' | jq .summary",
                 "8: a later step expands `steps.agent.outputs` into its `run`",
             ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo '${{ format('{0}', toJSON(steps)) }}' | jq -r .agent.outputs.summary",
+                "8: a later step expands `steps` into its `run`",
+            ),
         ] {
             assert_eq!(
                 injection(agent, later).as_deref(),
@@ -200,6 +245,10 @@ jobs:
             (
                 "openai/codex-action@v1",
                 "      - run: echo \"${{ steps.other.outputs.final-message }}\"",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ steps.agent.outputs }} ${{ steps.agent }}\"",
             ),
             (
                 "google-github-actions/run-gemini-cli@v0",
@@ -263,6 +312,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
             ),
             None
+        );
+        assert_eq!(
+            secret_of(
+                "      - run: echo \"${{ steps.agent.outputs.summary }}\" >> \"$GITHUB_STEP_SUMMARY\"
+      - run: npm publish --tag \"${{ steps.agent.outputs.summary }}\"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"
+            )
+            .as_deref(),
+            Some("secrets.NPM_TOKEN")
+        );
+        assert_eq!(
+            secret_of(
+                "      - run: echo \"${{ steps.agent.outputs.summary }}\"
+        env: ${{ fromJSON(secrets.DEPLOY_ENV) }}"
+            )
+            .as_deref(),
+            Some("secrets.DEPLOY_ENV")
         );
     }
 

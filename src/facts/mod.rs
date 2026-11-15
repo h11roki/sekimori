@@ -9,7 +9,7 @@ use std::ops::Range;
 use github_actions_expressions::context::Context;
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
-use github_actions_models::common::{Env, EnvValue};
+use github_actions_models::common::{Env, EnvValue, If};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::{Component, Route, route};
 
@@ -148,6 +148,13 @@ fn flowing_contexts<'a, 'src>(expression: &'a SpannedExpr<'src>) -> Vec<&'a Cont
             found
         })
         .collect()
+}
+
+fn parse_condition(condition: &If) -> Option<SpannedExpr<'_>> {
+    match condition {
+        If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
+        If::Expr(raw) => parse_expression(raw),
+    }
 }
 
 fn parse_expression(text: &str) -> Option<SpannedExpr<'_>> {

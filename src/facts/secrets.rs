@@ -56,6 +56,7 @@ pub(super) fn shell_secret<'w>(env: NearestEnv<'w>, code: &str) -> Option<String
     let env = resolved_secrets(env);
     env.variables()
         .find_map(|(_, secret)| secret.cloned())
+        .or_else(|| first_secret(env.env.expression.as_ref()?.0, None))
         .or_else(|| first_secret(code, Some(&env)))
 }
 
