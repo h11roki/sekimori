@@ -57,6 +57,17 @@ impl Workflow {
         })
     }
 
+    pub fn comments(&self, route: &Route) -> Vec<&str> {
+        let Ok(feature) = self.document.query_pretty(route) else {
+            return Vec::new();
+        };
+        self.document
+            .feature_comments(&feature)
+            .iter()
+            .map(|comment| self.document.extract(comment))
+            .collect()
+    }
+
     pub fn position(&self, route: &Route) -> Option<(usize, usize)> {
         let feature = self.document.query_pretty(route).ok()?;
         let (row, byte_column) = feature.location.point_span.0;
@@ -189,6 +200,36 @@ fn paths_in(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yamlpath::route;
+
+    #[test]
+    fn comments_are_only_real_comments_on_the_lines_of_a_value() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: push
+name: 'x # quoted'
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6 # real
+      - run: |
+          echo '# not a comment'
+"
+            .to_string(),
+        )
+        .unwrap();
+        assert!(workflow.comments(&route!["name"]).is_empty());
+        assert_eq!(
+            workflow.comments(&route!["jobs", "a", "steps", 0, "uses"]),
+            ["# real"]
+        );
+        assert!(
+            workflow
+                .comments(&route!["jobs", "a", "steps", 1, "run"])
+                .is_empty()
+        );
+    }
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workflows");
 

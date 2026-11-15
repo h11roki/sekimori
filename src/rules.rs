@@ -17,6 +17,8 @@ const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
 pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
+const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
+const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
@@ -150,6 +152,7 @@ pub struct Assessment<'w> {
     pub allowed_tools: Option<AxisScore>,
     pub permissions_and_secrets: Option<AxisScore>,
     pub hits: Vec<Hit<'w>>,
+    pub ignored: Vec<Rule>,
 }
 
 impl<'w> Assessment<'w> {
@@ -179,6 +182,7 @@ impl<'w> Assessment<'w> {
         };
         self.hits
             .iter()
+            .filter(|hit| !self.ignored.contains(&hit.rule))
             .map(|hit| Finding {
                 level,
                 hit,
@@ -296,13 +300,49 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
+    let ignored = if hits.is_empty() {
+        Vec::new()
+    } else {
+        let directives: Vec<Option<Vec<&str>>> = workflow
+            .comments(&step.route.with_key(USES_KEY))
+            .into_iter()
+            .flat_map(ignore_directives)
+            .collect();
+        Rule::ALL
+            .into_iter()
+            .filter(|rule| {
+                directives.iter().any(|directive| {
+                    directive
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&rule.id()))
+                })
+            })
+            .collect()
+    };
     Assessment {
         step,
         who_can_trigger,
         allowed_tools,
         permissions_and_secrets,
         hits,
+        ignored,
     }
+}
+
+fn ignore_directives(comment: &str) -> Vec<Option<Vec<&str>>> {
+    comment
+        .split('#')
+        .filter_map(|part| {
+            let directive = part.trim().strip_prefix(IGNORE_DIRECTIVE)?;
+            match directive.strip_prefix('[') {
+                Some(list) => {
+                    let (ids, _) = list.split_once(']')?;
+                    Some(Some(ids.split(',').map(str::trim).collect()))
+                }
+                None => directive.is_empty().then_some(None),
+            }
+        })
+        .collect()
 }
 
 fn event_names(events: &[ExternalEvent]) -> String {
@@ -913,6 +953,97 @@ jobs:
     }
 
     #[test]
+    fn ignore_comments_drop_the_named_findings_without_changing_the_level() {
+        let rules_with = |agent_comment: &str, args_comment: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1 {agent_comment}
+        with:
+          github_token: ${{{{ github.token }}}}
+          allowed_non_write_users: '*'
+          claude_args: --allowedTools Bash {args_comment}
+"
+                ),
+            )
+            .unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assessments[0]
+                .findings()
+                .iter()
+                .map(|finding| (finding.level, finding.hit.rule))
+                .collect::<Vec<_>>()
+        };
+        let both = vec![
+            (Level::Error, Rule::UnrestrictedTrigger),
+            (Level::Error, Rule::BroadTools),
+        ];
+        assert_eq!(rules_with("", ""), both);
+        assert_eq!(rules_with("# sekimori: ignore", ""), []);
+        assert_eq!(
+            rules_with("# sekimori: ignore[broad-tools] reviewed", ""),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
+        assert_eq!(
+            rules_with("# sekimori: ignore[unrestricted-trigger, broad-tools]", ""),
+            []
+        );
+        assert_eq!(rules_with("", "# sekimori: ignore[broad-tools]"), both);
+        assert_eq!(
+            rules_with("# v1.0.5 # sekimori: ignore[broad-tools]", ""),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
+        for comment in [
+            "# sekimori: ignore broad-tools",
+            "# sekimori: ignore reviewed",
+            "# sekimori: ignored",
+            "# sekimori: ignore[pr-head]",
+            "# sekimori: ignore [broad-tools]",
+            "# sekimori: ignore[broad-tools",
+            "# TODO remove sekimori: ignore once tools are scoped",
+        ] {
+            assert_eq!(rules_with(comment, ""), both, "{comment}");
+        }
+    }
+
+    #[test]
+    fn the_ignore_comment_is_read_on_the_uses_line_wherever_the_step_starts() {
+        for source in [
+            "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1 # sekimori: ignore
+        with:
+          claude_args: --allowedTools Bash
+",
+            "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - run: true
+          - uses: anthropics/claude-code-action@v1 # sekimori: ignore
+            with:
+              claude_args: --allowedTools Bash
+",
+        ] {
+            let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assert!(!assessments[0].hits.is_empty(), "{source}");
+            assert!(assessments[0].findings().is_empty(), "{source}");
+        }
+    }
+
+    #[test]
     fn tokens_secrets_and_write_access_share_the_permissions_axis() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
@@ -1141,6 +1272,7 @@ jobs:
                 allowed_tools: axis(tools),
                 permissions_and_secrets: axis(permissions),
                 hits: Vec::new(),
+                ignored: Vec::new(),
             };
             assert_eq!(
                 assessment.level(),
