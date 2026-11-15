@@ -1044,6 +1044,228 @@ jobs:
     }
 
     #[test]
+    fn the_base_action_checks_no_actor_passes_env_tokens_and_loads_the_checked_out_settings() {
+        let rules_of = |source: &str| {
+            let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assessments[0]
+                .findings()
+                .iter()
+                .map(|finding| (finding.level, finding.hit.rule))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rules_of(
+                "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: ${{ github.event.comment.body }}
+          allowed_tools: Bash
+          claude_env: |
+            GH_TOKEN: ${{ secrets.BOT_PAT }}
+"
+            ),
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::BroadTools),
+                (Level::Error, Rule::LongLivedToken),
+            ]
+        );
+        assert_eq!(
+            rules_of(
+                "on: issue_comment
+jobs:
+  claude:
+    if: github.event.comment.author_association == 'OWNER'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action/base-action@v1
+        with:
+          prompt: ${{ github.event.comment.body }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+"
+            ),
+            []
+        );
+        assert_eq!(
+            rules_of(
+                "on: pull_request_target
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-base-action@v0.0.63
+        with:
+          prompt: Review this pull request.
+"
+            ),
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::PrHeadCheckout),
+            ]
+        );
+        let secrets_of = |inputs: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: push
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: Fix the tests.
+{inputs}"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .permissions_and_secrets
+                .as_ref()
+                .map(|score| score.reason.clone())
+        };
+        assert_eq!(
+            secrets_of(
+                "          mcp_config: '{\"mcpServers\": {\"x\": {\"env\": {\"KEY\": \"${{ secrets.MCP_KEY }}\"}}}}'\n"
+            )
+            .as_deref(),
+            Some("mcp_config passes secrets.MCP_KEY to the agent")
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
+            )
+            .as_deref(),
+            Some("env DEPLOY_KEY passes secrets.DEPLOY_KEY to the agent")
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            # DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
+            ),
+            None
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            ANTHROPIC_API_KEY: ${{ secrets.KEY }}\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_env_overrides_env_only_for_the_published_base_action() {
+        let rules_of = |uses: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: push
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{{{ secrets.BOT_PAT }}}}
+    steps:
+      - uses: {uses}
+        with:
+          prompt: Fix the tests.
+          allowed_tools: Bash
+          claude_args: --allowedTools Bash
+          claude_env: |
+            GH_TOKEN: ${{{{ github.token }}}}
+            ANTHROPIC_API_KEY: ${{{{ secrets.KEY }}}}
+      - run: npm test
+        env:
+          KEY: ${{{{ secrets.KEY }}}}
+"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rules_of("anthropics/claude-code-base-action@beta"),
+            [Rule::BroadTools, Rule::AgentCodeWithSecrets]
+        );
+        assert_eq!(
+            rules_of("anthropics/claude-code-action/base-action@v1"),
+            [
+                Rule::BroadTools,
+                Rule::LongLivedToken,
+                Rule::AgentCodeWithSecrets
+            ]
+        );
+    }
+
+    #[test]
+    fn each_base_action_reads_only_the_inputs_it_has() {
+        let hits_of = |uses: &str, inputs: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {uses}
+        with:
+          prompt: Fix the tests.
+{inputs}"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect::<Vec<_>>()
+        };
+        let main = "anthropics/claude-code-action/base-action@v1";
+        let beta = "anthropics/claude-code-base-action@beta";
+        assert_eq!(
+            hits_of(main, "          allowed_tools: Bash\n"),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(beta, "          claude_args: --allowedTools Bash\n"),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(
+                main,
+                "          mcp_config: '{\"env\": \"${{ secrets.KEY }}\"}'\n"
+            ),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(
+                beta,
+                "          mcp_config: '{\"env\": \"${{ secrets.KEY }}\"}'\n"
+            ),
+            [Rule::UnrestrictedTrigger, Rule::OtherSecrets]
+        );
+    }
+
+    #[test]
     fn tokens_secrets_and_write_access_share_the_permissions_axis() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

@@ -8,33 +8,47 @@ use crate::workflow::Workflow;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     ClaudeCode,
+    ClaudeBase,
+    ClaudeBaseBeta,
     Codex,
     GeminiCli,
 }
 
-const AGENT_ACTIONS: [(&str, Agent); 3] = [
-    ("anthropics/claude-code-action", Agent::ClaudeCode),
-    ("openai/codex-action", Agent::Codex),
-    ("google-github-actions/run-gemini-cli", Agent::GeminiCli),
+const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
+    ("anthropics/claude-code-action", "", Agent::ClaudeCode),
+    (
+        "anthropics/claude-code-action",
+        "base-action",
+        Agent::ClaudeBase,
+    ),
+    (
+        "anthropics/claude-code-base-action",
+        "",
+        Agent::ClaudeBaseBeta,
+    ),
+    ("openai/codex-action", "", Agent::Codex),
+    ("google-github-actions/run-gemini-cli", "", Agent::GeminiCli),
 ];
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
         AGENT_ACTIONS
             .iter()
-            .find(|(action, _)| is_root_action(uses, action))
-            .map(|(_, agent)| *agent)
+            .find(|(action, subpath, _)| is_action(uses, action, subpath))
+            .map(|(.., agent)| *agent)
     }
 }
 
 pub(crate) fn is_root_action(uses: &Uses, action: &str) -> bool {
+    is_action(uses, action, "")
+}
+
+fn is_action(uses: &Uses, action: &str, subpath: &str) -> bool {
     let Uses::Repository(repository) = uses else {
         return false;
     };
-    repository
-        .subpath()
-        .is_none_or(|subpath| subpath.is_empty())
-        && action.eq_ignore_ascii_case(repository.slug())
+    action.eq_ignore_ascii_case(repository.slug())
+        && repository.subpath().unwrap_or_default().trim_matches('/') == subpath
 }
 
 #[derive(Debug)]
@@ -200,14 +214,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: anthropics/claude-code-action/base-action@v1
-      - uses: anthropics/claude-code-base-action@v1
+      - uses: anthropics/claude-code-action/other-action@v1
       - uses: ./.github/actions/claude-code-action
       - uses: docker://openai/codex-action:latest
       - run: npx @google/gemini-cli
 ",
         );
         assert!(agent_steps(&workflow).is_empty());
+    }
+
+    #[test]
+    fn the_base_action_is_found_under_both_names() {
+        let workflow = workflow(
+            "on: issues
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action/base-action@v1
+      - uses: Anthropics/Claude-Code-Base-Action@v1
+",
+        );
+        let agents: Vec<Agent> = agent_steps(&workflow)
+            .iter()
+            .map(|step| step.agent)
+            .collect();
+        assert_eq!(agents, [Agent::ClaudeBase, Agent::ClaudeBaseBeta]);
     }
 
     #[test]

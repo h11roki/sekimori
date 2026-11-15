@@ -70,3 +70,4 @@
 | [0029](0029-no-push-rule.md) | エージェントの後の push、マージ、公開は、規則にしない | 承認 |
 | [0030](0030-exclusive-step-conditions.md) | エージェントのステップと両立しない `if:` を持つ後のステップは、同じ実行では動かないとみなす | 承認 |
 | [0031](0031-ignore-comments.md) | 指摘は、エージェントのステップの `uses:` の行の `# sekimori: ignore[規則]` のコメントで抑える | 承認 |
+| [0032](0032-claude-code-base-action.md) | Claude Code の base action も、4 つ目のエージェントとして検査する | 承認 |

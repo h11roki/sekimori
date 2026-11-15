@@ -35,7 +35,8 @@ pub fn output_injection<'w>(
 ) -> Option<OutputInjection<'w>> {
     let id = step.step.shared.id.as_deref()?;
     let model_text: &[&str] = match step.agent {
-        Agent::ClaudeCode => &["structured_output"],
+        Agent::ClaudeCode | Agent::ClaudeBase => &["structured_output"],
+        Agent::ClaudeBaseBeta => &[],
         Agent::Codex => &["final-message"],
         Agent::GeminiCli => &["summary", "error"],
     };
@@ -43,9 +44,11 @@ pub fn output_injection<'w>(
         .iter()
         .map(|output| format!("steps.{id}.outputs.{output}"))
         .collect();
-    let aggregates_hold_model_text = step.agent != Agent::ClaudeCode
-        || input(step, CLAUDE_ARGS_INPUT)
-            .is_some_and(|(_, value)| value.contains(JSON_SCHEMA_FLAG));
+    let aggregates_hold_model_text = !matches!(
+        step.agent,
+        Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta
+    ) || input(step, CLAUDE_ARGS_INPUT)
+        .is_some_and(|(_, value)| value.contains(JSON_SCHEMA_FLAG));
     let aggregates: Vec<String> = if aggregates_hold_model_text {
         vec![
             format!("steps.{id}.outputs"),

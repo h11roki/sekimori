@@ -11,8 +11,10 @@ const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
 const CLAUDE_PERMISSION_MODE_FLAG: &str = "--permission-mode";
 const CLAUDE_SETTINGS_FLAG: &str = "--settings";
 const CLAUDE_BYPASS_MODE: &str = "bypassPermissions";
+const CLAUDE_ACCEPT_EDITS_MODE: &str = "acceptEdits";
 const CLAUDE_BYPASS_DISABLED: &str = "disable";
 const CLAUDE_SHELL_TOOL: &str = "Bash";
+const CLAUDE_ARGS_INPUT: &str = "claude_args";
 const CLAUDE_LEGACY_ALLOWED_INPUT: &str = "allowed_tools";
 const CLAUDE_LEGACY_DISALLOWED_INPUT: &str = "disallowed_tools";
 const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
@@ -61,7 +63,9 @@ pub struct BroadTool<'w> {
 
 pub fn broad_tool<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
     match step.agent {
-        Agent::ClaudeCode => ClaudePermissions::of(step).broad_tool(),
+        Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta => {
+            ClaudePermissions::of(step).broad_tool()
+        }
         Agent::Codex => CODEX_BROAD_INPUTS.into_iter().find_map(|(name, broad)| {
             let (key, value) = input(step, name)?;
             (value.trim() == broad).then(|| BroadTool {
@@ -86,11 +90,16 @@ struct ClaudePermissions<'w> {
 impl<'w> ClaudePermissions<'w> {
     fn of(step: &AgentStep<'w>) -> Self {
         let mut permissions = Self::default();
-        if let Some((key, value)) = input(step, "claude_args") {
+        if step.agent != Agent::ClaudeBaseBeta
+            && let Some((key, value)) = input(step, CLAUDE_ARGS_INPUT)
+        {
             permissions.read_args(key, value, &input_route(step, key));
         }
         if let Some((key, value)) = input(step, SETTINGS_INPUT) {
             permissions.read_settings(key, value, &input_route(step, key));
+        }
+        if step.agent == Agent::ClaudeBase {
+            return permissions;
         }
         if let Some((key, value)) = input(step, CLAUDE_LEGACY_ALLOWED_INPUT) {
             let route = input_route(step, key);
@@ -323,6 +332,16 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
         setting: format!("{key} allows `{tool}` in tools.core"),
         route,
     })
+}
+
+pub(super) fn claude_may_edit(step: &AgentStep) -> bool {
+    let permissions = ClaudePermissions::of(step);
+    let accepts_edits = permissions
+        .cli_mode
+        .as_ref()
+        .or(permissions.settings_mode.as_ref())
+        .is_some_and(|(mode, _)| mode == CLAUDE_ACCEPT_EDITS_MODE);
+    accepts_edits || permissions.broad_tool().is_some()
 }
 
 pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {

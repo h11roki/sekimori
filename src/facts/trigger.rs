@@ -188,7 +188,7 @@ pub fn open_trigger<'w>(
                 .or_else(|| wildcard(step, "allowed_bots"))?
         }
         Agent::Codex => wildcard(step, "allow-users")?,
-        Agent::GeminiCli => {
+        Agent::GeminiCli | Agent::ClaudeBase | Agent::ClaudeBaseBeta => {
             let setting = if step.job.r#if.is_none() && step.step.shared.r#if.is_none() {
                 "no `if:` on the job or step"
             } else {

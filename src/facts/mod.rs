@@ -17,7 +17,7 @@ use github_actions_models::common::{Env, EnvValue, If};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::{Component, Route, route};
 
-use crate::agent::{AgentStep, JobStep, job_steps};
+use crate::agent::{Agent, AgentStep, JobStep, job_steps};
 use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
@@ -36,6 +36,7 @@ const EXPRESSION_START: &str = "${{";
 const EXPRESSION_END: &str = "}}";
 const ENV_CONTEXT: &str = "env";
 const SETTINGS_INPUT: &str = "settings";
+const CLAUDE_ENV_INPUT: &str = "claude_env";
 const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
@@ -502,11 +503,38 @@ fn nearest_env<'w>(
 }
 
 fn agent_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> NearestEnv<'w> {
-    nearest_env(
+    let mut env = nearest_env(
         workflow,
         step.job_id,
         step.job,
         &step.step.shared.env,
         &step.route,
-    )
+    );
+    if step.agent != Agent::ClaudeBaseBeta {
+        return env;
+    }
+    let Some((key, value)) = input(step, CLAUDE_ENV_INPUT) else {
+        return env;
+    };
+    let route = input_route(step, key);
+    let mut variables: Vec<EnvVariable<'w>> = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| !name.trim().is_empty())
+        .map(|(name, value)| EnvVariable {
+            name: name.trim(),
+            value: value.trim().to_string(),
+            route: route.clone(),
+        })
+        .collect();
+    let overridden: Vec<&str> = variables.iter().map(|variable| variable.name).collect();
+    variables.extend(
+        env.variables
+            .into_iter()
+            .filter(|variable| !overridden.contains(&variable.name)),
+    );
+    env.variables = variables;
+    env
 }
