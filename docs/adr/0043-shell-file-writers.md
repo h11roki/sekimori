@@ -18,7 +18,7 @@
 
 高橋さんが判断を任せ(2026-11-16 に「全部進めてください」)、Claude が 1 を選んだ。
 
-- 書き換えとみなすコマンドは、`tee`、`cp`、`mv`、`install`、`rsync`、`patch`、`dd`、`truncate` と、`sed -i`(`sed` を引数ごと許す形を含む)、`git apply`、`git am`、`git checkout`、`git restore`(`git` を引数ごと許す形を含む)
+- 書き換えとみなすコマンドは、`tee`、`cp`、`mv`、`install`、`rsync`、`patch`、`dd`、`truncate`、`sed` と、`git apply`、`git am`、`git checkout`、`git restore`(`git` を引数ごと許す形を含む)。`Bash(sed -n:*)` のように頭を決めても、後ろに `-i` を足せるので `sed` は全て数える
 - 引数を決めて許した形(`Bash(cp a.txt b.txt)`)は、書くファイルが決まっているので数えない
 - Claude の許可と、Gemini の `tools.core` の `run_shell_command` の両方で読む。`agent-code-with-secrets`(ADR 0028)の書き換えの判定にも効く
 

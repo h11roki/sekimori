@@ -108,6 +108,10 @@ const PROJECT_CODE_TOOLS: [&str; 32] = [
     "rspec",
 ];
 const RELATIVE_PATH_PREFIXES: [&str; 2] = ["./", "../"];
+const FILE_WRITERS: [&str; 9] = [
+    "tee", "cp", "mv", "install", "rsync", "patch", "dd", "truncate", "sed",
+];
+const GIT_FILE_WRITERS: [&str; 4] = ["apply", "am", "checkout", "restore"];
 const CLAUDE_EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 const CLAUDE_EDIT_RULE: &str = "Edit";
 const CLAUDE_AUTO_MODE: &str = "auto";
@@ -332,6 +336,11 @@ impl<'w> ClaudePermissions<'w> {
         let Some(pattern) = pattern_of(tool, CLAUDE_SHELL_TOOL).map(str::trim) else {
             return;
         };
+        if let Some(prefix) = pattern.strip_suffix('*')
+            && writes_files(prefix.trim_end_matches([':', ' ']))
+        {
+            self.edit_allowed = true;
+        }
         let reach = match pattern.strip_suffix('*') {
             Some(prefix) => command_reach(prefix.trim_end_matches([':', ' '])),
             None if pattern.is_empty() => Reach::AnyCommand,
@@ -447,6 +456,23 @@ fn command_reach(prefix: &str) -> Reach {
         Reach::ProjectCode
     } else {
         Reach::Fixed
+    }
+}
+
+fn writes_files(prefix: &str) -> bool {
+    let mut words = prefix
+        .split_whitespace()
+        .skip_while(|word| is_assignment(word));
+    let Some(program) = words.next() else {
+        return false;
+    };
+    let rest: Vec<&str> = words.collect();
+    match command_name(program) {
+        "git" => rest
+            .iter()
+            .find(|word| !word.starts_with('-'))
+            .is_none_or(|subcommand| GIT_FILE_WRITERS.contains(subcommand)),
+        name => FILE_WRITERS.contains(&name),
     }
 }
 
@@ -570,6 +596,7 @@ pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
         .iter()
         .any(|names| usable(names, |_| true))
         || usable(&GEMINI_SHELL_TOOLS, opens_any_command)
+        || usable(&GEMINI_SHELL_TOOLS, writes_files)
 }
 
 fn settings_json(value: &str) -> Option<Value> {
@@ -934,6 +961,31 @@ jobs:
             base("        with:\n          claude_args: --allowedTools \"Edit(/**),Bash(npm test:*)\"\n")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn shell_commands_that_write_files_count_as_edits() {
+        for writer in [
+            "Bash(sed -i:*)",
+            "Bash(sed -n:*)",
+            "Bash(tee:*)",
+            "Bash(cp:*)",
+            "Bash(git apply:*)",
+            "Bash(git:*)",
+        ] {
+            let with = format!(
+                "        with:\n          claude_args: --allowedTools \"{writer},Bash(npm test:*)\"\n"
+            );
+            assert!(base(&with).is_some(), "{writer}");
+        }
+        for reader in ["Bash(git diff:*)", "Bash(cp a.txt b.txt)", "Bash(cat:*)"] {
+            let with = format!(
+                "        with:\n          claude_args: --allowedTools \"{reader},Bash(npm test:*)\"\n"
+            );
+            assert_eq!(base(&with), None, "{reader}");
+        }
+        let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"]}}'\n";
+        assert!(gemini(settings).is_some());
     }
 
     #[test]
