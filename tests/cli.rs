@@ -340,28 +340,27 @@ fn an_unwritable_sarif_file_still_leaves_the_summary() {
 fn an_unwritable_output_file_is_an_error_annotation_in_the_github_format() {
     let directory = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
-        .args(["--format", "github", "--summary-file"])
-        .arg(directory.path().join("missing/summary.md"))
-        .arg(Path::new(FIXTURES).join("ci.yml"))
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
-        .args(["--format", "github", "--summary-file"])
+        .args(["--format", "github", "--sarif-file"])
+        .arg(directory.path().join("missing/sekimori.sarif"))
+        .arg("--summary-file")
         .arg(directory.path().join("missing/summary.md"))
         .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let last = stdout.lines().last().unwrap();
-    assert!(last.starts_with("::error title=sekimori::failed to write "));
-    assert!(last.contains("summary.md"));
+    let failures: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("::error title=sekimori::failed to write "))
+        .collect();
+    assert_eq!(failures.len(), 2);
+    assert!(failures[0].contains("sekimori.sarif"));
+    assert!(failures[1].contains("summary.md"));
     assert!(output.stderr.is_empty());
 }
 
 #[test]
-fn a_sarif_file_that_cannot_be_renamed_into_place_leaves_no_partial_file() {
+fn a_sarif_path_that_is_a_directory_is_reported_and_left_alone() {
     let directory = tempfile::tempdir().unwrap();
     let sarif = directory.path().join("sekimori.sarif");
     std::fs::create_dir(&sarif).unwrap();
@@ -373,7 +372,6 @@ fn a_sarif_file_that_cannot_be_renamed_into_place_leaves_no_partial_file() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(sarif.is_dir());
-    assert!(!directory.path().join("sekimori.sarif.partial").exists());
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()

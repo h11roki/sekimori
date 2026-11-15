@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
@@ -17,7 +17,6 @@ use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
 const EXIT_FINDINGS: u8 = 1;
 const EXIT_FAILURE: u8 = 2;
-const PARTIAL_SUFFIX: &str = ".partial";
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Format {
@@ -131,7 +130,7 @@ fn main() -> ExitCode {
             results.extend(sarif_results(workflow, &artifact_uri(&path), &findings));
         }
     }
-    let mut failure = None;
+    let mut failed = false;
     if wants_sarif {
         let mut document = match serde_json::to_vec_pretty(&sarif_log(results, &errors)) {
             Ok(document) => document,
@@ -144,9 +143,26 @@ fn main() -> ExitCode {
             return write_failure(&error);
         }
         if let Some(file) = &sarif_file
-            && let Err(error) = write_whole(file, &document)
+            && let Err(error) = fs::write(file, &document)
         {
-            failure = Some(file_failure(&mut stdout, cli.format, file, &error));
+            failed = true;
+            report_failure(
+                &mut stdout,
+                cli.format,
+                &format!("failed to write {}: {error}", file.display()),
+            );
+            if file.is_file()
+                && let Err(error) = fs::remove_file(file)
+            {
+                report_failure(
+                    &mut stdout,
+                    cli.format,
+                    &format!(
+                        "failed to remove the partly written {}: {error}",
+                        file.display()
+                    ),
+                );
+            }
         }
     }
     if let (Some(file), Some(text)) = (&summary_file, &summary_text) {
@@ -168,13 +184,15 @@ fn main() -> ExitCode {
                 }
             });
         if let Err(error) = appended {
-            failure = Some(file_failure(&mut stdout, cli.format, file, &error));
+            failed = true;
+            report_failure(
+                &mut stdout,
+                cli.format,
+                &format!("failed to write {}: {error}", file.display()),
+            );
         }
     }
-    if let Some(failure) = failure {
-        return failure;
-    }
-    if !errors.is_empty() {
+    if failed || !errors.is_empty() {
         ExitCode::from(EXIT_FAILURE)
     } else if found {
         ExitCode::from(EXIT_FINDINGS)
@@ -188,36 +206,14 @@ fn write_failure(error: &io::Error) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
-fn file_failure(
-    stdout: &mut impl Write,
-    format: Format,
-    file: &Path,
-    error: &io::Error,
-) -> ExitCode {
-    let message = format!("failed to write {}: {error}", file.display());
-    let annotated = matches!(format, Format::Github)
-        && stdout
-            .write_all(github_error(None, &message).as_bytes())
-            .is_ok();
-    if !annotated {
-        eprintln!("error: {message}");
+fn report_failure(stdout: &mut impl Write, format: Format, message: &str) {
+    if let Format::Github = format {
+        match stdout.write_all(github_error(None, message).as_bytes()) {
+            Ok(()) => return,
+            Err(error) => eprintln!("error: failed to write an annotation: {error}"),
+        }
     }
-    ExitCode::from(EXIT_FAILURE)
-}
-
-fn write_whole(file: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut partial = file.as_os_str().to_owned();
-    partial.push(PARTIAL_SUFFIX);
-    let partial = PathBuf::from(partial);
-    fs::write(&partial, contents)
-        .and_then(|()| fs::rename(&partial, file))
-        .inspect_err(|_| {
-            if let Err(error) = fs::remove_file(&partial)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                eprintln!("error: failed to remove {}: {error}", partial.display());
-            }
-        })
+    eprintln!("error: {message}");
 }
 
 fn given_path(value: Option<&OsStr>) -> Option<PathBuf> {
