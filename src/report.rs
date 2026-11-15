@@ -18,6 +18,10 @@ const UNC_URI_PREFIX: &str = "//";
 const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
+const SUMMARY_LIMIT: usize = 500_000;
+const SUMMARY_INDENT: &str = "    ";
+const SUMMARY_CUT_NOTE: &str =
+    "The output was cut to fit the job summary. See the log for every finding.";
 
 pub fn warning(workflow: &Workflow, route: &Route, message: &str) -> String {
     let (line, column) = workflow.position(route).unwrap_or((1, 1));
@@ -71,6 +75,28 @@ pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
         escape_property(TOOL_NAME),
         escape_data(message)
     )
+}
+
+pub fn summary(plain: &str) -> Option<String> {
+    let mut body = String::new();
+    let mut cut = false;
+    for line in plain.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let indented = format!("{SUMMARY_INDENT}{line}\n");
+        if body.len() + indented.len() > SUMMARY_LIMIT {
+            cut = true;
+            break;
+        }
+        body.push_str(&indented);
+    }
+    if body.trim().is_empty() && !cut {
+        return None;
+    }
+    let note = if cut {
+        format!("\n{SUMMARY_CUT_NOTE}\n")
+    } else {
+        String::new()
+    };
+    Some(format!("## {TOOL_NAME}\n\n{body}{note}"))
 }
 
 fn annotation(
@@ -313,6 +339,41 @@ mod tests {
     use super::*;
     use crate::facts::Upstreams;
     use crate::rules::{Assessment, assess};
+
+    #[test]
+    fn the_summary_indents_every_line_and_turns_carriage_returns_into_lines() {
+        assert_eq!(
+            summary("a\r\nb\rc\n").unwrap(),
+            "## sekimori\n\n    a\n    b\n    c\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_output_has_no_summary() {
+        assert_eq!(summary(""), None);
+        assert_eq!(summary("\n"), None);
+    }
+
+    #[test]
+    fn the_summary_stops_before_the_line_that_would_pass_the_limit() {
+        let line = "x".repeat(99);
+        let plain = format!("{line}\n").repeat(SUMMARY_LIMIT / 100 + 1);
+        let written = summary(&plain).unwrap();
+        let kept = written
+            .lines()
+            .filter(|text| *text == format!("{SUMMARY_INDENT}{line}"))
+            .count();
+        assert_eq!(kept, SUMMARY_LIMIT / (SUMMARY_INDENT.len() + 100));
+        assert!(written.ends_with(&format!("\n{SUMMARY_CUT_NOTE}\n")));
+    }
+
+    #[test]
+    fn a_summary_that_fits_exactly_is_not_cut() {
+        let line = "x".repeat(SUMMARY_LIMIT - SUMMARY_INDENT.len() - 1);
+        let written = summary(&line).unwrap();
+        assert!(!written.contains(SUMMARY_CUT_NOTE));
+        assert!(written.ends_with(&format!("{line}\n")));
+    }
 
     #[test]
     fn annotation_values_are_escaped_like_the_actions_toolkit() {
