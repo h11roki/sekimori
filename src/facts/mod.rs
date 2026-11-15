@@ -1,4 +1,5 @@
 mod checkout;
+mod output;
 mod secrets;
 mod tools;
 mod trigger;
@@ -15,6 +16,7 @@ use crate::agent::AgentStep;
 use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
+pub use output::{OutputInjection, output_injection};
 pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{

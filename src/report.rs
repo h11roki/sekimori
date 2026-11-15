@@ -393,7 +393,8 @@ total: 2 of 3"
                 "broad-tools",
                 "long-lived-token",
                 "pr-head-checkout",
-                "other-secrets"
+                "other-secrets",
+                "agent-output-injection"
             ]
         );
         assert_eq!(run["invocations"][0]["executionSuccessful"], false);
