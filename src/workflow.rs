@@ -346,6 +346,23 @@ jobs:
     }
 
     #[test]
+    fn only_errors_about_one_workflow_name_its_path() {
+        let path = PathBuf::from(".github/workflows");
+        let error = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let file = LoadError::Read {
+            path: path.join("a.yml"),
+            source: error(),
+        };
+        let directory = LoadError::ReadDirectory {
+            path: path.clone(),
+            source: error(),
+        };
+        assert_eq!(file.workflow_path(), Some(path.join("a.yml").as_path()));
+        assert_eq!(directory.workflow_path(), None);
+        assert_eq!(LoadError::NoWorkflows { path }.workflow_path(), None);
+    }
+
+    #[test]
     fn missing_file_is_a_read_error() {
         let result = Workflow::load(&Path::new(FIXTURES).join("missing.yml"));
         assert!(matches!(result, Err(LoadError::Read { .. })));

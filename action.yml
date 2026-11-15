@@ -21,7 +21,7 @@ outputs:
     description: Path to the findings in SARIF format.
     value: ${{ steps.check.outputs.sarif-file }}
   exit-code:
-    description: "Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run. Empty when sekimori was not installed."
+    description: "Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run, another non-zero value if it crashed. Empty when sekimori was not installed."
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
@@ -70,8 +70,16 @@ runs:
         output="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")"
         status=0
         "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
+        sarif_status=0
+        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$output/sekimori.sarif" || sarif_status=$?
+        echo "sarif-file=$output/sekimori.sarif" >> "$GITHUB_OUTPUT"
+        code=$(( status > sarif_status ? status : sarif_status ))
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         summary_limit=500000
-        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        summary_status=0
+        set +e
+        [ -z "${GITHUB_STEP_SUMMARY:-}" ] || (
+          set -e
           "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
           sed 's/\r$//' "$output/plain.txt" | tr '\r' '\n' | sed 's/^/    /' > "$output/summary.txt"
           if [ -s "$output/summary.txt" ]; then
@@ -79,7 +87,7 @@ runs:
               echo "## sekimori"
               echo
               if [ "$(wc -c < "$output/summary.txt")" -gt "$summary_limit" ]; then
-                head -c "$summary_limit" "$output/summary.txt" | sed '$d'
+                LC_ALL=C awk -v limit="$summary_limit" '{ size += length($0) + 1; if (size > limit) exit; print }' "$output/summary.txt"
                 echo
                 echo "The output was cut to fit the job summary. See the log for every finding."
               else
@@ -87,10 +95,10 @@ runs:
               fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+        )
+        summary_status=$?
+        set -e
+        if [ "$summary_status" -ne 0 ]; then
+          echo "::warning title=sekimori::could not write the job summary"
         fi
-        sarif_status=0
-        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$output/sekimori.sarif" || sarif_status=$?
-        echo "sarif-file=$output/sekimori.sarif" >> "$GITHUB_OUTPUT"
-        code=$(( status > sarif_status ? status : sarif_status ))
-        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         exit "$code"

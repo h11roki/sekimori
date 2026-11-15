@@ -53,7 +53,7 @@ jobs:
           category: sekimori
 ```
 
-The sekimori step fails when it finds something, so the upload step runs with `!cancelled()`. Findings also appear as annotations on the workflow files, including in a pull request's changed files, and in the job summary. Pull requests from forks cannot get `security-events: write`, so the upload is skipped for them; the findings are still printed in the log.
+The sekimori step fails when it finds something, so the upload step runs with `!cancelled()`. Findings also appear as annotations on the workflow files, including in a pull request's changed files, and in the job summary. Pull requests from forks cannot get `security-events: write`, so the upload is skipped for them; the findings still appear as annotations in the log and in the job summary.
 
 The action downloads the release binary that matches its own version and checks its [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) before running it. It works on GitHub-hosted Linux (x64, ARM64), macOS (ARM64) and Windows (x64) runners, and needs the GitHub CLI (`gh`) on self-hosted runners.
 
@@ -65,7 +65,7 @@ The action downloads the release binary that matches its own version and checks 
 | Output | Description |
 |---|---|
 | `sarif-file` | Path to the findings in SARIF 2.1.0 |
-| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run; empty when sekimori was not installed |
+| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run, another non-zero value if it crashed; empty when sekimori was not installed |
 
 ## Use it from the command line
 
