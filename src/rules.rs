@@ -81,7 +81,7 @@ impl Rule {
                 "The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not fill this axis when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and every earlier step in the job is an `actions/checkout` of this repository at a fixed ref. Fills the who-can-trigger axis."
             }
             Rule::BroadTools => {
-                "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. Fills the allowed-tools axis."
+                "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. This includes a command that fetches and runs any package or script (npx, uvx, uv run, npm exec, go run), and a build or test command that runs the repository's own code (npm test, make, cargo, ./gradlew, pytest, python with arguments, ./script.sh) when the agent can also edit files. Fills the allowed-tools axis."
             }
             Rule::LongLivedToken => {
                 "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. Fills the permissions/secrets axis."
@@ -943,6 +943,38 @@ jobs:
         assert_eq!(rules(source.to_string()), [Rule::AgentCodeWithSecrets]);
         let without_npm = source.replace("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", "CI: true");
         assert!(rules(without_npm).is_empty());
+    }
+
+    #[test]
+    fn later_code_is_not_reported_when_claude_code_cannot_edit() {
+        let source = "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: review
+          allowed_bots: dependabot
+      - run: npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+";
+        let rules = |source: String| -> Vec<Rule> {
+            let workflow = Workflow::parse(Path::new("test.yml"), source).unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect()
+        };
+        assert!(!rules(source.to_string()).contains(&Rule::AgentCodeWithSecrets));
+        assert!(
+            rules(source.replace("          allowed_bots: dependabot\n", ""))
+                .contains(&Rule::AgentCodeWithSecrets)
+        );
     }
 
     #[test]

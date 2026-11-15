@@ -79,3 +79,4 @@
 | [0038](0038-output-file-failures.md) | 書きかけの SARIF のファイルは消し、書けなかったことは `--format github` で注釈にする | 承認 |
 | [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認(`AWS_` の接頭辞、後のステップの指摘での扱いと、その理由は 0040 で置き換え) |
 | [0040](0040-codex-credentials-in-hand.md) | Codex の env は全てエージェントの手にあるとして後のステップの指摘から除き、資格情報の名前は Bedrock の鍵に絞る | 承認 |
+| [0041](0041-build-tool-commands.md) | ビルドとテストのコマンドは、書き換えと組むと広い道具として数え、パッケージを取って動かすコマンドは単独で数える | 承認 |
