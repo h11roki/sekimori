@@ -148,6 +148,8 @@ Each rule that matched is printed with the step's breakdown. [Fixing findings](#
 | `other-secrets` | permissions/secrets | A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. |
 | `agent-code-with-secrets` | permissions/secrets | The agent can edit the workspace, and a later step in the job runs project code with a secret other than `GITHUB_TOKEN`: a `./` script or a relative path to a script file, a script file given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. |
 
+Codex run with `safety-strategy: unprivileged-user` and a `codex-user` other than `runner` gets none of the step's environment, because the action starts it with `sudo -u`. Secrets in `env` then count for neither `other-secrets` nor `long-lived-token`, and a later step that runs the agent's edits with them counts for `agent-code-with-secrets`. Secrets written into the agent's inputs still count.
+
 ## Severity
 
 For each agent step, sekimori adds up the three axes. Each axis scores 1 when it is met, and the who-can-trigger axis scores 0.5 when only outside contributors' text can reach the agent (for example, a maintainer mentions the agent on an outsider's issue).

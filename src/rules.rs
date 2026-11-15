@@ -946,6 +946,33 @@ jobs:
     }
 
     #[test]
+    fn codex_as_an_unprivileged_user_leaves_env_secrets_to_later_code() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: openai/codex-action@v1
+        with:
+          safety-strategy: unprivileged-user
+          codex-user: codex
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+    }
+
+    #[test]
     fn later_code_is_not_reported_when_claude_code_cannot_edit() {
         let source = "on: issue_comment
 permissions:
