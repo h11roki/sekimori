@@ -32,7 +32,8 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
     "GOOGLE_APPLICATION_CREDENTIALS",
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
-const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
+const AWS_CREDENTIAL_PREFIX: &str = "AWS_";
+const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = [AWS_CREDENTIAL_PREFIX, "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 1] = ["OPENAI_API_KEY"];
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
@@ -216,7 +217,9 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                     .iter()
                     .any(|prefix| name.starts_with(prefix))
         }
-        Agent::Codex => !CODEX_CREDENTIAL_VARIABLES.contains(&name),
+        Agent::Codex => {
+            !CODEX_CREDENTIAL_VARIABLES.contains(&name) && !name.starts_with(AWS_CREDENTIAL_PREFIX)
+        }
         Agent::GeminiCli => {
             !GEMINI_CREDENTIAL_VARIABLES.contains(&name)
                 && references_variable(gemini_settings, name)
@@ -392,13 +395,13 @@ mod tests {
             Some("5: env NPM_TOKEN passes secrets.NPM_TOKEN to the agent".to_string())
         );
         let codex = workflow(
-            "env:\n  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n  ALL: ${{ toJSON(secrets) }}\n",
+            "env:\n  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n  AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}\n  ALL: ${{ toJSON(secrets) }}\n",
             "openai/codex-action@v1",
             "",
         );
         assert_eq!(
             found(other_secret, &codex),
-            Some("4: env ALL passes every secret to the agent".to_string())
+            Some("5: env ALL passes every secret to the agent".to_string())
         );
     }
 
