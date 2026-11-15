@@ -75,3 +75,4 @@
 | [0034](0034-default-branch-upstream-checkout.md) | workflow_run で、上流が同じリポジトリの既定の枝で動いたと確かめていれば、その commit の取り出しは PR の head としない | 承認 |
 | [0035](0035-github-annotations.md) | `--format github` で GitHub の注釈を出し、Action は注釈とジョブの要約に指摘を出す | 承認 |
 | [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認 |
+| [0037](0037-output-files.md) | CLI は `--sarif-file` と `--summary-file` で SARIF とジョブの要約もファイルに書き、Action は sekimori を 1 回だけ動かす | 承認 |

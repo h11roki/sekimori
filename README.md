@@ -93,6 +93,7 @@ sekimori                         # checks .github/workflows
 sekimori path/to/workflow.yml    # files or directories
 sekimori --format sarif > sekimori.sarif
 sekimori --format github         # GitHub Actions annotations
+sekimori --format github --sarif-file sekimori.sarif --summary-file "$GITHUB_STEP_SUMMARY"
 ```
 
 For this workflow, which lets anyone start Gemini CLI with a comment:

@@ -18,6 +18,10 @@ const UNC_URI_PREFIX: &str = "//";
 const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
+const SUMMARY_FILE_LIMIT: usize = 1_000_000;
+const SUMMARY_INDENT: &str = "    ";
+const SUMMARY_CUT_NOTE: &str =
+    "The output was cut to fit the job summary. See the log for every finding.";
 
 pub fn warning(workflow: &Workflow, route: &Route, message: &str) -> String {
     let (line, column) = workflow.position(route).unwrap_or((1, 1));
@@ -71,6 +75,36 @@ pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
         escape_property(TOOL_NAME),
         escape_data(message)
     )
+}
+
+pub fn summary(output: &str, already_written: usize) -> Option<String> {
+    let separator = if already_written > 0 { "\n" } else { "" };
+    let heading = format!("{separator}## {TOOL_NAME}\n\n");
+    let cut_note = format!("\n{SUMMARY_CUT_NOTE}\n");
+    let room = SUMMARY_FILE_LIMIT.checked_sub(already_written.saturating_add(heading.len()))?;
+    let lines: Vec<String> = output
+        .strip_suffix('\n')
+        .unwrap_or(output)
+        .split('\n')
+        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
+        .map(|line| format!("{SUMMARY_INDENT}{line}\n"))
+        .collect();
+    let body: String = lines.concat();
+    if body.trim().is_empty() {
+        return None;
+    }
+    if body.len() <= room {
+        return Some(format!("{heading}{body}"));
+    }
+    let room = room.checked_sub(cut_note.len())?;
+    let mut kept = String::new();
+    for line in &lines {
+        if kept.len() + line.len() > room {
+            break;
+        }
+        kept.push_str(line);
+    }
+    Some(format!("{heading}{kept}{cut_note}"))
 }
 
 fn annotation(
@@ -313,6 +347,69 @@ mod tests {
     use super::*;
     use crate::facts::Upstreams;
     use crate::rules::{Assessment, assess};
+
+    #[test]
+    fn the_summary_indents_every_line_and_turns_carriage_returns_into_lines() {
+        assert_eq!(
+            summary("a\r\nb\rc\n", 0).unwrap(),
+            "## sekimori\n\n    a\n    b\n    c\n"
+        );
+        assert!(summary("a\n", 1).unwrap().starts_with("\n## sekimori\n"));
+    }
+
+    #[test]
+    fn an_empty_output_has_no_summary() {
+        assert_eq!(summary("", 0), None);
+        assert_eq!(summary("\n", 0), None);
+    }
+
+    #[test]
+    fn the_summary_stops_before_the_line_that_would_pass_the_limit() {
+        let line = "x".repeat(99);
+        let output = format!("{line}\n").repeat(SUMMARY_FILE_LIMIT / 100);
+        let written = summary(&output, 0).unwrap();
+        assert!(written.len() <= SUMMARY_FILE_LIMIT);
+        assert!(written.ends_with(&format!("\n{SUMMARY_CUT_NOTE}\n")));
+        let body: Vec<_> = written
+            .lines()
+            .skip(2)
+            .take_while(|text| !text.is_empty())
+            .collect();
+        assert!(
+            body.iter()
+                .all(|text| *text == format!("{SUMMARY_INDENT}{line}"))
+        );
+        assert!(SUMMARY_FILE_LIMIT - written.len() < SUMMARY_INDENT.len() + line.len() + 1);
+    }
+
+    #[test]
+    fn the_limit_counts_what_the_file_already_holds() {
+        let output = "x\n".repeat(1000);
+        let written = summary(&output, SUMMARY_FILE_LIMIT - 1000).unwrap();
+        assert!(SUMMARY_FILE_LIMIT - 1000 + written.len() <= SUMMARY_FILE_LIMIT);
+        assert!(written.contains(SUMMARY_CUT_NOTE));
+        assert_eq!(summary(&output, SUMMARY_FILE_LIMIT), None);
+    }
+
+    #[test]
+    fn a_summary_that_fills_the_room_exactly_is_not_cut() {
+        let output = "x\n".repeat(100);
+        let size = summary(&output, 1).unwrap().len();
+        let written = summary(&output, SUMMARY_FILE_LIMIT - size).unwrap();
+        assert!(!written.contains(SUMMARY_CUT_NOTE));
+        assert!(
+            summary(&output, SUMMARY_FILE_LIMIT - size + 1)
+                .unwrap()
+                .contains(SUMMARY_CUT_NOTE)
+        );
+    }
+
+    #[test]
+    fn a_summary_that_fits_is_not_cut() {
+        let written = summary(&"x\n".repeat(1000), 0).unwrap();
+        assert!(!written.contains(SUMMARY_CUT_NOTE));
+        assert_eq!(written.matches("    x\n").count(), 1000);
+    }
 
     #[test]
     fn annotation_values_are_escaped_like_the_actions_toolkit() {

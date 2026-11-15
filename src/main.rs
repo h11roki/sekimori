@@ -1,13 +1,16 @@
 use std::cell::LazyCell;
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use sekimori::facts::Upstreams;
 use sekimori::report::{
-    artifact_uri, github, github_error, github_warning, plain, sarif_log, sarif_results, warning,
+    artifact_uri, github, github_error, github_warning, plain, sarif_log, sarif_results, summary,
+    warning,
 };
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
@@ -29,13 +32,21 @@ struct Cli {
     paths: Vec<PathBuf>,
     #[arg(long, value_enum, default_value_t = Format::Plain)]
     format: Format,
+    #[arg(long, value_name = "PATH")]
+    sarif_file: Option<OsString>,
+    #[arg(long, value_name = "PATH")]
+    summary_file: Option<OsString>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let sarif_file = given_path(cli.sarif_file.as_deref());
+    let summary_file = given_path(cli.summary_file.as_deref());
+    let wants_sarif = matches!(cli.format, Format::Sarif) || sarif_file.is_some();
     let mut stdout = io::stdout().lock();
     let mut errors = Vec::new();
     let mut results = Vec::new();
+    let mut summary_text = summary_file.as_ref().map(|_| String::new());
     let mut found = false;
     let mut workflows = Vec::new();
     let mut unreadable = Vec::new();
@@ -45,6 +56,7 @@ fn main() -> ExitCode {
         match loaded {
             Ok(workflow) => workflows.push(workflow),
             Err(error) => {
+                let line = format!("error: {error}");
                 match cli.format {
                     Format::Github => {
                         if let Err(error) = stdout.write_all(
@@ -57,7 +69,11 @@ fn main() -> ExitCode {
                             return write_failure(&error);
                         }
                     }
-                    Format::Plain | Format::Sarif => eprintln!("error: {error}"),
+                    Format::Plain | Format::Sarif => eprintln!("{line}"),
+                }
+                if let Some(text) = &mut summary_text {
+                    text.push_str(&line);
+                    text.push('\n');
                 }
                 errors.push(error.to_string());
             }
@@ -71,22 +87,24 @@ fn main() -> ExitCode {
         for assessment in &assessments {
             for message in assessment.warnings() {
                 let route = assessment.directive_route();
+                let line = warning(workflow, &route, message);
+                if !warned.insert(line.clone()) {
+                    continue;
+                }
                 match cli.format {
-                    Format::Plain => {
-                        let line = warning(workflow, &route, message);
-                        if warned.insert(line.clone()) {
-                            eprintln!("{line}");
-                        }
-                    }
+                    Format::Plain => eprintln!("{line}"),
                     Format::Github => {
-                        let line = github_warning(workflow, &path, &route, message);
-                        if warned.insert(line.clone())
-                            && let Err(error) = stdout.write_all(line.as_bytes())
+                        if let Err(error) = stdout
+                            .write_all(github_warning(workflow, &path, &route, message).as_bytes())
                         {
                             return write_failure(&error);
                         }
                     }
                     Format::Sarif => {}
+                }
+                if let Some(text) = &mut summary_text {
+                    text.push_str(&line);
+                    text.push('\n');
                 }
             }
         }
@@ -95,40 +113,65 @@ fn main() -> ExitCode {
             continue;
         }
         found = true;
-        match cli.format {
-            Format::Plain => {
-                for finding in &findings {
-                    if let Err(error) = stdout.write_all(plain(workflow, finding).as_bytes()) {
-                        return write_failure(&error);
-                    }
-                }
+        for finding in &findings {
+            let written = match cli.format {
+                Format::Plain => stdout.write_all(plain(workflow, finding).as_bytes()),
+                Format::Github => stdout.write_all(github(workflow, &path, finding).as_bytes()),
+                Format::Sarif => Ok(()),
+            };
+            if let Err(error) = written {
+                return write_failure(&error);
             }
-            Format::Github => {
-                for finding in &findings {
-                    if let Err(error) =
-                        stdout.write_all(github(workflow, &path, finding).as_bytes())
-                    {
-                        return write_failure(&error);
-                    }
-                }
+            if let Some(text) = &mut summary_text {
+                text.push_str(&plain(workflow, finding));
             }
-            Format::Sarif => {
-                let uri = artifact_uri(&path);
-                results.extend(sarif_results(workflow, &uri, &findings));
-            }
+        }
+        if wants_sarif {
+            results.extend(sarif_results(workflow, &artifact_uri(&path), &findings));
         }
     }
-    if let Format::Sarif = cli.format {
-        let log = sarif_log(results, &errors);
-        let written = serde_json::to_vec_pretty(&log)
-            .map_err(io::Error::from)
-            .and_then(|mut document| {
-                document.push(b'\n');
-                stdout.write_all(&document)
-            });
-        if let Err(error) = written {
+    let mut failure = None;
+    if wants_sarif {
+        let mut document = match serde_json::to_vec_pretty(&sarif_log(results, &errors)) {
+            Ok(document) => document,
+            Err(error) => return write_failure(&io::Error::from(error)),
+        };
+        document.push(b'\n');
+        if let Format::Sarif = cli.format
+            && let Err(error) = stdout.write_all(&document)
+        {
             return write_failure(&error);
         }
+        if let Some(file) = &sarif_file
+            && let Err(error) = fs::write(file, &document)
+        {
+            failure = Some(file_failure(file, &error));
+        }
+    }
+    if let (Some(file), Some(text)) = (&summary_file, &summary_text) {
+        let appended = fs::metadata(file)
+            .map(|metadata| metadata.len())
+            .or_else(|error| match error.kind() {
+                io::ErrorKind::NotFound => Ok(0),
+                _ => Err(error),
+            })
+            .and_then(|already_written| {
+                let already_written = usize::try_from(already_written).unwrap_or(usize::MAX);
+                match summary(text, already_written) {
+                    Some(markdown) => OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(file)
+                        .and_then(|mut opened| opened.write_all(markdown.as_bytes())),
+                    None => Ok(()),
+                }
+            });
+        if let Err(error) = appended {
+            failure = Some(file_failure(file, &error));
+        }
+    }
+    if let Some(failure) = failure {
+        return failure;
     }
     if !errors.is_empty() {
         ExitCode::from(EXIT_FAILURE)
@@ -142,4 +185,13 @@ fn main() -> ExitCode {
 fn write_failure(error: &io::Error) -> ExitCode {
     eprintln!("error: failed to write findings: {error}");
     ExitCode::from(EXIT_FAILURE)
+}
+
+fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
+    eprintln!("error: failed to write {}: {error}", file.display());
+    ExitCode::from(EXIT_FAILURE)
+}
+
+fn given_path(value: Option<&OsStr>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }

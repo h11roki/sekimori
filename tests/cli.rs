@@ -237,3 +237,101 @@ fn a_workflow_outside_the_repository_names_its_place_in_the_annotation_message()
     assert!(lines[1].starts_with("::error title=sekimori "));
     assert!(lines[1].contains("typo.yml:10:11: "));
 }
+
+#[test]
+fn one_run_writes_annotations_the_sarif_file_and_the_summary() {
+    let directory = tempfile::tempdir().unwrap();
+    let sarif = directory.path().join("sekimori.sarif");
+    let summary = directory.path().join("summary.md");
+    std::fs::write(&summary, "earlier step\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "github", "--sarif-file"])
+        .arg(&sarif)
+        .arg("--summary-file")
+        .arg(&summary)
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("::warning file=")
+    );
+    assert_eq!(
+        std::fs::read(&sarif).unwrap(),
+        sekimori_sarif(&["ignored/typo.yml"]).stdout
+    );
+    let written = std::fs::read_to_string(&summary).unwrap();
+    assert!(written.starts_with("earlier step\n\n## sekimori\n\n    "));
+    assert!(written.contains("typo.yml:6:9: warning: `broad-tool` is not a sekimori rule\n"));
+    assert!(written.contains("error[broad-tools]"));
+}
+
+#[test]
+fn a_clean_run_leaves_the_summary_file_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg("--summary-file")
+        .arg(&summary)
+        .arg(Path::new(FIXTURES).join("ci.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!summary.exists());
+}
+
+#[test]
+fn an_unwritable_summary_file_exits_with_two_after_writing_the_sarif_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let sarif = directory.path().join("sekimori.sarif");
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg("--sarif-file")
+        .arg(&sarif)
+        .arg("--summary-file")
+        .arg(directory.path().join("missing/summary.md"))
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(sarif.exists());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("failed to write "));
+    assert!(stderr.contains("summary.md"));
+}
+
+#[test]
+fn an_empty_summary_file_path_is_skipped() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--summary-file", ""])
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn an_unwritable_sarif_file_still_leaves_the_summary() {
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg("--sarif-file")
+        .arg(directory.path().join("missing/sekimori.sarif"))
+        .arg("--summary-file")
+        .arg(&summary)
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        std::fs::read_to_string(&summary)
+            .unwrap()
+            .starts_with("## sekimori\n")
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("sekimori.sarif")
+    );
+}
