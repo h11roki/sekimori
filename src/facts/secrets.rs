@@ -35,7 +35,9 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 2] = ["OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"];
 const CODEX_SAFETY_STRATEGY: &str = "safety-strategy";
-const CODEX_ANOTHER_USER: &str = "unprivileged-user";
+const CODEX_UNPRIVILEGED_USER: &str = "unprivileged-user";
+const CODEX_USER_INPUT: &str = "codex-user";
+const RUNNER_USER: &str = "runner";
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 
@@ -60,7 +62,10 @@ impl<'w> SecretEnv<'w> {
     }
 
     fn inherited_variables(&self) -> impl Iterator<Item = (&EnvVariable<'w>, Option<&String>)> {
-        self.variables().filter(|_| self.inherited)
+        self.inherited
+            .then(|| self.variables())
+            .into_iter()
+            .flatten()
     }
 
     fn inherited_expression(&self) -> Option<&(&'w str, Route<'w>)> {
@@ -69,17 +74,16 @@ impl<'w> SecretEnv<'w> {
 }
 
 pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv<'w> {
-    let runs_as_another_user = step.agent == Agent::Codex
+    let runs_as_unprivileged_user = step.agent == Agent::Codex
         && input(step, CODEX_SAFETY_STRATEGY)
-            .is_some_and(|(_, value)| value.trim() == CODEX_ANOTHER_USER);
-    SecretEnv {
-        inherited: !runs_as_another_user,
-        ..resolved_secrets(agent_env(workflow, step))
-    }
+            .is_some_and(|(_, value)| value.trim() == CODEX_UNPRIVILEGED_USER)
+        && input(step, CODEX_USER_INPUT)
+            .is_some_and(|(_, user)| !user.trim().is_empty() && user.trim() != RUNNER_USER);
+    resolved_secrets(agent_env(workflow, step), !runs_as_unprivileged_user)
 }
 
 pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> {
-    let env = resolved_secrets(env);
+    let env = resolved_secrets(env, true);
     let mut secrets: Vec<String> = env
         .variables()
         .filter_map(|(_, secret)| secret.cloned())
@@ -132,7 +136,7 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
     secrets
 }
 
-fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
+fn resolved_secrets(env: NearestEnv<'_>, inherited: bool) -> SecretEnv<'_> {
     let direct = SecretEnv {
         secrets: env
             .variables
@@ -140,7 +144,7 @@ fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
             .map(|variable| first_secret(&variable.value, None))
             .collect(),
         env,
-        inherited: true,
+        inherited,
     };
     let secrets = direct
         .variables()
@@ -153,7 +157,7 @@ fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
     SecretEnv {
         env: direct.env,
         secrets,
-        inherited: true,
+        inherited,
     }
 }
 
@@ -408,7 +412,8 @@ mod tests {
                 "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      GH_TOKEN: ${{{{ secrets.BOT_PAT }}}}\n      NPM_TOKEN: ${{{{ secrets.NPM }}}}\n    steps:\n      - uses: openai/codex-action@v1\n        with:\n          prompt: ${{{{ secrets.PROMPT }}}}\n{with}"
             )
         };
-        let separate = source("          safety-strategy: unprivileged-user\n");
+        let separate =
+            source("          safety-strategy: unprivileged-user\n          codex-user: codex\n");
         assert_eq!(
             found(other_secret, &separate),
             Some("11: prompt passes secrets.PROMPT to the agent".to_string())
@@ -421,10 +426,21 @@ mod tests {
             ["secrets.PROMPT"]
         );
         assert!(found(long_lived_token, &source("")).is_some());
-        let through_env = source("          safety-strategy: unprivileged-user\n").replace(
-            "prompt: ${{ secrets.PROMPT }}",
-            "prompt: use ${{ env.NPM_TOKEN }}",
+        assert!(
+            found(
+                long_lived_token,
+                &source(
+                    "          safety-strategy: unprivileged-user\n          codex-user: runner\n"
+                )
+            )
+            .is_some()
         );
+        let through_env =
+            source("          safety-strategy: unprivileged-user\n          codex-user: codex\n")
+                .replace(
+                    "prompt: ${{ secrets.PROMPT }}",
+                    "prompt: use ${{ env.NPM_TOKEN }}",
+                );
         assert_eq!(
             found(other_secret, &through_env),
             Some("11: prompt passes secrets.NPM to the agent".to_string())
