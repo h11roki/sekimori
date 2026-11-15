@@ -128,6 +128,58 @@ For each agent step, sekimori adds up the three axes. Each axis scores 1 when it
 
 Every rule that matched the step is reported with the step's level. In SARIF, results for the same rule at the same place are merged into one, with the heavier level and every step's breakdown.
 
+## Fixing findings
+
+Removing any one axis takes a step below `error`; removing two leaves nothing to report.
+
+### Who can trigger
+
+Let only people with write access start the agent.
+
+- `claude-code-action` and `openai/codex-action`: list user names in `allowed_non_write_users`, `allowed_bots` or `allow-users` instead of `'*'`.
+- `run-gemini-cli`: check who triggered the run in the job's or step's `if:`.
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  gemini:
+    if: >-
+      contains(github.event.comment.body, '@gemini-cli')
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+```
+
+A check on `github.actor`, or `github.event.label.name == '<label>'` on `types: [labeled]`, also counts. Outside contributors' text can still reach the agent when a maintainer starts it on their issue, so this axis scores 0.5 instead of 0.
+
+### Allowed tools
+
+Allow only the commands the task needs.
+
+- `claude-code-action`: allow scoped commands such as `--allowedTools "Bash(npm test:*)"` in `claude_args`. Do not allow `Bash` alone, a shell or interpreter with any arguments (`Bash(bash:*)`, `Bash(python *)`), or `--permission-mode bypassPermissions`.
+- `openai/codex-action`: do not set `sandbox: danger-full-access`, `permission-profile: ":danger-full-access"` or `safety-strategy: unsafe`.
+- `run-gemini-cli`: pass `settings` with a `tools.core` allow-list, and scope the shell tool to the commands the task needs.
+
+```yaml
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          settings: |-
+            {
+              "tools": {
+                "core": ["read_file", "glob", "grep_search", "run_shell_command(npm test)"]
+              }
+            }
+```
+
+For `pr-head-checkout`, do not check out the pull request head before the agent on a privileged event. Check out the base branch, or run the agent on `pull_request`, where it gets no secrets from forks.
+
+### Permissions and secrets
+
+- `long-lived-token`: give the agent `${{ github.token }}` or a short-lived token from [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token), not a personal access token stored as a secret.
+- `other-secrets`: use other secrets in separate steps instead of the agent's inputs or `env`.
+- Set `permissions:` on the job, and give write access to `contents`, `actions`, `packages`, `deployments` or `id-token` only when the agent needs it. Without `permissions:`, `GITHUB_TOKEN` gets the repository default.
+
 ## Limitations
 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
