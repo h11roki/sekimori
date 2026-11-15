@@ -34,6 +34,8 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
 ];
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 2] = ["OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"];
+const CODEX_SAFETY_STRATEGY: &str = "safety-strategy";
+const CODEX_ANOTHER_USER: &str = "unprivileged-user";
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 
@@ -58,6 +60,15 @@ impl<'w> SecretEnv<'w> {
 }
 
 pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv<'w> {
+    let runs_as_another_user = step.agent == Agent::Codex
+        && input(step, CODEX_SAFETY_STRATEGY)
+            .is_some_and(|(_, value)| value.trim() == CODEX_ANOTHER_USER);
+    if runs_as_another_user {
+        return resolved_secrets(NearestEnv {
+            variables: Vec::new(),
+            expression: None,
+        });
+    }
     resolved_secrets(agent_env(workflow, step))
 }
 
@@ -382,6 +393,28 @@ mod tests {
             found(other_secret, &source),
             Some("9: claude_args passes secrets.SENTRY_TOKEN to the agent".to_string())
         );
+    }
+
+    #[test]
+    fn codex_running_as_another_user_gets_no_env() {
+        let source = |with: &str| {
+            format!(
+                "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      GH_TOKEN: ${{{{ secrets.BOT_PAT }}}}\n      NPM_TOKEN: ${{{{ secrets.NPM }}}}\n    steps:\n      - uses: openai/codex-action@v1\n        with:\n          prompt: ${{{{ secrets.PROMPT }}}}\n{with}"
+            )
+        };
+        let separate = source("          safety-strategy: unprivileged-user\n");
+        assert_eq!(
+            found(other_secret, &separate),
+            Some("11: prompt passes secrets.PROMPT to the agent".to_string())
+        );
+        assert_eq!(found(long_lived_token, &separate), None);
+        let workflow = Workflow::parse(Path::new("test.yml"), separate).unwrap();
+        let steps = agent_steps(&workflow);
+        assert_eq!(
+            agent_secrets(&steps[0], &secret_env(&workflow, &steps[0])),
+            ["secrets.PROMPT"]
+        );
+        assert!(found(long_lived_token, &source("")).is_some());
     }
 
     #[test]
