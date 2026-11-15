@@ -49,12 +49,14 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        let mut warned = HashSet::new();
-        for assessment in &assessments {
-            for message in assessment.warnings() {
-                let line = warning(workflow, assessment, message);
-                if warned.insert(line.clone()) {
-                    eprintln!("{line}");
+        if let Format::Plain = cli.format {
+            let mut warned = HashSet::new();
+            for assessment in &assessments {
+                for message in assessment.warnings() {
+                    let line = warning(workflow, &assessment.directive_route(), message);
+                    if warned.insert(line.clone()) {
+                        eprintln!("{line}");
+                    }
                 }
             }
         }
