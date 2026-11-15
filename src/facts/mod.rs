@@ -6,6 +6,7 @@ mod trigger;
 
 use std::ops::Range;
 
+use github_actions_expressions::context::Context;
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue};
@@ -131,6 +132,22 @@ fn expression_spans(text: &str) -> Vec<Range<usize>> {
         offset = end;
     }
     spans
+}
+
+fn flowing_contexts<'a, 'src>(expression: &'a SpannedExpr<'src>) -> Vec<&'a Context<'src>> {
+    expression
+        .dataflow_contexts()
+        .into_iter()
+        .flat_map(|(context, _)| {
+            let mut found = vec![context];
+            if let Some(head) = context.parts.first()
+                && matches!(head.inner, Expr::Call(_))
+            {
+                found.extend(flowing_contexts(head));
+            }
+            found
+        })
+        .collect()
 }
 
 fn parse_expression(text: &str) -> Option<SpannedExpr<'_>> {

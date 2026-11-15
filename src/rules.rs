@@ -78,7 +78,7 @@ impl Rule {
                 "A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. Fills the allowed-tools axis."
             }
             Rule::AgentOutputInjection => {
-                "A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's structured_output, Codex's final-message, or Gemini CLI's summary or error in a `run` script or an actions/github-script `script`. Whoever steers the agent can then run commands in that step. Fills the allowed-tools axis."
+                "A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's structured_output, Codex's final-message, or Gemini CLI's summary or error in a `run` script or an actions/github-script `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. Fills the allowed-tools axis."
             }
             Rule::OtherSecrets => {
                 "A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. Fills the permissions/secrets axis."
@@ -247,12 +247,13 @@ fn assess_step<'w>(
         });
         tool_reasons.push(setting);
     }
-    if let Some(OutputInjection { setting, route }) = output_injection(&step) {
+    let injection = output_injection(workflow, &step);
+    if let Some(OutputInjection { setting, route, .. }) = &injection {
         hits.push(Hit {
             rule: Rule::AgentOutputInjection,
-            route,
+            route: route.clone(),
         });
-        tool_reasons.push(setting);
+        tool_reasons.push(setting.clone());
     }
     let allowed_tools = (!tool_reasons.is_empty()).then(|| AxisScore {
         weight: Weight::Full,
@@ -268,6 +269,11 @@ fn assess_step<'w>(
             hits.push(Hit { rule, route });
             secret_reasons.push(setting);
         }
+    }
+    if let Some(secret) = injection.and_then(|injection| injection.secret) {
+        secret_reasons.push(format!(
+            "{secret} reaches the step that runs the agent's output"
+        ));
     }
     secret_reasons.extend(write_permission(workflow, step.job));
     let permissions_and_secrets = (!secret_reasons.is_empty()).then(|| AxisScore {
@@ -709,6 +715,8 @@ jobs:
         let workflow = Workflow::parse(
             Path::new("test.yml"),
             "on: issue_comment
+permissions:
+  contents: read
 jobs:
   triage:
     runs-on: ubuntu-latest
@@ -719,6 +727,8 @@ jobs:
           prompt: ${{ github.event.comment.body }}
           settings: '{\"tools\": {\"core\": [\"read_file\"]}}'
       - run: echo \"${{ steps.gemini.outputs.summary }}\" >> \"$GITHUB_STEP_SUMMARY\"
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
 "
             .to_string(),
         )
@@ -742,6 +752,13 @@ jobs:
             score(
                 Weight::Full,
                 "a later step expands `steps.gemini.outputs.summary` into its `run`"
+            )
+        );
+        assert_eq!(
+            assessment.permissions_and_secrets,
+            score(
+                Weight::Full,
+                "secrets.DEPLOY_KEY reaches the step that runs the agent's output"
             )
         );
     }

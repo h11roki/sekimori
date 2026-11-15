@@ -139,7 +139,7 @@ Each rule that matched is printed with the step's breakdown. [Fixing findings](#
 | `unrestricted-trigger` | who can trigger | The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not count here when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and every earlier step in the job is an `actions/checkout` of this repository at a fixed ref. |
 | `broad-tools` | allowed tools | The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a `tools.core` allow-list under `--yolo`. |
 | `pr-head-checkout` | allowed tools | A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. |
-| `agent-output-injection` | allowed tools | A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's `structured_output`, Codex's `final-message`, or Gemini CLI's `summary` or `error` in a `run` script or an `actions/github-script` `script`. Whoever steers the agent can then run commands in that step. |
+| `agent-output-injection` | allowed tools | A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's `structured_output`, Codex's `final-message`, or Gemini CLI's `summary` or `error` in a `run` script or an `actions/github-script` `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. |
 | `long-lived-token` | permissions/secrets | The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of `GITHUB_TOKEN` or a short-lived app token. |
 | `other-secrets` | permissions/secrets | A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. |
 
@@ -199,7 +199,7 @@ Allow only the commands the task needs.
             }
 ```
 
-For `agent-output-injection`, pass the output through `env:` and read it as a shell variable, so it is never parsed as code:
+For `agent-output-injection`, pass the output through `env:` and read it as a variable, so it is never parsed as code. In `actions/github-script`, read it with `process.env.SUMMARY`.
 
 ```yaml
       - run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"

@@ -1,14 +1,14 @@
-use github_actions_expressions::{Expr, SpannedExpr};
+use github_actions_expressions::SpannedExpr;
+use github_actions_models::common::If;
+use github_actions_models::common::expr::LoE;
+use github_actions_models::workflow::job::SharedStepFields;
 use yamlpath::{Component, Route};
 
-use super::{Input, expression_spans, lookup_in, parse_expression};
+use super::secrets::shell_secret;
+use super::{Input, expression_spans, flowing_contexts, lookup_in, nearest_env, parse_expression};
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
+use crate::workflow::Workflow;
 
-const MODEL_TEXT_OUTPUTS: [(Agent, &[&str]); 3] = [
-    (Agent::ClaudeCode, &["structured_output"]),
-    (Agent::Codex, &["final-message"]),
-    (Agent::GeminiCli, &["summary", "error"]),
-];
 const SCRIPT_ACTION: &str = "actions/github-script";
 const SCRIPT_INPUT: &str = "script";
 const RUN_KEY: &str = "run";
@@ -18,58 +18,90 @@ const WITH_KEY: &str = "with";
 pub struct OutputInjection<'w> {
     pub setting: String,
     pub route: Route<'w>,
+    pub secret: Option<String>,
 }
 
-pub fn output_injection<'w>(step: &AgentStep<'w>) -> Option<OutputInjection<'w>> {
+pub fn output_injection<'w>(
+    workflow: &'w Workflow,
+    step: &AgentStep<'w>,
+) -> Option<OutputInjection<'w>> {
     let id = step.step.shared.id.as_deref()?;
-    let (_, outputs) = MODEL_TEXT_OUTPUTS
-        .iter()
-        .find(|(agent, _)| *agent == step.agent)?;
-    let outputs: Vec<String> = outputs
+    let model_text: &[&str] = match step.agent {
+        Agent::ClaudeCode => &["structured_output"],
+        Agent::Codex => &["final-message"],
+        Agent::GeminiCli => &["summary", "error"],
+    };
+    let outputs: Vec<String> = model_text
         .iter()
         .map(|output| format!("steps.{id}.outputs.{output}"))
+        .chain([format!("steps.{id}.outputs"), format!("steps.{id}")])
         .collect();
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
         .find_map(|(_, route, later)| {
-            let (key, code, route) = match later {
-                JobStep::Run(run) => (RUN_KEY, run.run.as_str(), route.with_key(RUN_KEY)),
+            let (shared, key, code, inputs, code_route) = match later {
+                JobStep::Run(run) => (
+                    &run.shared,
+                    RUN_KEY,
+                    run.run.as_str(),
+                    String::new(),
+                    route.with_key(RUN_KEY),
+                ),
                 JobStep::Uses(uses) if is_root_action(&uses.uses, SCRIPT_ACTION) => {
-                    match lookup_in(&uses.with, SCRIPT_INPUT) {
-                        Input::Text { key, value } => (
-                            key,
-                            value,
-                            route.with_keys([Component::from(WITH_KEY), Component::from(key)]),
-                        ),
-                        Input::Missing | Input::Unreadable => return None,
-                    }
+                    let Input::Text { key, value } = lookup_in(&uses.with, SCRIPT_INPUT) else {
+                        return None;
+                    };
+                    let inputs = match &uses.with {
+                        LoE::Literal(with) => with
+                            .values()
+                            .map(|value| value.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        LoE::Expr(_) => String::new(),
+                    };
+                    (
+                        &uses.shared,
+                        key,
+                        value,
+                        inputs,
+                        route.with_keys([Component::from(WITH_KEY), Component::from(key)]),
+                    )
                 }
                 JobStep::Uses(_) => return None,
             };
+            if never_runs(shared) {
+                return None;
+            }
             let output = expression_spans(code).into_iter().find_map(|span| {
                 let expression = parse_expression(&code[span])?;
                 outputs
                     .iter()
                     .find(|output| flows_into(&expression, output))
             })?;
+            let env = nearest_env(workflow, step.job_id, step.job, &shared.env, &route);
             Some(OutputInjection {
                 setting: format!("a later step expands `{output}` into its `{key}`"),
-                route,
+                secret: shell_secret(env, &format!("{code}\n{inputs}")),
+                route: code_route,
             })
         })
 }
 
+fn never_runs(step: &SharedStepFields) -> bool {
+    match &step.r#if {
+        Some(If::Bool(runs)) => !runs,
+        Some(If::Expr(raw)) => parse_expression(raw)
+            .and_then(|expression| expression.consteval())
+            .is_some_and(|value| !value.as_boolean()),
+        None => false,
+    }
+}
+
 fn flows_into(expression: &SpannedExpr, output: &str) -> bool {
-    expression
-        .dataflow_contexts()
+    flowing_contexts(expression)
         .into_iter()
-        .any(|(context, _)| {
-            context.matches(output)
-                || context.parts.first().is_some_and(|head| {
-                    matches!(head.inner, Expr::Call(_)) && flows_into(head, output)
-                })
-        })
+        .any(|context| context.matches(output))
 }
 
 #[cfg(test)]
@@ -96,7 +128,7 @@ jobs:
         )
         .unwrap();
         let steps = agent_steps(&workflow);
-        output_injection(&steps[0]).map(|found| {
+        output_injection(&workflow, &steps[0]).map(|found| {
             let (line, _) = workflow.position(&found.route).unwrap();
             format!("{line}: {}", found.setting)
         })
@@ -127,6 +159,11 @@ jobs:
           script: |
             core.info(`${{ fromJSON(steps.agent.outputs.structured_output).title }}`)",
                 "10: a later step expands `steps.agent.outputs.structured_output` into its `script`",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo '${{ toJSON(steps.agent.outputs) }}' | jq .summary",
+                "8: a later step expands `steps.agent.outputs` into its `run`",
             ),
         ] {
             assert_eq!(
@@ -164,9 +201,69 @@ jobs:
                 "openai/codex-action@v1",
                 "      - run: echo \"${{ steps.other.outputs.final-message }}\"",
             ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - if: false
+        run: echo \"${{ steps.agent.outputs.summary }}\"",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - uses: actions/github-script@v8
+        with: ${{ fromJSON(vars.SCRIPT) }}",
+            ),
         ] {
             assert_eq!(injection(agent, later), None, "{later}");
         }
+    }
+
+    #[test]
+    fn secrets_that_reach_the_expanding_step_are_reported() {
+        let secret_of = |later: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+env:
+  REGION: us
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - id: agent
+        uses: google-github-actions/run-gemini-cli@v0
+{later}"
+                ),
+            )
+            .unwrap();
+            output_injection(&workflow, &agent_steps(&workflow)[0]).and_then(|found| found.secret)
+        };
+        assert_eq!(
+            secret_of(
+                "      - run: npm publish --tag \"${{ steps.agent.outputs.summary }}\"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"
+            )
+            .as_deref(),
+            Some("secrets.NPM_TOKEN")
+        );
+        assert_eq!(
+            secret_of(
+                "      - uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.BOT_PAT }}
+          script: core.info(`${{ steps.agent.outputs.summary }}`)"
+            )
+            .as_deref(),
+            Some("secrets.BOT_PAT")
+        );
+        assert_eq!(
+            secret_of(
+                "      - run: echo \"${{ steps.agent.outputs.summary }}\"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -190,7 +287,7 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        assert!(output_injection(&agent_steps(&workflow)[0]).is_none());
+        assert!(output_injection(&workflow, &agent_steps(&workflow)[0]).is_none());
         let without_id = Workflow::parse(
             Path::new("test.yml"),
             "on: issue_comment
@@ -204,6 +301,6 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        assert!(output_injection(&agent_steps(&without_id)[0]).is_none());
+        assert!(output_injection(&without_id, &agent_steps(&without_id)[0]).is_none());
     }
 }
