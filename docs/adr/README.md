@@ -73,3 +73,4 @@
 | [0032](0032-claude-code-base-action.md) | Claude Code の base action も、4 つ目のエージェントとして検査する | 承認 |
 | [0033](0033-ignore-warnings.md) | 読めない抑える指示と知らない規則の ID は、標準エラー出力に警告する | 承認 |
 | [0034](0034-default-branch-upstream-checkout.md) | workflow_run で、上流が同じリポジトリの既定の枝で動いたと確かめていれば、その commit の取り出しは PR の head としない | 承認 |
+| [0035](0035-github-annotations.md) | `--format github` で GitHub の注釈を出し、Action は注釈とジョブの要約に指摘を出す | 承認 |
