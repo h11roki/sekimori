@@ -298,11 +298,11 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
-    let agent_line = step.route.with_key(USES_KEY);
+    let agent_comments = workflow.comments(&step.route.with_key(USES_KEY));
     hits.retain(|hit| {
-        ![&hit.route, &agent_line]
+        !agent_comments
             .iter()
-            .any(|route| ignores(workflow.line_comment(route), hit.rule))
+            .any(|comment| ignores(comment, hit.rule))
     });
     Assessment {
         step,
@@ -313,17 +313,23 @@ fn assess_step<'w>(
     }
 }
 
-fn ignores(comment: Option<&str>, rule: Rule) -> bool {
-    let Some((_, directive)) = comment.and_then(|comment| comment.split_once(IGNORE_DIRECTIVE))
+fn ignores(comment: &str, rule: Rule) -> bool {
+    let Some(directive) = comment
+        .trim_start_matches('#')
+        .trim_start()
+        .strip_prefix(IGNORE_DIRECTIVE)
     else {
         return false;
     };
     match directive.strip_prefix('[') {
         Some(list) => list
-            .split(']')
-            .next()
-            .is_some_and(|ids| ids.split(',').any(|id| id.trim() == rule.id())),
-        None => directive.is_empty() || directive.starts_with(char::is_whitespace),
+            .split_once(']')
+            .is_some_and(|(ids, _)| ids.split(',').any(|id| id.trim() == rule.id())),
+        None => {
+            directive.is_empty()
+                || (directive.starts_with(char::is_whitespace)
+                    && !directive.trim_start().starts_with('['))
+        }
     }
 }
 
@@ -972,11 +978,19 @@ jobs:
             [(Level::Error, Rule::UnrestrictedTrigger)]
         );
         assert_eq!(
-            rules_with("", "# sekimori: ignore[unrestricted-trigger, broad-tools]"),
-            [(Level::Error, Rule::UnrestrictedTrigger)]
+            rules_with("# sekimori: ignore[unrestricted-trigger, broad-tools]", ""),
+            []
         );
-        assert_eq!(rules_with("# sekimori: ignored", ""), both);
-        assert_eq!(rules_with("# sekimori: ignore[pr-head]", ""), both);
+        assert_eq!(rules_with("", "# sekimori: ignore[broad-tools]"), both);
+        for comment in [
+            "# sekimori: ignored",
+            "# sekimori: ignore[pr-head]",
+            "# sekimori: ignore [broad-tools]",
+            "# sekimori: ignore[broad-tools",
+            "# TODO remove sekimori: ignore once tools are scoped",
+        ] {
+            assert_eq!(rules_with(comment, ""), both, "{comment}");
+        }
     }
 
     #[test]

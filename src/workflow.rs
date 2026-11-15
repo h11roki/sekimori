@@ -20,7 +20,6 @@ pub enum LoadError {
 }
 
 const WORKFLOW_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
-const COMMENT_START: char = '#';
 const WORKSPACE_VARIABLE: &str = "GITHUB_WORKSPACE";
 const REPOSITORY_MARKER: &str = ".git";
 const VERBATIM_PREFIX: &str = r"\\?\";
@@ -58,19 +57,15 @@ impl Workflow {
         })
     }
 
-    pub fn line_comment(&self, route: &Route) -> Option<&str> {
-        let feature = self.document.query_pretty(route).ok()?;
-        let start = feature.location.byte_span.0;
-        let source = self.document.source();
-        let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = source[start..]
-            .find('\n')
-            .map_or(source.len(), |index| start + index);
-        source[line_start..line_end]
-            .match_indices(COMMENT_START)
-            .map(|(index, _)| line_start + index)
-            .find(|offset| self.document.offset_inside_comment(*offset))
-            .map(|offset| &source[offset..line_end])
+    pub fn comments(&self, route: &Route) -> Vec<&str> {
+        let Ok(feature) = self.document.query_pretty(route) else {
+            return Vec::new();
+        };
+        self.document
+            .feature_comments(&feature)
+            .iter()
+            .map(|comment| self.document.extract(comment))
+            .collect()
     }
 
     pub fn position(&self, route: &Route) -> Option<(usize, usize)> {
@@ -208,23 +203,32 @@ mod tests {
     use yamlpath::route;
 
     #[test]
-    fn line_comment_reads_only_real_comments_on_the_line() {
+    fn comments_are_only_real_comments_on_the_lines_of_a_value() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
             "on: push
 name: 'x # quoted'
 jobs:
-  a: # real
+  a:
     runs-on: ubuntu-latest
     steps:
-      - run: true
+      - uses: actions/checkout@v6 # real
+      - run: |
+          echo '# not a comment'
 "
             .to_string(),
         )
         .unwrap();
-        assert_eq!(workflow.line_comment(&route!["name"]), None);
-        assert_eq!(workflow.line_comment(&route!["jobs", "a"]), Some("# real"));
-        assert_eq!(workflow.line_comment(&route!["on"]), None);
+        assert!(workflow.comments(&route!["name"]).is_empty());
+        assert_eq!(
+            workflow.comments(&route!["jobs", "a", "steps", 0, "uses"]),
+            ["# real"]
+        );
+        assert!(
+            workflow
+                .comments(&route!["jobs", "a", "steps", 1, "run"])
+                .is_empty()
+        );
     }
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workflows");

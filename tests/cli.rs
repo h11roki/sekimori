@@ -155,3 +155,14 @@ fn an_unreadable_file_beside_the_upstream_keeps_the_workflow_run_open() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("[unrestricted-trigger]"), "{stdout}");
 }
+
+#[test]
+fn ignored_findings_leave_the_output_and_the_exit_code() {
+    let output = sekimori(&["ignored/agent.yml"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    let sarif = sekimori_sarif(&["ignored/agent.yml"]);
+    assert_eq!(sarif.status.code(), Some(0));
+    let log: serde_json::Value = serde_json::from_slice(&sarif.stdout).unwrap();
+    assert_eq!(log["runs"][0]["results"].as_array().unwrap().len(), 0);
+}

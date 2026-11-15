@@ -219,13 +219,13 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 
 ### Ignoring a finding
 
-If you accept a finding, add a comment on the line sekimori reports, or on the agent step's `uses:` line to cover every finding of that step:
+If you accept the risk of an agent step, add a comment on its `uses:` line naming the rules to ignore:
 
 ```yaml
       - uses: google-github-actions/run-gemini-cli@v0 # sekimori: ignore[broad-tools]
 ```
 
-List several rule IDs with commas, or write `# sekimori: ignore` alone to ignore every rule on that line. Ignored findings are left out of the output and the exit code; the other findings of the step keep their level.
+List several rule IDs with commas, or write `# sekimori: ignore` alone to ignore every rule for that step. Ignored findings are left out of the output and the exit code. The level of the step does not change, so the remaining findings still show every axis, including the reason behind an ignored rule.
 
 ## Limitations
 
