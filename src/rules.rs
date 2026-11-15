@@ -152,6 +152,7 @@ pub struct Assessment<'w> {
     pub allowed_tools: Option<AxisScore>,
     pub permissions_and_secrets: Option<AxisScore>,
     pub hits: Vec<Hit<'w>>,
+    pub ignored: Vec<Rule>,
 }
 
 impl<'w> Assessment<'w> {
@@ -181,6 +182,7 @@ impl<'w> Assessment<'w> {
         };
         self.hits
             .iter()
+            .filter(|hit| !self.ignored.contains(&hit.rule))
             .map(|hit| Finding {
                 level,
                 hit,
@@ -298,39 +300,37 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
-    let agent_comments = workflow.comments(&step.route.with_key(USES_KEY));
-    hits.retain(|hit| {
-        !agent_comments
-            .iter()
-            .any(|comment| ignores(comment, hit.rule))
-    });
+    let ignored = if hits.is_empty() {
+        Vec::new()
+    } else {
+        let comments = workflow.comments(&step.route.with_key(USES_KEY));
+        Rule::ALL
+            .into_iter()
+            .filter(|rule| comments.iter().any(|comment| ignores(comment, *rule)))
+            .collect()
+    };
     Assessment {
         step,
         who_can_trigger,
         allowed_tools,
         permissions_and_secrets,
         hits,
+        ignored,
     }
 }
 
 fn ignores(comment: &str, rule: Rule) -> bool {
-    let Some(directive) = comment
-        .trim_start_matches('#')
-        .trim_start()
-        .strip_prefix(IGNORE_DIRECTIVE)
-    else {
-        return false;
-    };
-    match directive.strip_prefix('[') {
-        Some(list) => list
-            .split_once(']')
-            .is_some_and(|(ids, _)| ids.split(',').any(|id| id.trim() == rule.id())),
-        None => {
-            directive.is_empty()
-                || (directive.starts_with(char::is_whitespace)
-                    && !directive.trim_start().starts_with('['))
+    comment.split('#').any(|part| {
+        let Some(directive) = part.trim().strip_prefix(IGNORE_DIRECTIVE) else {
+            return false;
+        };
+        match directive.strip_prefix('[') {
+            Some(list) => list
+                .split_once(']')
+                .is_some_and(|(ids, _)| ids.split(',').any(|id| id.trim() == rule.id())),
+            None => directive.is_empty(),
         }
-    }
+    })
 }
 
 fn event_names(events: &[ExternalEvent]) -> String {
@@ -982,7 +982,13 @@ jobs:
             []
         );
         assert_eq!(rules_with("", "# sekimori: ignore[broad-tools]"), both);
+        assert_eq!(
+            rules_with("# v1.0.5 # sekimori: ignore[broad-tools]", ""),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
         for comment in [
+            "# sekimori: ignore broad-tools",
+            "# sekimori: ignore reviewed",
             "# sekimori: ignored",
             "# sekimori: ignore[pr-head]",
             "# sekimori: ignore [broad-tools]",
@@ -990,6 +996,38 @@ jobs:
             "# TODO remove sekimori: ignore once tools are scoped",
         ] {
             assert_eq!(rules_with(comment, ""), both, "{comment}");
+        }
+    }
+
+    #[test]
+    fn the_ignore_comment_is_read_on_the_uses_line_wherever_the_step_starts() {
+        for source in [
+            "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1 # sekimori: ignore
+        with:
+          claude_args: --allowedTools Bash
+",
+            "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - run: true
+          - uses: anthropics/claude-code-action@v1 # sekimori: ignore
+            with:
+              claude_args: --allowedTools Bash
+",
+        ] {
+            let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assert!(!assessments[0].hits.is_empty(), "{source}");
+            assert!(assessments[0].findings().is_empty(), "{source}");
         }
     }
 
@@ -1222,6 +1260,7 @@ jobs:
                 allowed_tools: axis(tools),
                 permissions_and_secrets: axis(permissions),
                 hits: Vec::new(),
+                ignored: Vec::new(),
             };
             assert_eq!(
                 assessment.level(),
