@@ -82,3 +82,4 @@
 | [0041](0041-build-tool-commands.md) | ビルドとテストのコマンドは、書き換えと組むと広い道具として数え、パッケージを取って動かすコマンドは単独で数える | 承認(シェルのコマンドでの書き換えは 0043 で足した) |
 | [0042](0042-codex-separate-user.md) | `safety-strategy: unprivileged-user` の Codex には、ステップの env が届かないとみなす | 承認 |
 | [0043](0043-shell-file-writers.md) | ファイルを書き換えるシェルのコマンドを許すことも、書き換えとして数える | 承認 |
+| [0044](0044-auto-mode.md) | claude-code-action の auto モードは、それだけでは広い道具として数えない | 承認 |
