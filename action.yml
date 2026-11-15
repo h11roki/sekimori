@@ -68,11 +68,11 @@ runs:
         status=0
         "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
         "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
-        if [ -s "$output/plain.txt" ]; then
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$output/plain.txt" ]; then
           {
             echo "## sekimori"
             echo
-            sed 's/^/    /' "$output/plain.txt"
+            tr '\r' '\n' < "$output/plain.txt" | sed 's/^/    /'
           } >> "$GITHUB_STEP_SUMMARY"
         fi
         sarif_status=0

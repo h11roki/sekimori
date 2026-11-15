@@ -1,3 +1,4 @@
+use std::cell::LazyCell;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -46,9 +47,13 @@ fn main() -> ExitCode {
             Err(error) => {
                 match cli.format {
                     Format::Github => {
-                        if let Err(error) =
-                            stdout.write_all(github_error(&error.to_string()).as_bytes())
-                        {
+                        if let Err(error) = stdout.write_all(
+                            github_error(
+                                error.workflow_path().map(repository_path).as_ref(),
+                                &error.to_string(),
+                            )
+                            .as_bytes(),
+                        ) {
                             return write_failure(&error);
                         }
                     }
@@ -61,7 +66,7 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        let path = repository_path(&workflow.path);
+        let path = LazyCell::new(|| repository_path(&workflow.path));
         let mut warned = HashSet::new();
         for assessment in &assessments {
             for message in assessment.warnings() {

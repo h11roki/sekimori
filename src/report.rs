@@ -6,7 +6,7 @@ use yamlpath::Route;
 use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
-const TOOL_NAME: &str = "sekimori";
+const TOOL_NAME: &str = env!("CARGO_PKG_NAME");
 const LABEL_WIDTH: usize = 21;
 const VALUE_WIDTH: usize = 5;
 const SARIF_VERSION: &str = "2.1.0";
@@ -40,14 +40,13 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
 }
 
 pub fn github(workflow: &Workflow, path: &RepositoryPath, finding: &Finding) -> String {
-    let message = format!("{}\n{}", headline(finding), breakdown(finding));
     annotation(
         &finding.level.to_string(),
         workflow,
         path,
         &finding.hit.route,
         &format!("{TOOL_NAME} {}", finding.hit.rule.id()),
-        message.trim_end(),
+        &prose(workflow, finding),
     )
 }
 
@@ -60,8 +59,17 @@ pub fn github_warning(
     annotation("warning", workflow, path, route, TOOL_NAME, message)
 }
 
-pub fn github_error(message: &str) -> String {
-    format!("::error title={TOOL_NAME}::{}\n", escape_data(message))
+pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
+    let location = match path {
+        Some(RepositoryPath::Relative(relative)) => {
+            format!("file={},", escape_property(&uri_path(relative)))
+        }
+        Some(RepositoryPath::Absolute(_)) | None => String::new(),
+    };
+    format!(
+        "::error {location}title={TOOL_NAME}::{}\n",
+        escape_data(message)
+    )
 }
 
 fn annotation(
@@ -144,7 +152,7 @@ pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Ve
             let breakdowns: Vec<String> = place
                 .findings
                 .iter()
-                .map(|finding| sarif_breakdown(workflow, finding))
+                .map(|finding| prose(workflow, finding))
                 .collect();
             let (line, column) = place.position.unwrap_or((1, 1));
             json!({
@@ -162,7 +170,7 @@ pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Ve
         .collect()
 }
 
-fn sarif_breakdown(workflow: &Workflow, finding: &Finding) -> String {
+fn prose(workflow: &Workflow, finding: &Finding) -> String {
     let mut lines = vec![headline(finding)];
     if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
         lines.push(format!("agent step: line {line}"));
@@ -201,7 +209,7 @@ pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": env!("CARGO_PKG_NAME"),
+                    "name": TOOL_NAME,
                     "version": env!("CARGO_PKG_VERSION"),
                     "semanticVersion": env!("CARGO_PKG_VERSION"),
                     "informationUri": env!("CARGO_PKG_REPOSITORY"),

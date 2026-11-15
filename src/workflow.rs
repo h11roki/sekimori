@@ -19,6 +19,17 @@ pub enum LoadError {
     NoWorkflows { path: PathBuf },
 }
 
+impl LoadError {
+    pub fn workflow_path(&self) -> Option<&Path> {
+        match self {
+            Self::Read { path, .. } | Self::Parse { path, .. } | Self::Index { path, .. } => {
+                Some(path)
+            }
+            Self::NoWorkflows { .. } => None,
+        }
+    }
+}
+
 const WORKFLOW_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
 const WORKSPACE_VARIABLE: &str = "GITHUB_WORKSPACE";
 const REPOSITORY_MARKER: &str = ".git";

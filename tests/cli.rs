@@ -196,7 +196,9 @@ fn the_github_format_prints_annotations_with_escaped_messages() {
     assert!(lines[0].ends_with("title=sekimori::`broad-tool` is not a sekimori rule"));
     assert!(lines[1].starts_with("::error file=tests/fixtures/workflows/ignored/typo.yml,"));
     assert!(lines[1].contains(",line=10,col=11,title=sekimori broad-tools::"));
-    assert!(lines[1].contains("can run unrestricted tools%0A  who can trigger"));
+    assert!(
+        lines[1].contains("can run unrestricted tools%0Aagent step: line 6%0Awho can trigger: 1 (")
+    );
     assert!(output.stderr.is_empty());
 }
 
@@ -209,25 +211,27 @@ fn an_unreadable_workflow_is_an_error_annotation_in_the_github_format() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.starts_with("::error title=sekimori::"));
+    assert!(
+        stdout.starts_with("::error file=tests/fixtures/workflows/broken.yml,title=sekimori::")
+    );
     assert!(stdout.contains("broken.yml is not a valid workflow"));
     assert!(output.stderr.is_empty());
 }
 
 #[test]
 fn a_workflow_outside_the_repository_names_its_place_in_the_annotation_message() {
-    let directory = std::env::temp_dir().join(format!("sekimori-outside-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
-    let copied = directory.join("typo.yml");
+    let directory = tempfile::tempdir().unwrap();
+    let copied = directory.path().join("typo.yml");
     std::fs::copy(Path::new(FIXTURES).join("ignored/typo.yml"), &copied).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
         .args(["--format", "github"])
         .arg(&copied)
         .output()
         .unwrap();
-    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
     assert!(lines[0].starts_with("::warning title=sekimori::"));
     assert!(lines[0].contains("typo.yml:6:9: "));
     assert!(lines[1].starts_with("::error title=sekimori "));
