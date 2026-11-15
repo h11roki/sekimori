@@ -8,6 +8,8 @@ use yamlpath::{Document, QueryError, Route};
 pub enum LoadError {
     #[error("failed to read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
+    #[error("failed to read the directory {}: {source}", path.display())]
+    ReadDirectory { path: PathBuf, source: io::Error },
     #[error("{} is not a valid workflow: {source}", path.display())]
     Parse {
         path: PathBuf,
@@ -25,7 +27,7 @@ impl LoadError {
             Self::Read { path, .. } | Self::Parse { path, .. } | Self::Index { path, .. } => {
                 Some(path)
             }
-            Self::NoWorkflows { .. } => None,
+            Self::ReadDirectory { .. } | Self::NoWorkflows { .. } => None,
         }
     }
 }
@@ -181,7 +183,7 @@ fn paths_in(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
     if !input.is_dir() {
         return Ok(vec![input.to_path_buf()]);
     }
-    let read_error = |source| LoadError::Read {
+    let read_error = |source| LoadError::ReadDirectory {
         path: input.to_path_buf(),
         source,
     };

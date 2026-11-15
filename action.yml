@@ -21,7 +21,7 @@ outputs:
     description: Path to the findings in SARIF format.
     value: ${{ steps.check.outputs.sarif-file }}
   exit-code:
-    description: Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run.
+    description: "Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run. Empty when sekimori was not installed."
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
@@ -70,18 +70,23 @@ runs:
         output="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")"
         status=0
         "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
-        "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
         summary_limit=500000
-        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$output/plain.txt" ]; then
-          {
-            echo "## sekimori"
-            echo
-            head -c "$summary_limit" "$output/plain.txt" | tr '\r' '\n' | sed 's/^/    /'
-            if [ "$(wc -c < "$output/plain.txt")" -gt "$summary_limit" ]; then
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
+          sed 's/\r$//' "$output/plain.txt" | tr '\r' '\n' | sed 's/^/    /' > "$output/summary.txt"
+          if [ -s "$output/summary.txt" ]; then
+            {
+              echo "## sekimori"
               echo
-              echo "The output was cut to fit the job summary. See the log for every finding."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+              if [ "$(wc -c < "$output/summary.txt")" -gt "$summary_limit" ]; then
+                head -c "$summary_limit" "$output/summary.txt" | sed '$d'
+                echo
+                echo "The output was cut to fit the job summary. See the log for every finding."
+              else
+                cat "$output/summary.txt"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
         fi
         sarif_status=0
         "$SEKIMORI" --format sarif -- "${paths[@]}" > "$output/sekimori.sarif" || sarif_status=$?

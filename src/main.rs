@@ -49,11 +49,7 @@ fn main() -> ExitCode {
                     Format::Github => {
                         if let Err(error) = stdout.write_all(
                             github_error(
-                                error
-                                    .workflow_path()
-                                    .filter(|path| path.is_file())
-                                    .map(repository_path)
-                                    .as_ref(),
+                                error.workflow_path().map(repository_path).as_ref(),
                                 &error.to_string(),
                             )
                             .as_bytes(),
