@@ -19,7 +19,7 @@ jobs:
         with:
           persist-credentials: false
       - id: sekimori
-        uses: h11roki/sekimori@a3745d04381517b69e38926a8199419b022bb11c # v0.11.0
+        uses: h11roki/sekimori@e231dccbb988739ccb73fef6b60353dc1e8d8bd4 # v0.12.0
       - if: >-
           !cancelled()
           && steps.sekimori.outputs.sarif-file != ''
