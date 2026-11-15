@@ -30,7 +30,7 @@
 - `anthropics/claude-code-base-action` と、`anthropics/claude-code-action` の下の階層 `base-action` を、Claude Code の base action とする
 - 起動できる人:run-gemini-cli と同じく、ジョブかステップの `if:` が起動した人を確かめなければ、誰でも起動できる
 - 道具:claude-code-action と同じく、`claude_args`、`settings`、`allowed_tools`、`disallowed_tools` の許可と権限のモードを読む(ADR 0013)
-- 秘密情報:`prompt`、`settings`、`claude_args`、`mcp_config`、`system_prompt`、`append_system_prompt` に流れ込む秘密情報と、`claude_env` の行と `env` の全ての秘密情報が届く。Claude 自身の認証情報(`ANTHROPIC_API_KEY` など)は除く。`claude_env` か `env` の `GITHUB_TOKEN` か `GH_TOKEN` が保存した秘密情報なら、期限の無いトークンとする(codex と run-gemini-cli と同じ)
+- 秘密情報:`prompt`、`settings`、`claude_args`、`mcp_config`、`system_prompt`、`append_system_prompt` に流れ込む秘密情報と、`env` の全ての秘密情報が届く。公開版(`anthropics/claude-code-base-action`)では、`claude_env` の行(`#` で始まる行を除く)をエージェントの `env` として読み、同じ名前の `env` より優先する。main の `base-action` には `claude_env` が無いので読まない。Claude 自身の認証情報(`ANTHROPIC_API_KEY` など)は除く。`claude_env` か `env` の `GITHUB_TOKEN` か `GH_TOKEN` が保存した秘密情報なら、期限の無いトークンとする(codex と run-gemini-cli と同じ)
 - PR の head の取り出し:特権のイベント(`pull_request_target`、`workflow_run`、`issue_comment`)で前のステップが PR の head を取り出すと、その `.claude/` の設定を読むので当てる(ADR 0014)
 - 出力の注入:`structured_output` を数える(ADR 0027)。まとめた出力は `--json-schema` のときだけ
 - 書いたコードを後で動かす形(ADR 0028):広い道具(`broad-tools` に当たる形)があるか、権限のモードが `acceptEdits` のときだけ、作業場所を書き換えられるとみなす。既定のモードでは編集を確認なしでは使えないため

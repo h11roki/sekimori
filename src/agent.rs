@@ -27,15 +27,9 @@ const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
-        let Uses::Repository(repository) = uses else {
-            return None;
-        };
-        let subpath = repository.subpath().unwrap_or_default().trim_matches('/');
         AGENT_ACTIONS
             .iter()
-            .find(|(action, action_subpath, _)| {
-                action.eq_ignore_ascii_case(repository.slug()) && subpath == *action_subpath
-            })
+            .find(|(action, subpath, _)| is_action(uses, action, subpath))
             .map(|(.., agent)| *agent)
     }
 
@@ -45,13 +39,15 @@ impl Agent {
 }
 
 pub(crate) fn is_root_action(uses: &Uses, action: &str) -> bool {
+    is_action(uses, action, "")
+}
+
+fn is_action(uses: &Uses, action: &str, subpath: &str) -> bool {
     let Uses::Repository(repository) = uses else {
         return false;
     };
-    repository
-        .subpath()
-        .is_none_or(|subpath| subpath.is_empty())
-        && action.eq_ignore_ascii_case(repository.slug())
+    action.eq_ignore_ascii_case(repository.slug())
+        && repository.subpath().unwrap_or_default().trim_matches('/') == subpath
 }
 
 #[derive(Debug)]

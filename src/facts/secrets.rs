@@ -23,7 +23,6 @@ const CLAUDE_BASE_INPUTS: [&str; 6] = [
     "system_prompt",
     "append_system_prompt",
 ];
-const CLAUDE_ENV_INPUT: &str = "claude_env";
 const CLAUDE_INPUTS_WITH_TOKEN: [&str; 4] = ["prompt", "settings", "claude_args", "github_token"];
 const CODEX_AGENT_INPUTS: [&str; 2] = ["prompt", "codex-args"];
 const GEMINI_AGENT_INPUTS: [&str; 2] = ["prompt", "settings"];
@@ -95,11 +94,6 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
         .flat_map(|(_, value)| all_secrets(value, Some(env)))
         .collect();
     secrets.extend(
-        claude_env(step, env)
-            .into_iter()
-            .filter_map(|(_, secret)| secret),
-    );
-    secrets.extend(
         env.variables()
             .filter(|(variable, _)| {
                 reaches_agent(step.agent, variable.name, gemini_settings)
@@ -148,14 +142,6 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
             let secret = first_secret(value, Some(env))?;
             (key.to_string(), secret, input_route(step, key))
         }
-        Agent::ClaudeBase
-            if let Some((name, secret)) = claude_env(step, env)
-                .into_iter()
-                .find(|(name, secret)| TOKEN_VARIABLES.contains(name) && secret.is_some()) =>
-        {
-            let (key, _) = input(step, CLAUDE_ENV_INPUT)?;
-            (format!("{key} {name}"), secret?, input_route(step, key))
-        }
         Agent::ClaudeBase | Agent::Codex | Agent::GeminiCli => env
             .variables()
             .filter(|(variable, _)| TOKEN_VARIABLES.contains(&variable.name))
@@ -188,16 +174,6 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             route: input_route(step, key),
         })
     });
-    let from_claude_env = || {
-        let (name, secret) = claude_env(step, env)
-            .into_iter()
-            .find(|(name, secret)| secret.is_some() && reaches_agent(step.agent, name, ""))?;
-        let (key, _) = input(step, CLAUDE_ENV_INPUT)?;
-        Some(SecretUse {
-            setting: format!("{key} {name} passes {} to the agent", secret?),
-            route: input_route(step, key),
-        })
-    };
     let gemini_settings = match lookup(step, SETTINGS_INPUT) {
         Input::Text { value, .. } => value,
         Input::Missing | Input::Unreadable => "",
@@ -224,10 +200,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             route: route.clone(),
         })
     };
-    from_input
-        .or_else(from_claude_env)
-        .or_else(from_variable)
-        .or_else(from_expression)
+    from_input.or_else(from_variable).or_else(from_expression)
 }
 
 fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
@@ -247,20 +220,6 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                 && references_variable(gemini_settings, name)
         }
     }
-}
-
-fn claude_env<'w>(step: &AgentStep<'w>, env: &SecretEnv) -> Vec<(&'w str, Option<String>)> {
-    if step.agent != Agent::ClaudeBase {
-        return Vec::new();
-    }
-    let Some((_, value)) = input(step, CLAUDE_ENV_INPUT) else {
-        return Vec::new();
-    };
-    value
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim(), first_secret(value, Some(env))))
-        .collect()
 }
 
 fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {

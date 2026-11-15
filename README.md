@@ -13,7 +13,7 @@ Any one of these alone depends on how you use it. When all three overlap, text w
 It checks the official agent actions:
 
 - [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)
-- [`anthropics/claude-code-base-action`](https://github.com/anthropics/claude-code-base-action), also used as `anthropics/claude-code-action/base-action`. It does not check who triggered the run, passes its whole environment, including `GITHUB_TOKEN` and `GH_TOKEN`, to Claude, and loads the workspace's `.claude/` settings
+- [`anthropics/claude-code-base-action`](https://github.com/anthropics/claude-code-base-action), also used as `anthropics/claude-code-action/base-action`. It does not check who triggered the run, passes the variables set in `env:` (and in `claude_env` on `@beta` and `@v0.0.x`) to Claude, including any `GITHUB_TOKEN` or `GH_TOKEN`, and loads the workspace's `.claude/` settings
 - [`openai/codex-action`](https://github.com/openai/codex-action)
 - [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli)
 

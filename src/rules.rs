@@ -1149,13 +1149,69 @@ jobs:
                 "          claude_env: |\n            DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
             )
             .as_deref(),
-            Some("claude_env DEPLOY_KEY passes secrets.DEPLOY_KEY to the agent")
+            Some("env DEPLOY_KEY passes secrets.DEPLOY_KEY to the agent")
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            # DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
+            ),
+            None
         );
         assert_eq!(
             secrets_of(
                 "          claude_env: |\n            ANTHROPIC_API_KEY: ${{ secrets.KEY }}\n"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn claude_env_overrides_env_only_for_the_published_base_action() {
+        let rules_of = |uses: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: push
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{{{ secrets.BOT_PAT }}}}
+    steps:
+      - uses: {uses}
+        with:
+          prompt: Fix the tests.
+          allowed_tools: Bash
+          claude_args: --allowedTools Bash
+          claude_env: |
+            GH_TOKEN: ${{{{ github.token }}}}
+            ANTHROPIC_API_KEY: ${{{{ secrets.KEY }}}}
+      - run: npm test
+        env:
+          KEY: ${{{{ secrets.KEY }}}}
+"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rules_of("anthropics/claude-code-base-action@beta"),
+            [Rule::BroadTools, Rule::AgentCodeWithSecrets]
+        );
+        assert_eq!(
+            rules_of("anthropics/claude-code-action/base-action@v1"),
+            [
+                Rule::BroadTools,
+                Rule::LongLivedToken,
+                Rule::AgentCodeWithSecrets
+            ]
         );
     }
 
