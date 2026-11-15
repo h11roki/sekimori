@@ -532,19 +532,23 @@ fn requires_equal(expression: &SpannedExpr, first: &str, second: &str) -> bool {
             lhs,
             rhs,
         }) => requires_equal(lhs, first, second) || requires_equal(rhs, first, second),
-        Expr::BinExpr(BinExpr {
-            op: BinOp::Eq,
-            lhs,
-            rhs,
-        }) => match (&lhs.inner, &rhs.inner) {
-            (Expr::Context(left), Expr::Context(right)) => {
-                (left.matches(first) && right.matches(second))
-                    || (left.matches(second) && right.matches(first))
-            }
-            _ => false,
-        },
-        _ => false,
+        _ => equal_contexts(expression, first, second),
     }
+}
+
+fn equal_contexts(expression: &SpannedExpr, first: &str, second: &str) -> bool {
+    let Expr::BinExpr(BinExpr {
+        op: BinOp::Eq,
+        lhs,
+        rhs,
+    }) = &expression.inner
+    else {
+        return false;
+    };
+    let (Expr::Context(left), Expr::Context(right)) = (&lhs.inner, &rhs.inner) else {
+        return false;
+    };
+    (left.matches(first) && right.matches(second)) || (left.matches(second) && right.matches(first))
 }
 
 pub fn condition_origin(step: &AgentStep) -> UpstreamOrigin {
@@ -647,9 +651,8 @@ fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
             {
                 events(vec![name.to_ascii_lowercase()])
             }
-            (Expr::Context(left), Expr::Context(right))
-                if (left.matches(UPSTREAM_REPOSITORY) && right.matches(THIS_REPOSITORY))
-                    || (left.matches(THIS_REPOSITORY) && right.matches(UPSTREAM_REPOSITORY)) =>
+            (Expr::Context(_), Expr::Context(_))
+                if equal_contexts(expression, UPSTREAM_REPOSITORY, THIS_REPOSITORY) =>
             {
                 UpstreamPath {
                     same_repository: true,

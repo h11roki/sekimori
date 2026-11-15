@@ -72,20 +72,14 @@ pub fn head_checkout<'w>(
     step: &AgentStep<'w>,
     events: &[ExternalEvent],
 ) -> Option<HeadCheckout<'w>> {
-    let is_privileged = |event: &ExternalEvent| {
+    let privileged = events.iter().any(|event| {
         matches!(
             event,
             ExternalEvent::PullRequestTarget
                 | ExternalEvent::WorkflowRun
                 | ExternalEvent::IssueComment
         )
-    };
-    let privileged = events.iter().any(is_privileged);
-    let trusted_upstream = privileged
-        && events
-            .iter()
-            .all(|event| !is_privileged(event) || *event == ExternalEvent::WorkflowRun)
-        && upstream_on_default_branch(step);
+    });
     let loads = match step.agent {
         Agent::ClaudeCode => events.contains(&ExternalEvent::WorkflowRun).then_some(
             "on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md",
@@ -98,6 +92,7 @@ pub fn head_checkout<'w>(
         ),
         Agent::Codex => None,
     }?;
+    let trusted_upstream = upstream_on_default_branch(step);
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
@@ -204,11 +199,15 @@ fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
     {
         return RootCheckout::Head(key, value);
     }
-    let base_repository =
-        repository.is_none_or(|(_, value)| normalized(value) == BASE_REPOSITORY_EXPRESSION);
+    let trusted = |value: &str| trusted_upstream && value.contains(UPSTREAM_HEAD);
+    let base_repository = repository.is_none_or(|(_, value)| {
+        let value = normalized(value);
+        value == BASE_REPOSITORY_EXPRESSION || trusted(&value)
+    });
     let base_reference = reference.is_none_or(|(_, value)| {
         let value = normalized(value);
         !value.contains(EXPRESSION_START)
+            || trusted(&value)
             || BASE_REFERENCES
                 .iter()
                 .any(|context| value.contains(context))
@@ -456,6 +455,24 @@ jobs:
                 .is_none()
         );
         assert!(
+            checked_out_by(
+                "      - run: git checkout \"$HEAD_SHA\"\n        env:\n          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n"
+            )
+            .is_none()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          repository: ${{ github.event.workflow_run.head_repository.full_name }}\n"
+            )
+            .is_none()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.pull_requests[0].head.sha }}\n      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.head_sha }}\n"
+            )
+            .is_none()
+        );
+        assert!(
             found(
                 "on: [workflow_run, pull_request_target]
 jobs:
@@ -469,7 +486,7 @@ jobs:
       - uses: anthropics/claude-code-base-action@beta
 "
             )
-            .is_some()
+            .is_none()
         );
         for condition in [
             "github.event.workflow_run.head_repository.full_name == github.repository",
