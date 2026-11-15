@@ -98,11 +98,8 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
     secrets.extend(
         env.variables()
             .filter(|(variable, _)| {
-                if TOKEN_VARIABLES.contains(&variable.name) {
-                    step.agent != Agent::ClaudeCode
-                } else {
-                    reaches_agent(step.agent, variable.name, gemini_settings)
-                }
+                reaches_agent(step.agent, variable.name, gemini_settings)
+                    || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
             })
             .filter_map(|(_, secret)| secret.cloned()),
     );
@@ -186,11 +183,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     };
     let from_variable = || {
         env.variables()
-            .filter(|(variable, _)| {
-                reaches_agent(step.agent, variable.name, gemini_settings)
-                    && !TOKEN_VARIABLES.contains(&variable.name)
-                    && !is_credential(step.agent, variable.name)
-            })
+            .filter(|(variable, _)| reaches_agent(step.agent, variable.name, gemini_settings))
             .find_map(|(variable, secret)| {
                 let secret = secret?.clone();
                 Some(SecretUse {
@@ -214,18 +207,27 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
 }
 
 fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
-    agent != Agent::GeminiCli || references_variable(gemini_settings, name)
-}
-
-fn is_credential(agent: Agent, name: &str) -> bool {
-    let (variables, prefixes): (&[&str], &[&str]) = match agent {
+    if TOKEN_VARIABLES.contains(&name) {
+        return false;
+    }
+    match agent {
         Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta => {
-            (&CLAUDE_CREDENTIAL_VARIABLES, &CLAUDE_CREDENTIAL_PREFIXES)
+            !CLAUDE_CREDENTIAL_VARIABLES.contains(&name)
+                && !CLAUDE_CREDENTIAL_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
         }
-        Agent::Codex => (&CODEX_CREDENTIAL_VARIABLES, &CODEX_CREDENTIAL_PREFIXES),
-        Agent::GeminiCli => (&GEMINI_CREDENTIAL_VARIABLES, &[]),
-    };
-    variables.contains(&name) || prefixes.iter().any(|prefix| name.starts_with(prefix))
+        Agent::Codex => {
+            !CODEX_CREDENTIAL_VARIABLES.contains(&name)
+                && !CODEX_CREDENTIAL_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        }
+        Agent::GeminiCli => {
+            !GEMINI_CREDENTIAL_VARIABLES.contains(&name)
+                && references_variable(gemini_settings, name)
+        }
+    }
 }
 
 fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
@@ -382,20 +384,6 @@ mod tests {
             found(other_secret, &source),
             Some("9: claude_args passes secrets.SENTRY_TOKEN to the agent".to_string())
         );
-    }
-
-    #[test]
-    fn the_agents_own_keys_are_already_in_its_hands_for_later_code() {
-        let source = workflow(
-            "env:\n  AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}\n  OPENAI_API_KEY: ${{ secrets.OPENAI }}\n",
-            "openai/codex-action@v1",
-            "",
-        );
-        let workflow = Workflow::parse(Path::new("w.yml"), source.to_string()).unwrap();
-        let step = &agent_steps(&workflow)[0];
-        let secrets = agent_secrets(step, &secret_env(&workflow, step));
-        assert!(secrets.contains(&"secrets.BEDROCK".to_string()));
-        assert!(secrets.contains(&"secrets.OPENAI".to_string()));
     }
 
     #[test]

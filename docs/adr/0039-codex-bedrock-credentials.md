@@ -7,7 +7,7 @@
 
 - ADR 0015 で、`other-secrets` はエージェント自身の資格情報として読む `env` を数えないと決めた。claude は `AWS_*` を含む名前、codex は `OPENAI_API_KEY` だけにした
 - openai/codex(`codex-rs/model-provider/src/amazon_bedrock/auth.rs`)は、Amazon Bedrock を使うとき `AWS_BEARER_TOKEN_BEDROCK`、または `AWS_ACCESS_KEY_ID` と `AWS_SECRET_ACCESS_KEY`、地域は `AWS_REGION` か `AWS_DEFAULT_REGION` を `env` から読む
-- 公開ワークフローの調査(v0.14.0)で、Codex に `AWS_BEARER_TOKEN_BEDROCK` を渡す形が `other-secrets` として 2 件出ていた。指摘の判定(20 件)でも、Bedrock で動かすための鍵を他の秘密情報と数えた誤検知とされた
+- 公開ワークフローの調査(v0.14.0)で、Codex に `AWS_BEARER_TOKEN_BEDROCK` を渡す形が `other-secrets` として 2 件出ていた。指摘の判定(20 ファイル、指摘 25 件)でも、Bedrock で動かすための鍵を他の秘密情報と数えた誤検知とされた
 - Azure の鍵は codex-action では `openai-api-key` の入力で渡され、中継の proxy が持つ。調査では、Codex の `env` の Azure の鍵が指摘になった例は無かった。Azure の鍵の名前は、利用者が設定(`env_key`)で決める
 
 ## 検討した選択肢
@@ -20,8 +20,7 @@
 
 高橋さんが判断を任せ(2026-11-15 に「推奨通りに進めて」)、Claude が 1 を選んだ。
 
-- 資格情報の名前は `other-secrets` で数えないだけで、エージェントの手には届いている。`agent-code-with-secrets`(ADR 0028)が「エージェントがすでに持つ秘密情報」として後のステップから除く一覧には入れる。ここで除かないと、同じ鍵が後のステップの指摘に移る
-- この扱いは、process.env をまるごとエージェントに渡す claude と codex のすべての資格情報に当てはめる(claude の `ANTHROPIC_API_KEY` や `AWS_*` も、後のステップの指摘で数えなくなる)。gemini は参照されない `env` をシェルから消すので、今のまま `settings` が参照するものだけを手にあるとみなす
+- `other-secrets` で数えないだけにする。`agent-code-with-secrets`(ADR 0028)が「エージェントがすでに持つ秘密情報」として後のステップから除く一覧には入れない。Codex のシェルは既定で、名前に `KEY`、`SECRET`、`TOKEN` を含む `env` を消す(openai/codex の `codex-rs/protocol/src/shell_environment.rs`)ので、`AWS_BEARER_TOKEN_BEDROCK` はエージェントのシェルに届かない。エージェントが書き換えたコードを後のステップがこの鍵で動かすのは、本当に新しく鍵に届く道になる
 
 ## 理由
 
@@ -31,4 +30,3 @@
 ## 受け入れたトレードオフ
 
 - Codex の `env` にある、Bedrock と関係のない AWS の秘密情報(例えば配備用の鍵)も数えなくなる。claude で同じことを受け入れている
-- `with` の入力で渡す資格情報(claude の `anthropic_api_key` など)は、まだ手にある秘密情報に入れていない。後のステップに同じ秘密情報があると `agent-code-with-secrets` が出る
