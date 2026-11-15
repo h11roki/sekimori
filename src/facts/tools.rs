@@ -108,10 +108,33 @@ const PROJECT_CODE_TOOLS: [&str; 32] = [
     "rspec",
 ];
 const RELATIVE_PATH_PREFIXES: [&str; 2] = ["./", "../"];
-const FILE_WRITERS: [&str; 9] = [
-    "tee", "cp", "mv", "install", "rsync", "patch", "dd", "truncate", "sed",
+const FILE_WRITERS: [&str; 11] = [
+    "tee", "cp", "mv", "install", "rsync", "patch", "dd", "truncate", "sed", "curl", "wget",
 ];
-const GIT_FILE_WRITERS: [&str; 4] = ["apply", "am", "checkout", "restore"];
+const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 2] = [
+    (
+        "git",
+        &[
+            &["apply"],
+            &["am"],
+            &["checkout"],
+            &["switch"],
+            &["pull"],
+            &["merge"],
+            &["cherry-pick"],
+        ],
+    ),
+    (
+        "gh",
+        &[
+            &["pr", "checkout"],
+            &["run", "download"],
+            &["release", "download"],
+            &["repo", "clone"],
+        ],
+    ),
+];
+const OPTION_VALUE_FLAGS: [&str; 2] = ["-C", "-c"];
 const CLAUDE_EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 const CLAUDE_EDIT_RULE: &str = "Edit";
 const CLAUDE_AUTO_MODE: &str = "auto";
@@ -159,6 +182,7 @@ struct ClaudePermissions<'w> {
     bypass_disabled: bool,
     shell_allows: Vec<(String, BroadTool<'w>)>,
     project_code_allows: Vec<(String, BroadTool<'w>)>,
+    file_writers: Vec<String>,
     edit_allowed: bool,
     denied: Vec<String>,
 }
@@ -200,11 +224,18 @@ impl<'w> ClaudePermissions<'w> {
         let edit_mode = self
             .mode()
             .is_some_and(|mode| [CLAUDE_ACCEPT_EDITS_MODE, CLAUDE_AUTO_MODE].contains(&mode));
-        (edits_by_default || self.edit_allowed || edit_mode)
+        let edit_tools = (edits_by_default || self.edit_allowed || edit_mode)
             && !self
                 .denied
                 .iter()
-                .any(|deny| pattern_of(deny, CLAUDE_EDIT_RULE).is_some_and(covers_every_file))
+                .any(|deny| pattern_of(deny, CLAUDE_EDIT_RULE).is_some_and(covers_every_file));
+        edit_tools
+            || self.file_writers.iter().any(|writer| {
+                !self.denied.iter().any(|deny| {
+                    deny == writer
+                        || pattern_of(deny, CLAUDE_SHELL_TOOL).is_some_and(matches_every_command)
+                })
+            })
     }
 
     fn broad_tool(self, edits_by_default: bool) -> Option<BroadTool<'w>> {
@@ -219,7 +250,7 @@ impl<'w> ClaudePermissions<'w> {
                 return Some(setting);
             }
         }
-        let denied = self.denied;
+        let denied = &self.denied;
         let allowed = |(tool, _): &(String, BroadTool<'w>)| {
             !denied.iter().any(|deny| {
                 deny == tool
@@ -336,13 +367,14 @@ impl<'w> ClaudePermissions<'w> {
         let Some(pattern) = pattern_of(tool, CLAUDE_SHELL_TOOL).map(str::trim) else {
             return;
         };
-        if let Some(prefix) = pattern.strip_suffix('*')
-            && writes_files(prefix.trim_end_matches([':', ' ']))
-        {
-            self.edit_allowed = true;
+        let prefix = pattern
+            .strip_suffix('*')
+            .map(|prefix| prefix.trim_end_matches([':', ' ']));
+        if prefix.is_some_and(writes_files) {
+            self.file_writers.push(tool.to_string());
         }
-        let reach = match pattern.strip_suffix('*') {
-            Some(prefix) => command_reach(prefix.trim_end_matches([':', ' '])),
+        let reach = match prefix {
+            Some(prefix) => command_reach(prefix),
             None if pattern.is_empty() => Reach::AnyCommand,
             None if runs_project_code(pattern) => Reach::ProjectCode,
             None => Reach::Fixed,
@@ -466,14 +498,24 @@ fn writes_files(prefix: &str) -> bool {
     let Some(program) = words.next() else {
         return false;
     };
-    let rest: Vec<&str> = words.collect();
-    match command_name(program) {
-        "git" => rest
-            .iter()
-            .find(|word| !word.starts_with('-'))
-            .is_none_or(|subcommand| GIT_FILE_WRITERS.contains(subcommand)),
-        name => FILE_WRITERS.contains(&name),
+    let name = command_name(program);
+    let Some((_, writers)) = SUBCOMMAND_FILE_WRITERS
+        .iter()
+        .find(|(tool, _)| *tool == name)
+    else {
+        return FILE_WRITERS.contains(&name);
+    };
+    let mut subcommands = Vec::new();
+    while let Some(word) = words.next() {
+        if OPTION_VALUE_FLAGS.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            subcommands.push(word);
+        }
     }
+    writers
+        .iter()
+        .any(|writer| writer.starts_with(&subcommands) || subcommands.starts_with(writer))
 }
 
 fn covers_every_file(pattern: &str) -> bool {
@@ -585,9 +627,10 @@ pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
     let usable = |names: &[&str], opens: fn(&str) -> bool| {
         let allowed = core.as_ref().is_none_or(|core| {
             core.iter().any(|tool| {
-                names
-                    .iter()
-                    .any(|name| pattern_of(tool, name).is_some_and(opens))
+                !excluded.contains(tool)
+                    && names
+                        .iter()
+                        .any(|name| pattern_of(tool, name).is_some_and(opens))
             })
         });
         allowed && !names.iter().any(|name| excluded.contains(name))
@@ -971,14 +1014,24 @@ jobs:
             "Bash(tee:*)",
             "Bash(cp:*)",
             "Bash(git apply:*)",
+            "Bash(git -C . apply:*)",
             "Bash(git:*)",
+            "Bash(git pull:*)",
+            "Bash(gh pr:*)",
+            "Bash(gh pr checkout:*)",
+            "Bash(curl:*)",
         ] {
             let with = format!(
                 "        with:\n          claude_args: --allowedTools \"{writer},Bash(npm test:*)\"\n"
             );
             assert!(base(&with).is_some(), "{writer}");
         }
-        for reader in ["Bash(git diff:*)", "Bash(cp a.txt b.txt)", "Bash(cat:*)"] {
+        for reader in [
+            "Bash(git diff:*)",
+            "Bash(cp a.txt b.txt)",
+            "Bash(cat:*)",
+            "Bash(gh pr view:*)",
+        ] {
             let with = format!(
                 "        with:\n          claude_args: --allowedTools \"{reader},Bash(npm test:*)\"\n"
             );
@@ -986,6 +1039,18 @@ jobs:
         }
         let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"]}}'\n";
         assert!(gemini(settings).is_some());
+        let excluded = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"], \"exclude\": [\"run_shell_command(sed -i)\"]}}'\n";
+        assert_eq!(gemini(excluded), None);
+        assert_eq!(
+            base(
+                "        with:\n          claude_args: --allowedTools \"Bash(sed:*),Bash(npm test:*)\" --disallowedTools \"Bash(sed:*)\"\n"
+            ),
+            None
+        );
+        assert!(
+            base("        with:\n          claude_args: --allowedTools \"Bash(sed:*),Bash(npm test:*)\" --disallowedTools Edit\n")
+                .is_some()
+        );
     }
 
     #[test]

@@ -18,9 +18,10 @@
 
 高橋さんが判断を任せ(2026-11-16 に「全部進めてください」)、Claude が 1 を選んだ。
 
-- 書き換えとみなすコマンドは、`tee`、`cp`、`mv`、`install`、`rsync`、`patch`、`dd`、`truncate`、`sed` と、`git apply`、`git am`、`git checkout`、`git restore`(`git` を引数ごと許す形を含む)。`Bash(sed -n:*)` のように頭を決めても、後ろに `-i` を足せるので `sed` は全て数える
+- 書き換えとみなすコマンドは、`tee`、`cp`、`mv`、`install`、`rsync`、`patch`、`dd`、`truncate`、`sed`、`curl`、`wget` と、`git` の `apply`、`am`、`checkout`、`switch`、`pull`、`merge`、`cherry-pick`、`gh` の `pr checkout`、`run download`、`release download`、`repo clone`(下位のコマンドを決めない `Bash(git:*)` や `Bash(gh pr:*)` も含む。`-C` と `-c` の値は読み飛ばす)。`Bash(sed -n:*)` のように頭を決めても、後ろに `-i` を足せるので `sed` は全て数える。`curl` と `wget` は外の中身をファイルに書け、`gh pr checkout` や `git pull` は外のコードを作業場所に持ち込める
 - 引数を決めて許した形(`Bash(cp a.txt b.txt)`)は、書くファイルが決まっているので数えない
-- Claude の許可と、Gemini の `tools.core` の `run_shell_command` の両方で読む。`agent-code-with-secrets`(ADR 0028)の書き換えの判定にも効く
+- これらの許可は、`Edit` の許可とは別に持つ。`Edit` を拒否しても止まらず、シェルの拒否(同じ許可か、範囲の無い `Bash`)で止まる
+- Claude の許可と、Gemini の `tools.core` の `run_shell_command` の両方で読む。Gemini の `tools.exclude` に同じ道具の書き方があれば数えない。`agent-code-with-secrets`(ADR 0028)の書き換えの判定にも効く
 
 ## 理由
 
