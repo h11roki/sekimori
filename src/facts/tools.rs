@@ -21,7 +21,8 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
-const GEMINI_EDIT_TOOLS: [&[&str]; 3] = [&["write_file"], &["replace"], &GEMINI_SHELL_TOOLS];
+const GEMINI_FILE_EDIT_TOOLS: [[&str; 2]; 2] =
+    [["write_file", "WriteFileTool"], ["replace", "EditTool"]];
 const INTERPRETERS: [&str; 24] = [
     "bash",
     "sh",
@@ -337,13 +338,20 @@ pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
     let excluded: Vec<&str> = string_array(tools.and_then(|tools| tools.get("exclude")))
         .map(str::trim)
         .collect();
-    GEMINI_EDIT_TOOLS.iter().any(|names| {
+    let usable = |names: &[&str], opens: fn(&str) -> bool| {
         let allowed = core.as_ref().is_none_or(|core| {
-            core.iter()
-                .any(|tool| names.iter().any(|name| pattern_of(tool, name).is_some()))
+            core.iter().any(|tool| {
+                names
+                    .iter()
+                    .any(|name| pattern_of(tool, name).is_some_and(opens))
+            })
         });
         allowed && !names.iter().any(|name| excluded.contains(name))
-    })
+    };
+    GEMINI_FILE_EDIT_TOOLS
+        .iter()
+        .any(|names| usable(names, |_| true))
+        || usable(&GEMINI_SHELL_TOOLS, opens_any_command)
 }
 
 fn settings_json(value: &str) -> Option<Value> {

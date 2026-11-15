@@ -35,6 +35,9 @@ const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
+const SHELL_KEYWORDS: [&str; 9] = [
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{",
+];
 
 enum Input<'w> {
     Missing,
@@ -153,7 +156,9 @@ fn flatten_expressions(text: &str) -> String {
 }
 
 fn program_positions(words: &[&str]) -> Vec<usize> {
-    let first = words.iter().position(|word| !is_assignment(word));
+    let first = words
+        .iter()
+        .position(|word| !is_assignment(word) && !SHELL_KEYWORDS.contains(word));
     let after_shell_flag = words
         .iter()
         .enumerate()

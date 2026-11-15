@@ -53,12 +53,30 @@ pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv
     resolved_secrets(agent_env(workflow, step))
 }
 
-pub(super) fn shell_secret<'w>(env: NearestEnv<'w>, code: &str) -> Option<String> {
+pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> {
     let env = resolved_secrets(env);
-    env.variables()
-        .find_map(|(_, secret)| secret.cloned())
-        .or_else(|| first_secret(env.env.expression.as_ref()?.0, None))
-        .or_else(|| first_secret(code, Some(&env)))
+    let mut secrets: Vec<String> = env
+        .variables()
+        .filter_map(|(_, secret)| secret.cloned())
+        .collect();
+    secrets.extend(
+        env.env
+            .expression
+            .as_ref()
+            .and_then(|(text, _)| first_secret(text, None)),
+    );
+    secrets.extend(
+        expression_spans(code)
+            .into_iter()
+            .filter_map(|span| secret_in(&parse_expression(&code[span])?, Some(&env))),
+    );
+    secrets
+}
+
+pub(super) fn already_reached(reached: &[String], secret: &str) -> bool {
+    reached
+        .iter()
+        .any(|known| known == EVERY_SECRET || known.eq_ignore_ascii_case(secret))
 }
 
 fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {

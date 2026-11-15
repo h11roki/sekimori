@@ -284,12 +284,8 @@ fn assess_step<'w>(
             reached_agent.push(secret);
         }
     }
-    if let Some(AgentCode {
-        setting,
-        route,
-        secret,
-    }) = agent_code_with_secrets(workflow, &step)
-        && !reached_agent.contains(&secret)
+    if let Some(AgentCode { setting, route }) =
+        agent_code_with_secrets(workflow, &step, &reached_agent)
     {
         hits.push(Hit {
             rule: Rule::AgentCodeWithSecrets,
@@ -855,6 +851,51 @@ jobs:
         )
         .unwrap();
         let assessments = assess(&workflow, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
+        let another_secret = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+      - run: ./deploy.sh --key ${{ secrets.DEPLOY_KEY }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&another_secret, &Upstreams::default());
+        assert!(
+            assessments[0]
+                .permissions_and_secrets
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("`./deploy.sh` in a later step runs files the agent can edit, with secrets.DEPLOY_KEY")
+        );
+        let every_secret = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          ALL: ${{ toJSON(secrets) }}
+      - run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&every_secret, &Upstreams::default());
         let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
         assert_eq!(rules, [Rule::OtherSecrets]);
     }

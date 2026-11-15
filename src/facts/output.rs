@@ -6,7 +6,7 @@ use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use yamlpath::{Component, Route};
 
-use super::secrets::shell_secret;
+use super::secrets::shell_secrets;
 use super::{
     ENV_CONTEXT, Input, expression_spans, flowing_contexts, input, lookup_in, nearest_env,
     parse_expression, running_later_steps,
@@ -104,7 +104,7 @@ pub fn output_injection<'w>(
             };
             Some(OutputInjection {
                 setting: format!("a later step expands `{output}` into its `{key}`"),
-                secret: shell_secret(env, &secret_source),
+                secret: shell_secrets(env, &secret_source).into_iter().next(),
                 route: code_route,
             })
         });

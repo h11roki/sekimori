@@ -28,16 +28,17 @@
 - エージェントが書き換えられるとみなす条件
   - claude-code-action: 常に
   - codex-action: `sandbox: read-only`、`permission-profile: ":read-only"`、`safety-strategy: read-only` のどれでもない
-  - run-gemini-cli: 書く道具(`write_file`、`replace`、シェルの `run_shell_command` か `ShellTool`)のどれかが、`tools.core` に無いと止められておらず(`tools.core` が無ければ全て使える)、`tools.exclude` でも外されていない。`settings` が式などで読めないときは、書き換えられるとみなす
+  - run-gemini-cli: 書く道具(`write_file` か `WriteFileTool`、`replace` か `EditTool`、範囲を絞らないシェルの `run_shell_command` か `ShellTool`。Gemini CLI の `config.ts` はクラス名でも照らす)のどれかが、`tools.core` に無いと止められておらず(`tools.core` が無ければ全て使える)、`tools.exclude` でも外されていない。`settings` が式などで読めないときは、書き換えられるとみなす
 - コードを動かすコマンドは、`run` を ADR 0014 と同じくシェルの順で区切り、各コマンドの名前で決める
-  - 作業場所のファイルを直接動かす形。`./` か `$GITHUB_WORKSPACE` で始まるパス、またはスクリプトの拡張子(`.sh`、`.py`、`.js`、`.ts`、`.rb`、`.pl` など)を持つ相対パス(`scripts/x.sh`)。拡張子の無い相対パスは、URL や `sed` の式と区別できないので数えない
+  - 作業場所のファイルを直接動かす形。`./`、`$GITHUB_WORKSPACE`、`$PWD` で始まるパス、またはスクリプトの拡張子(`.sh`、`.py`、`.js`、`.ts`、`.rb`、`.pl` など)を持つ相対パス(`scripts/x.sh`)。拡張子の無い相対パスは、URL や `sed` の式と区別できないので数えない
   - シェルとインタプリタ(`bash`、`sh`、`zsh`、`python`、`node`、`ruby`、`perl`)にファイルか、`python -m` でモジュールを渡す形。スクリプトより前のフラグだけを読み、値を取るフラグ(`bash -o`、`python -W` など)の値は飛ばす。`bash < ./x.sh` も読む。その場のコードを渡すフラグ(`-c`、`-e`、`-0pe` のようにまとめた形も)、ヒアドキュメント(`<<`)、作業場所の外のパス(`/`、`~`、`$GITHUB_WORKSPACE` 以外の `$` で始まるもの)は除く
-  - `sudo`、`timeout`、`env` などの包むコマンド(ADR 0013 の一覧)の中のコマンド
+  - `sudo`、`timeout`、`env` などの包むコマンド(ADR 0013 の一覧)の中のコマンド。包むコマンドのフラグと変数の代入、`timeout` の時間を飛ばした最初の語で一度だけ決める。`command -v` は動かさないので除く
+  - `if`、`then`、`do`、`!` などのシェルの予約語の後の語をコマンドの名前とする
   - `make`、`pytest`、`tox`、`nox`、`pre-commit`、`gradle`、`mvn`、`rake`、`yarn`、`pnpm`、`bun`(この 3 つは引数だけでも `package.json` のスクリプトを動かすので、部分コマンドを問わない)
-  - 部分コマンドまで決めるもの: `npm` の `run`、`run-script`、`test`、`t`、`install`、`i`、`ci`、`it`、`install-test`、`exec`、`build`、`start`、`publish`、`rebuild`、`pack`。`cargo` の `test`、`build`、`run`、`publish`。`go` の `test`、`build`、`run`、`generate`。`dotnet` の `test`、`build`、`run`。`bundle exec`、`uv run`、`poetry run`
+  - 部分コマンドまで決めるもの(`cargo +nightly` のような版の指定と、`npm --prefix dir` のような値を取るフラグは飛ばす): `npm` の `run`、`run-script`、`test`、`t`、`install`、`i`、`ci`、`it`、`install-test`、`exec`、`build`、`start`、`publish`、`rebuild`、`pack`。`cargo` の `test`、`build`、`run`、`publish`。`go` の `test`、`build`、`run`、`generate`。`dotnet` の `test`、`build`、`run`。`bundle exec`、`uv run`、`poetry run`
 - 秘密情報は、ADR 0027 と同じく、そのステップ、ジョブ、ワークフローの `env` と、`run` の本文の `${{ secrets.* }}`(`GITHUB_TOKEN` を除く)
 - 後のステップの `if:` が定数で偽なら数えない
-- 見つけた秘密情報が、すでにエージェントに届くもの(`long-lived-token` か `other-secrets` の秘密情報)と同じなら、この規則の指摘は出さない。同じ秘密情報で指摘を重ねないため
+- 秘密情報は、すでにエージェントに届くもの(`long-lived-token` か `other-secrets` の秘密情報。大文字と小文字は区別せず、全ての秘密情報が届くならどれも)を除いて探す。同じ秘密情報で指摘を重ねないため。除いた後に残る秘密情報を持つ最初の後のステップを指す
 - 指摘の位置は、コードを動かすコマンドを持ち、秘密情報も届く最初の後のステップの `run`
 
 ## 理由

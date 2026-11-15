@@ -1,8 +1,8 @@
 use yamlpath::Route;
 
-use super::secrets::shell_secret;
+use super::secrets::{already_reached, shell_secrets};
 use super::tools::{WRAPPERS, gemini_may_edit};
-use super::{input, nearest_env, program_name, running_later_steps, shell_programs};
+use super::{input, is_assignment, nearest_env, program_name, running_later_steps, shell_programs};
 use crate::agent::{Agent, AgentStep, JobStep};
 use crate::workflow::Workflow;
 
@@ -12,12 +12,19 @@ const CODEX_READ_ONLY: [(&str, &str); 3] = [
     ("permission-profile", ":read-only"),
     ("safety-strategy", "read-only"),
 ];
-const WORKSPACE_PATHS: [&str; 4] = [
+const WORKSPACE_PATHS: [&str; 6] = [
     "./",
     "$GITHUB_WORKSPACE/",
     "${GITHUB_WORKSPACE}/",
     "${{github.workspace}}/",
+    "$PWD/",
+    "${PWD}/",
 ];
+const LOOKUP_WRAPPER: &str = "command";
+const LOOKUP_FLAGS: [&str; 2] = ["-v", "-V"];
+const DURATION_WRAPPER: &str = "timeout";
+const SUBCOMMAND_VALUE_FLAGS: [&str; 4] = ["--prefix", "-C", "--workspace", "-w"];
+const TOOLCHAIN_PREFIX: char = '+';
 const OUTSIDE_PATH_STARTS: [char; 3] = ['/', '$', '~'];
 const STDIN_REDIRECT: &str = "<";
 const SCRIPT_INTERPRETERS: [(&str, &[char], &[&str]); 7] = [
@@ -92,12 +99,12 @@ const SUBCOMMAND_RUNNERS: [(&str, &[&str]); 7] = [
 pub struct AgentCode<'w> {
     pub setting: String,
     pub route: Route<'w>,
-    pub secret: String,
 }
 
 pub fn agent_code_with_secrets<'w>(
     workflow: &'w Workflow,
     step: &AgentStep<'w>,
+    reached_agent: &[String],
 ) -> Option<AgentCode<'w>> {
     let edits_workspace = match step.agent {
         Agent::ClaudeCode => true,
@@ -119,13 +126,14 @@ pub fn agent_code_with_secrets<'w>(
                 .iter()
                 .find_map(|program| project_command(program))?;
             let env = nearest_env(workflow, step.job_id, step.job, &run.shared.env, &route);
-            let secret = shell_secret(env, &run.run)?;
+            let secret = shell_secrets(env, &run.run)
+                .into_iter()
+                .find(|secret| !already_reached(reached_agent, secret))?;
             Some(AgentCode {
                 setting: format!(
                     "`{command}` in a later step runs files the agent can edit, with {secret}"
                 ),
                 route: route.with_key(RUN_KEY),
-                secret,
             })
         })
 }
@@ -148,7 +156,22 @@ fn project_command(program: &[String]) -> Option<String> {
     }
     let name = program_name(first).trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     if WRAPPERS.contains(&name) {
-        return (1..program.len()).find_map(|start| project_command(&program[start..]));
+        if name == LOOKUP_WRAPPER
+            && arguments
+                .iter()
+                .any(|argument| LOOKUP_FLAGS.contains(&argument.as_str()))
+        {
+            return None;
+        }
+        let mut wrapped: Vec<String> = arguments
+            .iter()
+            .skip_while(|word| word.starts_with('-') || is_assignment(word))
+            .cloned()
+            .collect();
+        if name == DURATION_WRAPPER && !wrapped.is_empty() {
+            wrapped.remove(0);
+        }
+        return project_command(&wrapped);
     }
     if let Some((_, inline_letters, value_flags)) = SCRIPT_INTERPRETERS
         .iter()
@@ -176,6 +199,14 @@ fn project_command(program: &[String]) -> Option<String> {
                 if short_cluster && letters.contains(*inline_letters) {
                     return None;
                 }
+                let takes_value = short_cluster
+                    && letters
+                        .chars()
+                        .last()
+                        .is_some_and(|last| value_flags.contains(&format!("-{last}").as_str()));
+                if takes_value {
+                    words.next();
+                }
                 continue;
             }
             return (in_workspace(word) && !word.starts_with(STDIN_REDIRECT))
@@ -189,11 +220,20 @@ fn project_command(program: &[String]) -> Option<String> {
     let (_, subcommands) = SUBCOMMAND_RUNNERS
         .iter()
         .find(|(runner, _)| *runner == name)?;
-    let subcommand = arguments
-        .iter()
-        .find(|argument| !argument.starts_with('-'))
-        .filter(|subcommand| subcommands.contains(&subcommand.as_str()))?;
-    Some(format!("{name} {subcommand}"))
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        if SUBCOMMAND_VALUE_FLAGS.contains(&word.as_str()) {
+            words.next();
+            continue;
+        }
+        if word.starts_with(['-', TOOLCHAIN_PREFIX]) {
+            continue;
+        }
+        return subcommands
+            .contains(&word.as_str())
+            .then(|| format!("{name} {word}"));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -217,7 +257,7 @@ jobs:
             ),
         )
         .unwrap();
-        agent_code_with_secrets(&workflow, &agent_steps(&workflow)[0]).map(|found| {
+        agent_code_with_secrets(&workflow, &agent_steps(&workflow)[0], &[]).map(|found| {
             let (line, _) = workflow.position(&found.route).unwrap();
             format!("{line}: {}", found.setting)
         })
@@ -263,6 +303,15 @@ jobs:
           TOKEN: ${{ secrets.TOKEN }}",
                 "9: `make` in a later step runs files the agent can edit, with secrets.TOKEN",
             ),
+            (
+                "google-github-actions/run-gemini-cli@v0
+        with:
+          settings: '{\"tools\": {\"core\": [\"ReadFileTool\", \"WriteFileTool\"]}}'",
+                "      - run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+                "9: `npm test` in a later step runs files the agent can edit, with secrets.TOKEN",
+            ),
         ] {
             assert_eq!(found(agent, later).as_deref(), Some(expected), "{later}");
         }
@@ -289,13 +338,20 @@ jobs:
             ("/usr/bin/env CI=1 ./test.sh", "./test.sh"),
             ("yarn", "yarn"),
             ("npm i", "npm i"),
+            ("bash -euo pipefail ./ci.sh", "bash ./ci.sh"),
+            ("cargo +nightly build --release", "cargo build"),
+            ("npm --prefix web run build", "npm run"),
+            ("$PWD/ci/deploy.sh", "$PWD/ci/deploy.sh"),
+            (
+                "if [ -n \"$X\" ]; then ./scripts/deploy.sh; fi",
+                "./scripts/deploy.sh",
+            ),
+            ("for d in a b; do make -C $d; done", "make"),
         ] {
-            let program: Vec<String> = shell_programs(run).remove(0);
-            assert_eq!(
-                project_command(&program).as_deref(),
-                Some(expected),
-                "{run}"
-            );
+            let command = shell_programs(run)
+                .iter()
+                .find_map(|program| project_command(program));
+            assert_eq!(command.as_deref(), Some(expected), "{run}");
         }
         for run in [
             "https://example.com/a/b",
@@ -307,12 +363,15 @@ jobs:
             "node -pe 1",
             "bash ~/setup.sh",
             "curl https://example.com",
+            "sudo apt-get install -y make",
+            "command -v pnpm",
+            "sudo cp build/out.js /usr/local/",
+            "bash -euo pipefail -c \"curl https://example.com\"",
         ] {
-            assert_eq!(
-                project_command(&shell_programs(run).remove(0)),
-                None,
-                "{run}"
-            );
+            let command = shell_programs(run)
+                .iter()
+                .find_map(|program| project_command(program));
+            assert_eq!(command, None, "{run}");
         }
     }
 
@@ -347,6 +406,14 @@ jobs:
                 "anthropics/claude-code-action@v1",
                 "      - if: false
         run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0
+        with:
+          settings: '{\"tools\": {\"core\": [\"read_file\", \"run_shell_command(git diff)\"]}}'",
+                "      - run: npm test
         env:
           TOKEN: ${{ secrets.TOKEN }}",
             ),
@@ -404,6 +471,6 @@ jobs:
             .to_string(),
         )
         .unwrap();
-        assert!(agent_code_with_secrets(&workflow, &agent_steps(&workflow)[0]).is_none());
+        assert!(agent_code_with_secrets(&workflow, &agent_steps(&workflow)[0], &[]).is_none());
     }
 }
