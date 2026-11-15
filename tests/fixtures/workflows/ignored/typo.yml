@@ -1,0 +1,10 @@
+on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1 # sekimori: ignore[unrestricted-trigger, broad-tool]
+        with:
+          github_token: ${{ github.token }}
+          allowed_non_write_users: '*'
+          claude_args: --allowedTools Bash

@@ -17,6 +17,7 @@ const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
 pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
+const DIRECTIVE_PREFIX: &str = "sekimori:";
 const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
 const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
@@ -153,6 +154,7 @@ pub struct Assessment<'w> {
     pub permissions_and_secrets: Option<AxisScore>,
     pub hits: Vec<Hit<'w>>,
     pub ignored: Vec<Rule>,
+    pub warnings: Vec<String>,
 }
 
 impl<'w> Assessment<'w> {
@@ -300,25 +302,46 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
-    let ignored = if hits.is_empty() {
-        Vec::new()
-    } else {
-        let directives: Vec<Option<Vec<&str>>> = workflow
-            .comments(&step.route.with_key(USES_KEY))
+    let mut ignored = Vec::new();
+    let mut warnings = Vec::new();
+    if !hits.is_empty() {
+        let uses = step.route.with_key(USES_KEY);
+        let directives: Vec<Result<Option<Vec<&str>>, &str>> = workflow
+            .comments(&uses)
             .into_iter()
             .flat_map(ignore_directives)
             .collect();
-        Rule::ALL
+        ignored = Rule::ALL
             .into_iter()
             .filter(|rule| {
                 directives.iter().any(|directive| {
                     directive
                         .as_ref()
-                        .is_none_or(|ids| ids.contains(&rule.id()))
+                        .is_ok_and(|ids| ids.as_ref().is_none_or(|ids| ids.contains(&rule.id())))
                 })
             })
-            .collect()
-    };
+            .collect();
+        let problems = directives.iter().flat_map(|directive| match directive {
+            Err(text) => vec![format!(
+                "`{text}` is not an ignore directive; write `{IGNORE_DIRECTIVE}[rule-id, ...]`"
+            )],
+            Ok(ids) => ids
+                .iter()
+                .flatten()
+                .filter(|id| !Rule::ALL.iter().any(|rule| rule.id() == **id))
+                .map(|id| format!("`{id}` is not a sekimori rule"))
+                .collect(),
+        });
+        let (line, column) = workflow.position(&uses).unwrap_or((0, 0));
+        warnings = problems
+            .map(|problem| {
+                format!(
+                    "{}:{line}:{column}: warning: {problem}",
+                    workflow.path.display()
+                )
+            })
+            .collect();
+    }
     Assessment {
         step,
         who_can_trigger,
@@ -326,20 +349,27 @@ fn assess_step<'w>(
         permissions_and_secrets,
         hits,
         ignored,
+        warnings,
     }
 }
 
-fn ignore_directives(comment: &str) -> Vec<Option<Vec<&str>>> {
+fn ignore_directives(comment: &str) -> Vec<Result<Option<Vec<&str>>, &str>> {
     comment
         .split('#')
-        .filter_map(|part| {
-            let directive = part.trim().strip_prefix(IGNORE_DIRECTIVE)?;
+        .map(str::trim)
+        .filter(|part| part.starts_with(DIRECTIVE_PREFIX))
+        .map(|part| {
+            let Some(directive) = part.strip_prefix(IGNORE_DIRECTIVE) else {
+                return Err(part);
+            };
             match directive.strip_prefix('[') {
-                Some(list) => {
-                    let (ids, _) = list.split_once(']')?;
-                    Some(Some(ids.split(',').map(str::trim).collect()))
-                }
-                None => directive.is_empty().then_some(None),
+                Some(list) => list
+                    .split_once(']')
+                    .filter(|(_, rest)| rest.is_empty() || rest.starts_with(char::is_whitespace))
+                    .map(|(ids, _)| Some(ids.split(',').map(str::trim).collect()))
+                    .ok_or(part),
+                None if directive.is_empty() => Ok(None),
+                None => Err(part),
             }
         })
         .collect()
@@ -1266,6 +1296,47 @@ jobs:
     }
 
     #[test]
+    fn unreadable_ignore_directives_and_unknown_rules_are_warned_about() {
+        let warnings_of = |comment: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1 {comment}
+        with:
+          claude_args: --allowedTools Bash
+"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default()).remove(0).warnings
+        };
+        assert!(warnings_of("# sekimori: ignore[broad-tools]").is_empty());
+        assert!(warnings_of("# v1 # unrelated note").is_empty());
+        assert_eq!(
+            warnings_of("# sekimori: ignore[broad-tool, pr-head-checkout]"),
+            ["test.yml:6:9: warning: `broad-tool` is not a sekimori rule"]
+        );
+        for comment in [
+            "# sekimori: ignore [broad-tools]",
+            "# sekimori: ignore broad-tools",
+            "# sekimori: ignroe[broad-tools]",
+            "# sekimori: ignore[broad-tools",
+        ] {
+            let warnings = warnings_of(comment);
+            assert_eq!(warnings.len(), 1, "{comment}");
+            assert!(
+                warnings[0].contains("is not an ignore directive"),
+                "{comment}"
+            );
+        }
+    }
+
+    #[test]
     fn tokens_secrets_and_write_access_share_the_permissions_axis() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
@@ -1495,6 +1566,7 @@ jobs:
                 permissions_and_secrets: axis(permissions),
                 hits: Vec::new(),
                 ignored: Vec::new(),
+                warnings: Vec::new(),
             };
             assert_eq!(
                 assessment.level(),

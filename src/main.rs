@@ -48,6 +48,12 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
+        for warning in assessments
+            .iter()
+            .flat_map(|assessment| &assessment.warnings)
+        {
+            eprintln!("{warning}");
+        }
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();
         if findings.is_empty() {
             continue;
