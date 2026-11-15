@@ -67,14 +67,12 @@ runs:
         output="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")"
         status=0
         "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
-        "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2> /dev/null || true
+        "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
         if [ -s "$output/plain.txt" ]; then
           {
             echo "## sekimori"
             echo
-            echo '```text'
-            cat "$output/plain.txt"
-            echo '```'
+            sed 's/^/    /' "$output/plain.txt"
           } >> "$GITHUB_STEP_SUMMARY"
         fi
         sarif_status=0

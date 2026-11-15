@@ -39,33 +39,54 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     )
 }
 
-pub fn github(workflow: &Workflow, file: &str, finding: &Finding) -> String {
-    let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));
+pub fn github(workflow: &Workflow, path: &RepositoryPath, finding: &Finding) -> String {
     let message = format!("{}\n{}", headline(finding), breakdown(finding));
-    format!(
-        "::{} file={},line={line},col={column},title={}::{}\n",
-        finding.level,
-        escape_property(file),
-        escape_property(&format!("{TOOL_NAME} {}", finding.hit.rule.id())),
-        escape_data(message.trim_end()),
+    annotation(
+        &finding.level.to_string(),
+        workflow,
+        path,
+        &finding.hit.route,
+        &format!("{TOOL_NAME} {}", finding.hit.rule.id()),
+        message.trim_end(),
     )
 }
 
-pub fn github_warning(workflow: &Workflow, file: &str, route: &Route, message: &str) -> String {
-    let (line, column) = workflow.position(route).unwrap_or((1, 1));
-    format!(
-        "::warning file={},line={line},col={column},title={TOOL_NAME}::{}\n",
-        escape_property(file),
-        escape_data(message),
-    )
+pub fn github_warning(
+    workflow: &Workflow,
+    path: &RepositoryPath,
+    route: &Route,
+    message: &str,
+) -> String {
+    annotation("warning", workflow, path, route, TOOL_NAME, message)
 }
 
-pub fn annotation_file(path: &RepositoryPath) -> String {
-    match path {
-        RepositoryPath::Relative(path) | RepositoryPath::Absolute(path) => {
-            path.display().to_string()
+pub fn github_error(message: &str) -> String {
+    format!("::error title={TOOL_NAME}::{}\n", escape_data(message))
+}
+
+fn annotation(
+    command: &str,
+    workflow: &Workflow,
+    path: &RepositoryPath,
+    route: &Route,
+    title: &str,
+    message: &str,
+) -> String {
+    let location = match path {
+        RepositoryPath::Relative(relative) => {
+            let (line, column) = workflow.position(route).unwrap_or((1, 1));
+            format!(
+                "file={},line={line},col={column},",
+                escape_property(&uri_path(relative))
+            )
         }
-    }
+        RepositoryPath::Absolute(_) => String::new(),
+    };
+    format!(
+        "::{command} {location}title={}::{}\n",
+        escape_property(title),
+        escape_data(message)
+    )
 }
 
 fn breakdown(finding: &Finding) -> String {
@@ -277,14 +298,14 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::facts::Upstreams;
+    use crate::rules::{Assessment, assess};
 
     #[test]
     fn annotation_values_are_escaped_like_the_actions_toolkit() {
         assert_eq!(escape_data("100% done\r\nnext"), "100%25 done%0D%0Anext");
         assert_eq!(escape_property("a:b,c%"), "a%3Ab%2Cc%25");
     }
-    use crate::facts::Upstreams;
-    use crate::rules::{Assessment, assess};
 
     #[test]
     fn a_finding_names_its_place_rule_step_and_every_axis() {

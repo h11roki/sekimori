@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, ValueEnum};
 use sekimori::facts::Upstreams;
 use sekimori::report::{
-    annotation_file, artifact_uri, github, github_warning, plain, sarif_log, sarif_results, warning,
+    artifact_uri, github, github_error, github_warning, plain, sarif_log, sarif_results, warning,
 };
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
@@ -45,6 +45,12 @@ fn main() -> ExitCode {
             Ok(workflow) => workflows.push(workflow),
             Err(error) => {
                 eprintln!("error: {error}");
+                if let Format::Github = cli.format
+                    && let Err(error) =
+                        stdout.write_all(github_error(&error.to_string()).as_bytes())
+                {
+                    return write_failure(&error);
+                }
                 errors.push(error.to_string());
             }
         }
@@ -52,7 +58,6 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        let file = annotation_file(&repository_path(&workflow.path));
         let mut warned = HashSet::new();
         for assessment in &assessments {
             for message in assessment.warnings() {
@@ -65,7 +70,12 @@ fn main() -> ExitCode {
                         }
                     }
                     Format::Github => {
-                        let line = github_warning(workflow, &file, &route, message);
+                        let line = github_warning(
+                            workflow,
+                            &repository_path(&workflow.path),
+                            &route,
+                            message,
+                        );
                         if warned.insert(line.clone())
                             && let Err(error) = stdout.write_all(line.as_bytes())
                         {
@@ -90,9 +100,10 @@ fn main() -> ExitCode {
                 }
             }
             Format::Github => {
+                let path = repository_path(&workflow.path);
                 for finding in &findings {
                     if let Err(error) =
-                        stdout.write_all(github(workflow, &file, finding).as_bytes())
+                        stdout.write_all(github(workflow, &path, finding).as_bytes())
                     {
                         return write_failure(&error);
                     }
