@@ -42,7 +42,7 @@ jobs:
         with:
           persist-credentials: false
       - id: sekimori
-        uses: h11roki/sekimori@e231dccbb988739ccb73fef6b60353dc1e8d8bd4 # v0.12.0
+        uses: h11roki/sekimori@74986f872b322dc506eb84c7dbc05437ad539017 # v0.13.0
       - if: >-
           !cancelled()
           && steps.sekimori.outputs.sarif-file != ''
@@ -64,26 +64,26 @@ The action downloads the release binary that matches its own version and checks 
 
 | Output | Description |
 |---|---|
-| `sarif-file` | Path to the findings in SARIF 2.1.0 |
-| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run, another non-zero value if it crashed; empty when sekimori was not installed |
+| `sarif-file` | Path to the findings in SARIF 2.1.0; empty when sekimori did not write the file |
+| `exit-code` | Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file, could not write its output, or could not run, another non-zero value if it crashed; empty when sekimori was not installed |
 
 ## Use it from the command line
 
 Download a binary from [Releases](https://github.com/h11roki/sekimori/releases) and verify it:
 
 ```sh
-gh release download v0.12.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
+gh release download v0.13.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
 gh attestation verify sekimori-aarch64-apple-darwin \
   --repo h11roki/sekimori \
   --signer-workflow h11roki/sekimori/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.12.0
+  --source-ref refs/tags/v0.13.0
 chmod +x sekimori-aarch64-apple-darwin
 ```
 
 Or build it from source with Rust 1.99.1:
 
 ```sh
-cargo install --locked --git https://github.com/h11roki/sekimori --tag v0.12.0
+cargo install --locked --git https://github.com/h11roki/sekimori --tag v0.13.0
 ```
 
 Then run it in your repository:
