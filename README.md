@@ -91,6 +91,7 @@ Then run it in your repository:
 sekimori                         # checks .github/workflows
 sekimori path/to/workflow.yml    # files or directories
 sekimori --format sarif > sekimori.sarif
+sekimori --format github         # GitHub Actions annotations
 ```
 
 For this workflow, which lets anyone start Gemini CLI with a comment:

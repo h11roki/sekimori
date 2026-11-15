@@ -6,6 +6,7 @@ use yamlpath::Route;
 use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
+const TOOL_NAME: &str = env!("CARGO_PKG_NAME");
 const LABEL_WIDTH: usize = 21;
 const VALUE_WIDTH: usize = 5;
 const SARIF_VERSION: &str = "2.1.0";
@@ -34,14 +35,90 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
         finding.level,
         finding.hit.rule.id(),
         headline(finding),
-        axis_rows(finding)
-            .into_iter()
-            .map(|(label, value, reason)| match reason {
-                Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
-                None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
-            })
-            .collect::<String>(),
+        breakdown(finding),
     )
+}
+
+pub fn github(workflow: &Workflow, path: &RepositoryPath, finding: &Finding) -> String {
+    annotation(
+        &finding.level.to_string(),
+        workflow,
+        path,
+        &finding.hit.route,
+        &format!("{TOOL_NAME} {}", finding.hit.rule.id()),
+        &prose(workflow, finding),
+    )
+}
+
+pub fn github_warning(
+    workflow: &Workflow,
+    path: &RepositoryPath,
+    route: &Route,
+    message: &str,
+) -> String {
+    annotation("warning", workflow, path, route, TOOL_NAME, message)
+}
+
+pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
+    let location = match path {
+        Some(RepositoryPath::Relative(relative)) => {
+            format!("file={},", escape_property(&uri_path(relative)))
+        }
+        Some(RepositoryPath::Absolute(_)) | None => String::new(),
+    };
+    format!(
+        "::error {location}title={TOOL_NAME}::{}\n",
+        escape_data(message)
+    )
+}
+
+fn annotation(
+    command: &str,
+    workflow: &Workflow,
+    path: &RepositoryPath,
+    route: &Route,
+    title: &str,
+    message: &str,
+) -> String {
+    let (line, column) = workflow.position(route).unwrap_or((1, 1));
+    let (location, message) = match path {
+        RepositoryPath::Relative(relative) => (
+            format!(
+                "file={},line={line},col={column},",
+                escape_property(&uri_path(relative))
+            ),
+            message.to_owned(),
+        ),
+        RepositoryPath::Absolute(absolute) => (
+            String::new(),
+            format!("{}:{line}:{column}: {message}", absolute.display()),
+        ),
+    };
+    format!(
+        "::{command} {location}title={}::{}\n",
+        escape_property(title),
+        escape_data(&message)
+    )
+}
+
+fn breakdown(finding: &Finding) -> String {
+    axis_rows(finding)
+        .into_iter()
+        .map(|(label, value, reason)| match reason {
+            Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
+            None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
+        })
+        .collect()
+}
+
+fn escape_data(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn escape_property(text: &str) -> String {
+    escape_data(text).replace(':', "%3A").replace(',', "%2C")
 }
 
 struct SamePlace<'f, 'a, 'w> {
@@ -75,7 +152,7 @@ pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Ve
             let breakdowns: Vec<String> = place
                 .findings
                 .iter()
-                .map(|finding| sarif_breakdown(workflow, finding))
+                .map(|finding| prose(workflow, finding))
                 .collect();
             let (line, column) = place.position.unwrap_or((1, 1));
             json!({
@@ -93,7 +170,7 @@ pub fn sarif_results(workflow: &Workflow, uri: &str, findings: &[Finding]) -> Ve
         .collect()
 }
 
-fn sarif_breakdown(workflow: &Workflow, finding: &Finding) -> String {
+fn prose(workflow: &Workflow, finding: &Finding) -> String {
     let mut lines = vec![headline(finding)];
     if let Some((line, _)) = workflow.position(&finding.assessment.step.route) {
         lines.push(format!("agent step: line {line}"));
@@ -132,7 +209,7 @@ pub fn sarif_log(results: Vec<Value>, errors: &[String]) -> Value {
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": env!("CARGO_PKG_NAME"),
+                    "name": TOOL_NAME,
                     "version": env!("CARGO_PKG_VERSION"),
                     "semanticVersion": env!("CARGO_PKG_VERSION"),
                     "informationUri": env!("CARGO_PKG_REPOSITORY"),
@@ -235,6 +312,12 @@ mod tests {
     use super::*;
     use crate::facts::Upstreams;
     use crate::rules::{Assessment, assess};
+
+    #[test]
+    fn annotation_values_are_escaped_like_the_actions_toolkit() {
+        assert_eq!(escape_data("100% done\r\nnext"), "100%25 done%0D%0Anext");
+        assert_eq!(escape_property("a:b,c%"), "a%3Ab%2Cc%25");
+    }
 
     #[test]
     fn a_finding_names_its_place_rule_step_and_every_axis() {
