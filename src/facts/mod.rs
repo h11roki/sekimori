@@ -57,6 +57,7 @@ const STABLE_CONTEXTS: [&str; 15] = [
     "github.sha",
     "github.job",
 ];
+const NUMBER_WORDS: [&str; 2] = ["infinity", "nan"];
 const HEREDOC: &str = "<<";
 const HERE_STRING: &str = "<<<";
 const SHELL_KEYWORDS: [&str; 9] = [
@@ -123,13 +124,15 @@ fn before_comment(text: &str) -> &str {
 }
 
 fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)> {
-    let agent_facts = step
+    let agent_facts: Vec<ValueFact> = step
         .step
         .shared
         .r#if
         .as_ref()
         .and_then(parse_condition)
-        .map_or_else(Vec::new, |condition| value_facts(&condition));
+        .map(|condition| value_facts(&condition))
+        .filter(|facts| !contradicts(facts, &[]))
+        .unwrap_or_default();
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
@@ -141,61 +144,60 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
             let Some(condition) = shared.r#if.as_ref().and_then(parse_condition) else {
                 return true;
             };
-            let mut facts = agent_facts.clone();
-            facts.extend(value_facts(&condition));
-            !constant_false(&condition) && !contradicts(&facts)
+            !constant_false(&condition) && !contradicts(&agent_facts, &value_facts(&condition))
         })
         .map(|(_, route, later)| (route, later))
         .collect()
 }
 
-#[derive(Clone)]
 struct ValueFact {
     value: String,
     one_of: bool,
     constants: Vec<String>,
 }
 
-fn contradicts(facts: &[ValueFact]) -> bool {
-    facts.iter().any(|fact| {
-        let same_value = || facts.iter().filter(|other| other.value == fact.value);
-        let possible = same_value()
-            .filter(|other| other.one_of)
-            .map(|other| &other.constants)
-            .reduce(|possible, constants| {
-                if possible.len() <= constants.len() {
-                    possible
-                } else {
-                    constants
-                }
-            });
-        let Some(narrowest) = possible else {
-            return false;
-        };
-        narrowest.iter().all(|constant| {
-            same_value().any(|other| other.one_of != other.constants.contains(constant))
+fn contradicts(first: &[ValueFact], second: &[ValueFact]) -> bool {
+    let facts = || first.iter().chain(second);
+    facts().filter(|fact| fact.one_of).any(|fact| {
+        fact.constants.iter().all(|constant| {
+            facts().any(|other| {
+                other.value == fact.value && other.one_of != other.constants.contains(constant)
+            })
         })
     })
 }
 
 fn value_facts(condition: &SpannedExpr) -> Vec<ValueFact> {
     let stable = |expression: &SpannedExpr| match &expression.inner {
-        Expr::Context(context) => context.as_pattern().filter(|pattern| {
-            !pattern.contains('*')
-                && STABLE_CONTEXTS
+        Expr::Context(context)
+            if !context
+                .parts
+                .iter()
+                .any(|part| matches!(part.inner, Expr::Index(_) | Expr::Star)) =>
+        {
+            context.as_pattern().filter(|pattern| {
+                STABLE_CONTEXTS
                     .iter()
                     .any(|prefix| pattern.starts_with(prefix))
-        }),
+            })
+        }
         _ => None,
     };
     let comparable = |constants: Vec<String>| {
         constants
             .iter()
-            .all(|constant| !constant.trim().is_empty() && constant.trim().parse::<f64>().is_err())
+            .all(|constant| {
+                let trimmed = constant.trim();
+                trimmed.is_ascii()
+                    && trimmed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && !NUMBER_WORDS
+                        .iter()
+                        .any(|word| trimmed.eq_ignore_ascii_case(word))
+            })
             .then(|| {
                 constants
                     .iter()
-                    .map(|constant| constant.to_lowercase())
+                    .map(|constant| constant.to_ascii_lowercase())
                     .collect::<Vec<_>>()
             })
     };

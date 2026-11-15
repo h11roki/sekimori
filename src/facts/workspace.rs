@@ -569,6 +569,10 @@ jobs:
                 "github.action_status == 'failure'",
             ),
             ("inputs.lang == 'Ä'", "inputs.lang == 'ä'"),
+            ("inputs.lang == 'ς'", "inputs.lang == 'σ'"),
+            ("matrix.n == '0x10'", "matrix.n == '0o20'"),
+            ("matrix['os.name'] == 'linux'", "matrix.os.name == 'mac'"),
+            ("inputs.m == 'a' && inputs.m == 'b'", "success()"),
         ] {
             assert!(
                 found_with(agent_condition, later_condition),
