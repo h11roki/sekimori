@@ -187,6 +187,7 @@ A check on `github.actor`, or `github.event.label.name == '<label>'` on `types: 
 Allow only the commands the task needs.
 
 - `claude-code-action`: allow scoped commands such as `--allowedTools "Bash(npm test:*)"` in `claude_args`. Do not allow `Bash` alone, a shell or interpreter with any arguments (`Bash(bash:*)`, `Bash(python *)`), or `--permission-mode bypassPermissions`.
+- Claude Code base action: the same applies to `allowed_tools` (`anthropics/claude-code-base-action@beta` and `@v0.0.x`) or `claude_args` (`anthropics/claude-code-action/base-action`).
 - `openai/codex-action`: do not set `sandbox: danger-full-access`, `permission-profile: ":danger-full-access"` or `safety-strategy: unsafe`.
 - `run-gemini-cli`: pass `settings` with a `tools.core` allow-list, and scope the shell tool to the commands the task needs.
 
