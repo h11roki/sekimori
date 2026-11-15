@@ -263,7 +263,7 @@ fn one_run_writes_annotations_the_sarif_file_and_the_summary() {
         sekimori_sarif(&["ignored/typo.yml"]).stdout
     );
     let written = std::fs::read_to_string(&summary).unwrap();
-    assert!(written.starts_with("earlier step\n## sekimori\n\n    "));
+    assert!(written.starts_with("earlier step\n\n## sekimori\n\n    "));
     assert!(written.contains("typo.yml:6:9: warning: `broad-tool` is not a sekimori rule\n"));
     assert!(written.contains("error[broad-tools]"));
 }
@@ -296,9 +296,17 @@ fn an_unwritable_summary_file_exits_with_two_after_writing_the_sarif_file() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(sarif.exists());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("failed to write findings")
-    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("failed to write "));
+    assert!(stderr.contains("summary.md"));
+}
+
+#[test]
+fn an_empty_summary_file_path_is_skipped() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--summary-file", ""])
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
 }

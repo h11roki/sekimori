@@ -1,8 +1,9 @@
 use std::cell::LazyCell;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
@@ -34,12 +35,17 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     sarif_file: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
-    summary_file: Option<PathBuf>,
+    summary_file: Option<OsString>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let wants_sarif = matches!(cli.format, Format::Sarif) || cli.sarif_file.is_some();
+    let summary_file = cli
+        .summary_file
+        .as_ref()
+        .filter(|file| !file.is_empty())
+        .map(PathBuf::from);
     let mut stdout = io::stdout().lock();
     let mut errors = Vec::new();
     let mut results = Vec::new();
@@ -107,51 +113,49 @@ fn main() -> ExitCode {
         }
         found = true;
         for finding in &findings {
-            let text = plain(workflow, finding);
             let written = match cli.format {
-                Format::Plain => stdout.write_all(text.as_bytes()),
+                Format::Plain => stdout.write_all(plain(workflow, finding).as_bytes()),
                 Format::Github => stdout.write_all(github(workflow, &path, finding).as_bytes()),
                 Format::Sarif => Ok(()),
             };
             if let Err(error) = written {
                 return write_failure(&error);
             }
-            plain_text.push_str(&text);
+            if summary_file.is_some() {
+                plain_text.push_str(&plain(workflow, finding));
+            }
         }
         if wants_sarif {
             results.extend(sarif_results(workflow, &artifact_uri(&path), &findings));
         }
     }
     if wants_sarif {
-        let document = serde_json::to_vec_pretty(&sarif_log(results, &errors))
-            .map(|mut document| {
-                document.push(b'\n');
-                document
-            })
-            .map_err(io::Error::from);
-        let written = document.and_then(|document| {
-            if let Format::Sarif = cli.format {
-                stdout.write_all(&document)?;
-            }
-            match &cli.sarif_file {
-                Some(file) => fs::write(file, &document),
-                None => Ok(()),
-            }
-        });
-        if let Err(error) = written {
+        let mut document = match serde_json::to_vec_pretty(&sarif_log(results, &errors)) {
+            Ok(document) => document,
+            Err(error) => return write_failure(&io::Error::from(error)),
+        };
+        document.push(b'\n');
+        if let Format::Sarif = cli.format
+            && let Err(error) = stdout.write_all(&document)
+        {
             return write_failure(&error);
         }
+        if let Some(file) = &cli.sarif_file
+            && let Err(error) = fs::write(file, &document)
+        {
+            return file_failure(file, &error);
+        }
     }
-    if let Some(file) = &cli.summary_file
+    if let Some(file) = &summary_file
         && let Some(markdown) = summary(&plain_text)
     {
         let appended = OpenOptions::new()
             .create(true)
             .append(true)
             .open(file)
-            .and_then(|mut opened| opened.write_all(markdown.as_bytes()));
+            .and_then(|mut opened| write!(opened, "\n{markdown}"));
         if let Err(error) = appended {
-            return write_failure(&error);
+            return file_failure(file, &error);
         }
     }
     if !errors.is_empty() {
@@ -165,5 +169,10 @@ fn main() -> ExitCode {
 
 fn write_failure(error: &io::Error) -> ExitCode {
     eprintln!("error: failed to write findings: {error}");
+    ExitCode::from(EXIT_FAILURE)
+}
+
+fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
+    eprintln!("error: failed to write {}: {error}", file.display());
     ExitCode::from(EXIT_FAILURE)
 }
