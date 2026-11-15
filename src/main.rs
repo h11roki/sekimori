@@ -1,9 +1,9 @@
 use std::cell::LazyCell;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
@@ -130,7 +130,7 @@ fn main() -> ExitCode {
             results.extend(sarif_results(workflow, &artifact_uri(&path), &findings));
         }
     }
-    let mut failure = None;
+    let mut failed = false;
     if wants_sarif {
         let mut document = match serde_json::to_vec_pretty(&sarif_log(results, &errors)) {
             Ok(document) => document,
@@ -142,10 +142,37 @@ fn main() -> ExitCode {
         {
             return write_failure(&error);
         }
-        if let Some(file) = &sarif_file
-            && let Err(error) = fs::write(file, &document)
-        {
-            failure = Some(file_failure(file, &error));
+        if let Some(file) = &sarif_file {
+            let mut messages = Vec::new();
+            match File::create(file) {
+                Err(error) => messages.push(format!("failed to write {}: {error}", file.display())),
+                Ok(mut opened) => {
+                    let written = opened.write_all(&document).and_then(|()| {
+                        match opened.metadata()?.is_file() {
+                            true => opened.sync_all(),
+                            false => Ok(()),
+                        }
+                    });
+                    if let Err(error) = written {
+                        messages.push(format!("failed to write {}: {error}", file.display()));
+                        if file.is_file()
+                            && let Err(error) = fs::remove_file(file)
+                        {
+                            messages.push(format!(
+                                "failed to remove the partly written {}: {error}",
+                                file.display()
+                            ));
+                        }
+                    }
+                }
+            }
+            for message in messages {
+                failed = true;
+                report_failure(&mut stdout, cli.format, &message);
+                if let Some(text) = &mut summary_text {
+                    text.insert_str(0, &format!("error: {message}\n"));
+                }
+            }
         }
     }
     if let (Some(file), Some(text)) = (&summary_file, &summary_text) {
@@ -167,13 +194,15 @@ fn main() -> ExitCode {
                 }
             });
         if let Err(error) = appended {
-            failure = Some(file_failure(file, &error));
+            failed = true;
+            report_failure(
+                &mut stdout,
+                cli.format,
+                &format!("failed to write {}: {error}", file.display()),
+            );
         }
     }
-    if let Some(failure) = failure {
-        return failure;
-    }
-    if !errors.is_empty() {
+    if failed || !errors.is_empty() {
         ExitCode::from(EXIT_FAILURE)
     } else if found {
         ExitCode::from(EXIT_FINDINGS)
@@ -187,9 +216,14 @@ fn write_failure(error: &io::Error) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
-fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
-    eprintln!("error: failed to write {}: {error}", file.display());
-    ExitCode::from(EXIT_FAILURE)
+fn report_failure(stdout: &mut impl Write, format: Format, message: &str) {
+    if let Format::Github = format {
+        match stdout.write_all(github_error(None, message).as_bytes()) {
+            Ok(()) => return,
+            Err(error) => eprintln!("error: failed to write an annotation: {error}"),
+        }
+    }
+    eprintln!("error: {message}");
 }
 
 fn given_path(value: Option<&OsStr>) -> Option<PathBuf> {
