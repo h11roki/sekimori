@@ -916,6 +916,30 @@ jobs:
     }
 
     #[test]
+    fn the_codex_bedrock_key_is_only_reported_where_later_code_runs_with_it() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}
+    steps:
+      - uses: openai/codex-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+    }
+
+    #[test]
     fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

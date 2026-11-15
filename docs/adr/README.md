@@ -53,7 +53,7 @@
 | [0012](0012-trigger-gate-details.md) | 起動の制限の判定を各社の実装に合わせ、`if:` は式のパーサーで読む | 承認(`needs:` の前のジョブを見ないことは 0026 で置き換え) |
 | [0013](0013-broad-tools.md) | 広い道具は、各社のソースで確かめた設定で決め、読めない設定は当てない | 承認 |
 | [0014](0014-pr-head-checkout.md) | PR の head の checkout は、エージェントが PR の設定を読み込むときだけ当てる | 承認 |
-| [0015](0015-tokens-and-secrets.md) | 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る | 承認 |
+| [0015](0015-tokens-and-secrets.md) | 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る | 承認(codex の資格情報の名前は 0039 で足した) |
 | [0016](0016-sarif-output.md) | SARIF は `--format sarif` で 1 つの run として出し、重さは結果の level で表す | 承認(結果のまとめ方と message の形と重複の見込みは 0018、送るステップの条件は 0019 で置き換え) |
 | [0017](0017-action-distribution.md) | Action は、Releases に置いたビルド済みのバイナリを、来歴の証明を確かめてから取ってくる composite Action にする | 承認(利用者のワークフローの例は 0019 で置き換え) |
 | [0018](0018-sarif-merge-same-place.md) | SARIF では、同じ規則と位置の結果を 1 つにまとめ、重い方の level と全ての内訳を書く | 承認 |
@@ -77,3 +77,4 @@
 | [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え) |
 | [0037](0037-output-files.md) | CLI は `--sarif-file` と `--summary-file` で SARIF とジョブの要約もファイルに書き、Action は sekimori を 1 回だけ動かす | 承認(書きかけの SARIF と、書けなかったことの出し方は 0038 で置き換え) |
 | [0038](0038-output-file-failures.md) | 書きかけの SARIF のファイルは消し、書けなかったことは `--format github` で注釈にする | 承認 |
+| [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認 |

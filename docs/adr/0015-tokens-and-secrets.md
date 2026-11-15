@@ -1,6 +1,6 @@
 # 0015. 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る
 
-- ステータス: 承認
+- ステータス: 承認(codex の資格情報の名前は 0039 で足した)
 - 日付: 2026-11-13
 
 ## 文脈
@@ -31,7 +31,7 @@
 - 他の秘密情報: 次の値に、`secrets.GITHUB_TOKEN` 以外の `secrets.*` がある
   - `with` のうち、値がエージェントに届く入力(claude は `prompt`、`settings`、`claude_args`、codex は `prompt`、`codex-args`、gemini は `prompt`、`settings`)。`gcp_workload_identity_provider` のように action が自分で使う入力は、エージェントに届かないので見ない。`${{ env.NAME }}` で秘密情報を持つ `env` の変数を参照するもの、`${{ toJSON(env) }}` のように `env` をまるごと渡すものも数える(GitHub のプロパティの参照と同じく、名前の大文字と小文字は区別しない)。GitHub が action に渡す前に値へ置き換えるため
   - まるごと式の `env` が秘密情報を参照するもの(claude-code-action と codex-action)
-  - claude-code-action と codex-action: `env` のうち、エージェント自身の資格情報として読む名前と `GITHUB_TOKEN`、`GH_TOKEN` を除いたもの。claude は上の資格情報の名前、codex は `OPENAI_API_KEY`
+  - claude-code-action と codex-action: `env` のうち、エージェント自身の資格情報として読む名前と `GITHUB_TOKEN`、`GH_TOKEN` を除いたもの。claude は上の資格情報の名前、codex は `OPENAI_API_KEY`(0039 で `AWS_*` を足した)
   - run-gemini-cli: `env` のうち、`settings` の文字列が `$NAME` か `${NAME}` で参照する名前のもの。それ以外はシェルから消える。`GEMINI_API_KEY`、`GOOGLE_API_KEY`、`GITHUB_TOKEN`、`GH_TOKEN` は除く
 - どちらも当たれば権限と秘密情報の軸を 1 とし、書き込みの権限と合わせて、理由を全て書く。指摘はその値の `with` か `env` の鍵を指す
 
