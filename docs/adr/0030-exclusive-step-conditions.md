@@ -7,8 +7,8 @@
 
 - v0.7.0 の正誤の確かめ直し(PR #36)で、`agent-code-with-secrets` の誤検知が 1 件あった。エージェントのステップの `if:` と、秘密情報を持つ後のステップの `if:` が、`needs.<id>.outputs.<name>` の同じ値を別の定数と比べていた。同じ実行で両方が動くことは無い
 - ADR 0027 と 0028 の規則は、同じジョブの後のステップを読む。後のステップの `if:` は、定数で偽のときだけ見ていた
-- GitHub Actions の式の値のうち、`inputs`、`github`、`vars`、`needs`、`matrix` はジョブの中で変わらない。`env` は前のステップが `GITHUB_ENV` で変えられ、`steps` は前のステップの結果で変わる
-- GitHub Actions の `==` と `!=` は、文字列を大小を区別せずに比べる(expressions の文書の operators)
+- GitHub Actions の式の値のうち、`inputs`、`vars`、`needs`、`matrix` と、`github` のイベントや枝やリポジトリの値はジョブの中で変わらない。`env` は前のステップが `GITHUB_ENV` で変えられ、`steps` は前のステップの結果で変わる。`github.action`、`github.action_status`、`github.env` などはステップごとに変わる
+- GitHub Actions の `==` と `!=` は、文字列を大小を区別せずに比べ、型が違うと数に直して比べる(expressions の文書の operators)
 
 ## 検討した選択肢
 
@@ -23,9 +23,12 @@
 高橋さんが判断を任せ(2026-11-15 に「止まらないで。開発改善を進めて」)、Claude が 1 を選んだ。
 
 - 項は、`if:` の式の最も外の「かつ」で分ける。`||` の中や、他の関数は読まない
-- 値が `inputs.`、`github.`、`vars.`、`needs.`、`matrix.` で始まるときだけ使う。`env` と `steps` は使わない
+- 値が `inputs.`、`vars.`、`needs.`、`matrix.`、`github.event`、`github.ref`、`github.head_ref`、`github.base_ref`、`github.repository`、`github.actor`、`github.triggering_actor`、`github.workflow`、`github.sha`、`github.job` で始まるときだけ使う。`env`、`steps`、ステップごとに変わる `github` の値は使わない
+- 添字(`labels[0]`)やワイルドカードを含む値は、別の値を同じ名前で呼んでしまうので使わない
+- 空の文字列と数に読める定数は、型を変えて比べられて別の定数と等しくなりうるので使わない
 - 同じ値について、取りうる値の集まりが空になれば両立しない。「この中のどれか」と「この中のどれか」の共通が空、または「この中のどれか」が全て「どれでもない」に含まれる
-- 定数は大小を区別せずに比べる
+- 定数は大小を区別せずに比べる(ASCII 以外の文字も小文字にそろえる)
+- エージェントのステップに `if:` が無くても、後のステップ自身の項が両立しなければ読まない
 - ADR 0027 と 0028 の、後のステップをたどる処理(`running_later_steps`)に効かせる
 
 ## 理由

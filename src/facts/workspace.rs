@@ -544,6 +544,7 @@ jobs:
                 "github.event_name == 'issue_comment' && inputs.mode == 'A'",
             ),
             ("matrix.agent == 'claude'", "matrix.agent != 'claude'"),
+            ("true", "inputs.mode == 'a' && inputs.mode == 'b'"),
         ] {
             assert!(
                 !found_with(agent_condition, later_condition),
@@ -558,6 +559,16 @@ jobs:
                 "inputs.mode == 'c'",
             ),
             ("inputs.mode != 'a'", "inputs.mode != 'b'"),
+            (
+                "github.event.pull_request.labels[0].name == 'claude'",
+                "github.event.pull_request.labels[1].name == 'deploy'",
+            ),
+            ("matrix.python == '3.10'", "matrix.python == '3.1'"),
+            (
+                "github.action_status == 'success'",
+                "github.action_status == 'failure'",
+            ),
+            ("inputs.lang == 'Ä'", "inputs.lang == 'ä'"),
         ] {
             assert!(
                 found_with(agent_condition, later_condition),

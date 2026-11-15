@@ -40,7 +40,23 @@ const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
-const STABLE_CONTEXTS: [&str; 5] = ["inputs.", "github.", "vars.", "needs.", "matrix."];
+const STABLE_CONTEXTS: [&str; 15] = [
+    "inputs.",
+    "vars.",
+    "needs.",
+    "matrix.",
+    "github.event.",
+    "github.event_name",
+    "github.ref",
+    "github.head_ref",
+    "github.base_ref",
+    "github.repository",
+    "github.actor",
+    "github.triggering_actor",
+    "github.workflow",
+    "github.sha",
+    "github.job",
+];
 const HEREDOC: &str = "<<";
 const HERE_STRING: &str = "<<<";
 const SHELL_KEYWORDS: [&str; 9] = [
@@ -107,7 +123,13 @@ fn before_comment(text: &str) -> &str {
 }
 
 fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)> {
-    let agent_condition = step.step.shared.r#if.as_ref().and_then(parse_condition);
+    let agent_facts = step
+        .step
+        .shared
+        .r#if
+        .as_ref()
+        .and_then(parse_condition)
+        .map_or_else(Vec::new, |condition| value_facts(&condition));
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
@@ -119,59 +141,71 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
             let Some(condition) = shared.r#if.as_ref().and_then(parse_condition) else {
                 return true;
             };
-            !constant_false(&condition)
-                && !agent_condition
-                    .as_ref()
-                    .is_some_and(|agent| exclusive(agent, &condition))
+            let mut facts = agent_facts.clone();
+            facts.extend(value_facts(&condition));
+            !constant_false(&condition) && !contradicts(&facts)
         })
         .map(|(_, route, later)| (route, later))
         .collect()
 }
 
-fn exclusive(first: &SpannedExpr, second: &SpannedExpr) -> bool {
-    let mut facts = value_facts(first);
-    facts.extend(value_facts(second));
-    facts.iter().any(|(value, ..)| {
-        let mut possible: Option<Vec<String>> = None;
-        let mut excluded: Vec<String> = Vec::new();
-        for (_, within, constants) in facts.iter().filter(|(other, ..)| other == value) {
-            if *within {
-                possible = Some(match possible {
-                    None => constants.clone(),
-                    Some(possible) => possible
-                        .into_iter()
-                        .filter(|constant| constants.contains(constant))
-                        .collect(),
-                });
-            } else {
-                excluded.extend(constants.iter().cloned());
-            }
-        }
-        possible.is_some_and(|possible| possible.iter().all(|constant| excluded.contains(constant)))
+#[derive(Clone)]
+struct ValueFact {
+    value: String,
+    one_of: bool,
+    constants: Vec<String>,
+}
+
+fn contradicts(facts: &[ValueFact]) -> bool {
+    facts.iter().any(|fact| {
+        let same_value = || facts.iter().filter(|other| other.value == fact.value);
+        let possible = same_value()
+            .filter(|other| other.one_of)
+            .map(|other| &other.constants)
+            .reduce(|possible, constants| {
+                if possible.len() <= constants.len() {
+                    possible
+                } else {
+                    constants
+                }
+            });
+        let Some(narrowest) = possible else {
+            return false;
+        };
+        narrowest.iter().all(|constant| {
+            same_value().any(|other| other.one_of != other.constants.contains(constant))
+        })
     })
 }
 
-fn value_facts(condition: &SpannedExpr) -> Vec<(String, bool, Vec<String>)> {
+fn value_facts(condition: &SpannedExpr) -> Vec<ValueFact> {
     let stable = |expression: &SpannedExpr| match &expression.inner {
-        Expr::Context(context) => context
-            .as_pattern()
-            .map(|pattern| pattern.to_ascii_lowercase())
-            .filter(|pattern| {
-                STABLE_CONTEXTS
+        Expr::Context(context) => context.as_pattern().filter(|pattern| {
+            !pattern.contains('*')
+                && STABLE_CONTEXTS
                     .iter()
                     .any(|prefix| pattern.starts_with(prefix))
-            }),
+        }),
         _ => None,
     };
-    let lowercase = |constants: Vec<String>| {
+    let comparable = |constants: Vec<String>| {
         constants
-            .into_iter()
-            .map(|constant| constant.to_ascii_lowercase())
-            .collect::<Vec<_>>()
+            .iter()
+            .all(|constant| !constant.trim().is_empty() && constant.trim().parse::<f64>().is_err())
+            .then(|| {
+                constants
+                    .iter()
+                    .map(|constant| constant.to_lowercase())
+                    .collect::<Vec<_>>()
+            })
     };
-    let membership = |expression: &SpannedExpr| match &expression.inner {
+    let membership = |expression: &SpannedExpr, one_of: bool| match &expression.inner {
         Expr::Call(call) if call.func == Function::Contains => match call.args.as_slice() {
-            [list, value] => Some((stable(value)?, lowercase(json_string_list(list)?))),
+            [list, value] => Some(ValueFact {
+                value: stable(value)?,
+                one_of,
+                constants: comparable(json_string_list(list)?)?,
+            }),
             _ => None,
         },
         _ => None,
@@ -197,21 +231,20 @@ fn value_facts(condition: &SpannedExpr) -> Vec<(String, bool, Vec<String>)> {
                 _ => return Vec::new(),
             };
             value
-                .map(|value| (value, *op == BinOp::Eq, vec![constant.to_ascii_lowercase()]))
+                .zip(comparable(vec![constant.to_string()]))
+                .map(|(value, constants)| ValueFact {
+                    value,
+                    one_of: *op == BinOp::Eq,
+                    constants,
+                })
                 .into_iter()
                 .collect()
         }
         Expr::UnExpr {
             op: UnOp::Not,
             expr,
-        } => membership(expr)
-            .map(|(value, constants)| (value, false, constants))
-            .into_iter()
-            .collect(),
-        _ => membership(condition)
-            .map(|(value, constants)| (value, true, constants))
-            .into_iter()
-            .collect(),
+        } => membership(expr, false).into_iter().collect(),
+        _ => membership(condition, true).into_iter().collect(),
     }
 }
 
