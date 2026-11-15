@@ -143,29 +143,34 @@ fn main() -> ExitCode {
             return write_failure(&error);
         }
         if let Some(file) = &sarif_file {
-            let failure = match File::create(file) {
-                Err(error) => Some((error, false)),
-                Ok(mut opened) => opened
-                    .write_all(&document)
-                    .err()
-                    .map(|error| (error, file.is_file())),
-            };
-            if let Some((error, truncated)) = failure {
+            let mut messages = Vec::new();
+            match File::create(file) {
+                Err(error) => messages.push(format!("failed to write {}: {error}", file.display())),
+                Ok(mut opened) => {
+                    let written = opened.write_all(&document).and_then(|()| {
+                        match opened.metadata()?.is_file() {
+                            true => opened.sync_all(),
+                            false => Ok(()),
+                        }
+                    });
+                    if let Err(error) = written {
+                        messages.push(format!("failed to write {}: {error}", file.display()));
+                        if file.is_file()
+                            && let Err(error) = fs::remove_file(file)
+                        {
+                            messages.push(format!(
+                                "failed to remove the partly written {}: {error}",
+                                file.display()
+                            ));
+                        }
+                    }
+                }
+            }
+            for message in messages {
                 failed = true;
-                let message = format!("failed to write {}: {error}", file.display());
                 report_failure(&mut stdout, cli.format, &message);
                 if let Some(text) = &mut summary_text {
-                    text.push_str(&format!("error: {message}\n"));
-                }
-                if truncated && let Err(error) = fs::remove_file(file) {
-                    report_failure(
-                        &mut stdout,
-                        cli.format,
-                        &format!(
-                            "failed to remove the partly written {}: {error}",
-                            file.display()
-                        ),
-                    );
+                    text.insert_str(0, &format!("error: {message}\n"));
                 }
             }
         }

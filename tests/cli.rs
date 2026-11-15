@@ -387,6 +387,9 @@ fn a_read_only_sarif_file_that_cannot_be_opened_is_kept() {
     let sarif = directory.path().join("sekimori.sarif");
     std::fs::write(&sarif, "earlier").unwrap();
     std::fs::set_permissions(&sarif, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&sarif).is_ok() {
+        return;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
         .arg("--sarif-file")
         .arg(&sarif)
@@ -395,4 +398,21 @@ fn a_read_only_sarif_file_that_cannot_be_opened_is_kept() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(std::fs::read_to_string(&sarif).unwrap(), "earlier");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_sarif_file_can_be_a_pipe() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--sarif-file", "/dev/stdout"])
+        .arg(Path::new(FIXTURES).join("ci.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("\"version\": \"2.1.0\"")
+    );
+    assert!(output.stderr.is_empty());
 }
