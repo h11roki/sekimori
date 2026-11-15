@@ -33,19 +33,16 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Plain)]
     format: Format,
     #[arg(long, value_name = "PATH")]
-    sarif_file: Option<PathBuf>,
+    sarif_file: Option<OsString>,
     #[arg(long, value_name = "PATH")]
     summary_file: Option<OsString>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let wants_sarif = matches!(cli.format, Format::Sarif) || cli.sarif_file.is_some();
-    let summary_file = cli
-        .summary_file
-        .as_ref()
-        .filter(|file| !file.is_empty())
-        .map(PathBuf::from);
+    let sarif_file = given_path(&cli.sarif_file);
+    let summary_file = given_path(&cli.summary_file);
+    let wants_sarif = matches!(cli.format, Format::Sarif) || sarif_file.is_some();
     let mut stdout = io::stdout().lock();
     let mut errors = Vec::new();
     let mut results = Vec::new();
@@ -74,8 +71,9 @@ fn main() -> ExitCode {
                     }
                     Format::Plain | Format::Sarif => eprintln!("{line}"),
                 }
-                plain_text.push_str(&line);
-                plain_text.push('\n');
+                if summary_file.is_some() {
+                    plain_text.push_str(&format!("{line}\n"));
+                }
                 errors.push(error.to_string());
             }
         }
@@ -103,8 +101,9 @@ fn main() -> ExitCode {
                     }
                     Format::Sarif => {}
                 }
-                plain_text.push_str(&line);
-                plain_text.push('\n');
+                if summary_file.is_some() {
+                    plain_text.push_str(&format!("{line}\n"));
+                }
             }
         }
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();
@@ -113,22 +112,29 @@ fn main() -> ExitCode {
         }
         found = true;
         for finding in &findings {
-            let written = match cli.format {
-                Format::Plain => stdout.write_all(plain(workflow, finding).as_bytes()),
-                Format::Github => stdout.write_all(github(workflow, &path, finding).as_bytes()),
-                Format::Sarif => Ok(()),
+            let text = (matches!(cli.format, Format::Plain) || summary_file.is_some())
+                .then(|| plain(workflow, finding));
+            let written = match (cli.format, &text) {
+                (Format::Plain, Some(text)) => stdout.write_all(text.as_bytes()),
+                (Format::Github, _) => {
+                    stdout.write_all(github(workflow, &path, finding).as_bytes())
+                }
+                _ => Ok(()),
             };
             if let Err(error) = written {
                 return write_failure(&error);
             }
-            if summary_file.is_some() {
-                plain_text.push_str(&plain(workflow, finding));
+            if summary_file.is_some()
+                && let Some(text) = text
+            {
+                plain_text.push_str(&text);
             }
         }
         if wants_sarif {
             results.extend(sarif_results(workflow, &artifact_uri(&path), &findings));
         }
     }
+    let mut failure = None;
     if wants_sarif {
         let mut document = match serde_json::to_vec_pretty(&sarif_log(results, &errors)) {
             Ok(document) => document,
@@ -140,23 +146,36 @@ fn main() -> ExitCode {
         {
             return write_failure(&error);
         }
-        if let Some(file) = &cli.sarif_file
+        if let Some(file) = &sarif_file
             && let Err(error) = fs::write(file, &document)
         {
-            return file_failure(file, &error);
+            failure = Some(file_failure(file, &error));
         }
     }
-    if let Some(file) = &summary_file
-        && let Some(markdown) = summary(&plain_text)
-    {
-        let appended = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(file)
-            .and_then(|mut opened| write!(opened, "\n{markdown}"));
+    if let Some(file) = &summary_file {
+        let appended = fs::metadata(file)
+            .map(|metadata| metadata.len())
+            .or_else(|error| match error.kind() {
+                io::ErrorKind::NotFound => Ok(0),
+                _ => Err(error),
+            })
+            .and_then(|already_written| {
+                let already_written = usize::try_from(already_written).unwrap_or(usize::MAX);
+                match summary(&plain_text, already_written) {
+                    Some(markdown) => OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(file)
+                        .and_then(|mut opened| opened.write_all(markdown.as_bytes())),
+                    None => Ok(()),
+                }
+            });
         if let Err(error) = appended {
-            return file_failure(file, &error);
+            failure = Some(file_failure(file, &error));
         }
+    }
+    if let Some(failure) = failure {
+        return failure;
     }
     if !errors.is_empty() {
         ExitCode::from(EXIT_FAILURE)
@@ -175,4 +194,11 @@ fn write_failure(error: &io::Error) -> ExitCode {
 fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
     eprintln!("error: failed to write {}: {error}", file.display());
     ExitCode::from(EXIT_FAILURE)
+}
+
+fn given_path(value: &Option<OsString>) -> Option<PathBuf> {
+    value
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }

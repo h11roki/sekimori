@@ -18,7 +18,7 @@ const UNC_URI_PREFIX: &str = "//";
 const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
-const SUMMARY_LIMIT: usize = 500_000;
+const SUMMARY_FILE_LIMIT: usize = 1_000_000;
 const SUMMARY_INDENT: &str = "    ";
 const SUMMARY_CUT_NOTE: &str =
     "The output was cut to fit the job summary. See the log for every finding.";
@@ -77,12 +77,20 @@ pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
     )
 }
 
-pub fn summary(plain: &str) -> Option<String> {
+pub fn summary(output: &str, already_written: usize) -> Option<String> {
+    let heading = format!("\n## {TOOL_NAME}\n\n");
+    let cut_note = format!("\n{SUMMARY_CUT_NOTE}\n");
+    let room = SUMMARY_FILE_LIMIT.checked_sub(already_written + heading.len() + cut_note.len())?;
     let mut body = String::new();
     let mut cut = false;
-    for line in plain.replace("\r\n", "\n").replace('\r', "\n").lines() {
+    let lines = output
+        .strip_suffix('\n')
+        .unwrap_or(output)
+        .split('\n')
+        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'));
+    for line in lines {
         let indented = format!("{SUMMARY_INDENT}{line}\n");
-        if body.len() + indented.len() > SUMMARY_LIMIT {
+        if body.len() + indented.len() > room {
             cut = true;
             break;
         }
@@ -91,12 +99,8 @@ pub fn summary(plain: &str) -> Option<String> {
     if body.trim().is_empty() && !cut {
         return None;
     }
-    let note = if cut {
-        format!("\n{SUMMARY_CUT_NOTE}\n")
-    } else {
-        String::new()
-    };
-    Some(format!("## {TOOL_NAME}\n\n{body}{note}"))
+    let note = if cut { cut_note } else { String::new() };
+    Some(format!("{heading}{body}{note}"))
 }
 
 fn annotation(
@@ -343,36 +347,50 @@ mod tests {
     #[test]
     fn the_summary_indents_every_line_and_turns_carriage_returns_into_lines() {
         assert_eq!(
-            summary("a\r\nb\rc\n").unwrap(),
-            "## sekimori\n\n    a\n    b\n    c\n"
+            summary("a\r\nb\rc\n", 0).unwrap(),
+            "\n## sekimori\n\n    a\n    b\n    c\n"
         );
     }
 
     #[test]
     fn an_empty_output_has_no_summary() {
-        assert_eq!(summary(""), None);
-        assert_eq!(summary("\n"), None);
+        assert_eq!(summary("", 0), None);
+        assert_eq!(summary("\n", 0), None);
     }
 
     #[test]
     fn the_summary_stops_before_the_line_that_would_pass_the_limit() {
         let line = "x".repeat(99);
-        let plain = format!("{line}\n").repeat(SUMMARY_LIMIT / 100 + 1);
-        let written = summary(&plain).unwrap();
-        let kept = written
-            .lines()
-            .filter(|text| *text == format!("{SUMMARY_INDENT}{line}"))
-            .count();
-        assert_eq!(kept, SUMMARY_LIMIT / (SUMMARY_INDENT.len() + 100));
+        let output = format!("{line}\n").repeat(SUMMARY_FILE_LIMIT / 100);
+        let written = summary(&output, 0).unwrap();
+        assert!(written.len() <= SUMMARY_FILE_LIMIT);
         assert!(written.ends_with(&format!("\n{SUMMARY_CUT_NOTE}\n")));
+        let body: Vec<_> = written
+            .lines()
+            .skip(3)
+            .take_while(|text| !text.is_empty())
+            .collect();
+        assert!(
+            body.iter()
+                .all(|text| *text == format!("{SUMMARY_INDENT}{line}"))
+        );
+        assert!(SUMMARY_FILE_LIMIT - written.len() < SUMMARY_INDENT.len() + line.len() + 1);
     }
 
     #[test]
-    fn a_summary_that_fits_exactly_is_not_cut() {
-        let line = "x".repeat(SUMMARY_LIMIT - SUMMARY_INDENT.len() - 1);
-        let written = summary(&line).unwrap();
+    fn the_limit_counts_what_the_file_already_holds() {
+        let output = "x\n".repeat(1000);
+        let written = summary(&output, SUMMARY_FILE_LIMIT - 1000).unwrap();
+        assert!(SUMMARY_FILE_LIMIT - 1000 + written.len() <= SUMMARY_FILE_LIMIT);
+        assert!(written.contains(SUMMARY_CUT_NOTE));
+        assert_eq!(summary(&output, SUMMARY_FILE_LIMIT), None);
+    }
+
+    #[test]
+    fn a_summary_that_fits_is_not_cut() {
+        let written = summary(&"x\n".repeat(1000), 0).unwrap();
         assert!(!written.contains(SUMMARY_CUT_NOTE));
-        assert!(written.ends_with(&format!("{line}\n")));
+        assert_eq!(written.matches("    x\n").count(), 1000);
     }
 
     #[test]
