@@ -83,3 +83,4 @@
 | [0042](0042-codex-separate-user.md) | `safety-strategy: unprivileged-user` の Codex には、ステップの env が届かないとみなす | 承認 |
 | [0043](0043-shell-file-writers.md) | ファイルを書き換えるシェルのコマンドを許すことも、書き換えとして数える | 承認 |
 | [0044](0044-auto-mode.md) | claude-code-action の auto モードは、それだけでは広い道具として数えない | 承認 |
+| [0045](0045-crates-io-trusted-publishing.md) | crates.io には、リリースのワークフローから Trusted Publishing で出す | 承認 |
