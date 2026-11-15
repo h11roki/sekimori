@@ -323,6 +323,12 @@ jobs:
                 "      - run: echo '${{ toJSON(steps.agent.outputs) }}' | jq .session_id",
             ),
             (
+                "google-github-actions/run-gemini-cli@v0
+        if: inputs.mode == 'review'",
+                "      - if: inputs.mode == 'fix'
+        run: echo \"${{ steps.agent.outputs.summary }}\"",
+            ),
+            (
                 "google-github-actions/run-gemini-cli@v0",
                 "      - if: false
         run: echo \"${{ steps.agent.outputs.summary }}\"",

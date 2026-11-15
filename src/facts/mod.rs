@@ -7,7 +7,10 @@ mod workspace;
 
 use std::ops::Range;
 
+use github_actions_expressions::call::Function;
 use github_actions_expressions::context::Context;
+use github_actions_expressions::literal::Literal;
+use github_actions_expressions::op::{BinExpr, BinOp, UnOp};
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use github_actions_models::common::{Env, EnvValue, If};
@@ -37,6 +40,24 @@ const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
+const STABLE_CONTEXTS: [&str; 15] = [
+    "inputs.",
+    "vars.",
+    "needs.",
+    "matrix.",
+    "github.event.",
+    "github.event_name",
+    "github.ref",
+    "github.head_ref",
+    "github.base_ref",
+    "github.repository",
+    "github.actor",
+    "github.triggering_actor",
+    "github.workflow",
+    "github.sha",
+    "github.job",
+];
+const NUMBER_WORDS: [&str; 2] = ["infinity", "nan"];
 const HEREDOC: &str = "<<";
 const HERE_STRING: &str = "<<<";
 const SHELL_KEYWORDS: [&str; 9] = [
@@ -103,6 +124,16 @@ fn before_comment(text: &str) -> &str {
 }
 
 fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)> {
+    let agent_facts: Vec<ValueFact> = step
+        .step
+        .shared
+        .r#if
+        .as_ref()
+        .and_then(parse_condition)
+        .map_or_else(Vec::new, |condition| value_facts(&condition));
+    if contradicts(&agent_facts, &[]) {
+        return Vec::new();
+    }
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
@@ -111,14 +142,150 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
                 JobStep::Run(run) => &run.shared,
                 JobStep::Uses(uses) => &uses.shared,
             };
-            !shared
-                .r#if
-                .as_ref()
-                .and_then(parse_condition)
-                .is_some_and(|condition| constant_false(&condition))
+            let Some(condition) = shared.r#if.as_ref().and_then(parse_condition) else {
+                return true;
+            };
+            !constant_false(&condition) && !contradicts(&agent_facts, &value_facts(&condition))
         })
         .map(|(_, route, later)| (route, later))
         .collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Membership {
+    OneOf,
+    NoneOf,
+}
+
+struct ValueFact {
+    value: String,
+    membership: Membership,
+    constants: Vec<String>,
+}
+
+impl ValueFact {
+    fn rules_out(&self, constant: &String) -> bool {
+        match self.membership {
+            Membership::OneOf => !self.constants.contains(constant),
+            Membership::NoneOf => self.constants.contains(constant),
+        }
+    }
+}
+
+fn contradicts(first: &[ValueFact], second: &[ValueFact]) -> bool {
+    let facts = || first.iter().chain(second);
+    facts()
+        .filter(|fact| fact.membership == Membership::OneOf)
+        .any(|fact| {
+            fact.constants.iter().all(|constant| {
+                facts().any(|other| other.value == fact.value && other.rules_out(constant))
+            })
+        })
+}
+
+fn value_facts(condition: &SpannedExpr) -> Vec<ValueFact> {
+    let fact = |value: &SpannedExpr, membership, constants: Vec<String>| {
+        Some(ValueFact {
+            value: stable_value(value)?,
+            membership,
+            constants: comparable_constants(constants)?,
+        })
+    };
+    let membership_fact = |expression: &SpannedExpr, membership| match &expression.inner {
+        Expr::Call(call) if call.func == Function::Contains => match call.args.as_slice() {
+            [list, value] => fact(value, membership, json_string_list(list)?),
+            _ => None,
+        },
+        _ => None,
+    };
+    match &condition.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => {
+            let mut facts = value_facts(lhs);
+            facts.extend(value_facts(rhs));
+            facts
+        }
+        Expr::BinExpr(BinExpr {
+            op: op @ (BinOp::Eq | BinOp::Neq),
+            lhs,
+            rhs,
+        }) => {
+            let membership = if *op == BinOp::Eq {
+                Membership::OneOf
+            } else {
+                Membership::NoneOf
+            };
+            match (&lhs.inner, &rhs.inner) {
+                (_, Expr::Literal(Literal::String(constant))) => {
+                    fact(lhs, membership, vec![constant.to_string()])
+                }
+                (Expr::Literal(Literal::String(constant)), _) => {
+                    fact(rhs, membership, vec![constant.to_string()])
+                }
+                _ => None,
+            }
+            .into_iter()
+            .collect()
+        }
+        Expr::UnExpr {
+            op: UnOp::Not,
+            expr,
+        } => membership_fact(expr, Membership::NoneOf)
+            .into_iter()
+            .collect(),
+        _ => membership_fact(condition, Membership::OneOf)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn stable_value(expression: &SpannedExpr) -> Option<String> {
+    let Expr::Context(context) = &expression.inner else {
+        return None;
+    };
+    if context
+        .parts
+        .iter()
+        .any(|part| matches!(part.inner, Expr::Index(_) | Expr::Star))
+    {
+        return None;
+    }
+    context.as_pattern().filter(|pattern| {
+        STABLE_CONTEXTS
+            .iter()
+            .any(|prefix| pattern.starts_with(prefix))
+    })
+}
+
+fn comparable_constants(constants: Vec<String>) -> Option<Vec<String>> {
+    constants
+        .into_iter()
+        .map(|constant| {
+            let trimmed = constant.trim();
+            let comparable = trimmed.is_ascii()
+                && trimmed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && !NUMBER_WORDS
+                    .iter()
+                    .any(|word| trimmed.eq_ignore_ascii_case(word));
+            comparable.then(|| constant.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+fn json_string_list(expression: &SpannedExpr) -> Option<Vec<String>> {
+    let Expr::Call(from_json) = &expression.inner else {
+        return None;
+    };
+    let (Function::FromJSON, [json]) = (&from_json.func, from_json.args.as_slice()) else {
+        return None;
+    };
+    let Expr::Literal(Literal::String(text)) = &json.inner else {
+        return None;
+    };
+    serde_json::from_str(text).ok()
 }
 
 fn shell_programs(run: &str) -> Vec<Vec<String>> {

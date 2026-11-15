@@ -68,3 +68,4 @@
 | [0027](0027-agent-output-injection.md) | エージェントの出力を後のステップがコードとして展開する形を、道具の軸の規則 `agent-output-injection` として数える | 承認 |
 | [0028](0028-agent-code-with-secrets.md) | エージェントが書き換えられるコードを、後のステップが秘密情報を持って動かす形を、権限と秘密情報の軸の規則 `agent-code-with-secrets` として数える | 承認 |
 | [0029](0029-no-push-rule.md) | エージェントの後の push、マージ、公開は、規則にしない | 承認 |
+| [0030](0030-exclusive-step-conditions.md) | エージェントのステップと両立しない `if:` を持つ後のステップは、同じ実行では動かないとみなす | 承認 |
