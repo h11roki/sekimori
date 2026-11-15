@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -48,13 +49,12 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        let mut warnings: Vec<String> = Vec::new();
+        let mut warned = HashSet::new();
         for assessment in &assessments {
             for message in assessment.warnings() {
                 let line = warning(workflow, assessment, message);
-                if !warnings.contains(&line) {
+                if warned.insert(line.clone()) {
                     eprintln!("{line}");
-                    warnings.push(line);
                 }
             }
         }

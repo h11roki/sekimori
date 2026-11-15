@@ -227,7 +227,7 @@ If you accept the risk of an agent step, add a comment on its `uses:` line namin
       - uses: google-github-actions/run-gemini-cli@v0 # sekimori: ignore[broad-tools]
 ```
 
-List several rule IDs with commas, or write `# sekimori: ignore` with nothing after it to ignore every rule for that step. The directive can follow another comment on the line, such as the version comment of a SHA-pinned action: `# v1.0.5 # sekimori: ignore[broad-tools]`. Ignored findings are left out of the output and the exit code. A directive that cannot be read, or names an unknown rule, is reported as a warning on standard error. The level of the step does not change, so the remaining findings still show every axis, including the reason behind an ignored rule.
+List several rule IDs with commas, or write `# sekimori: ignore` with nothing after it to ignore every rule for that step. The directive can follow another comment on the line, such as the version comment of a SHA-pinned action: `# v1.0.5 # sekimori: ignore[broad-tools]`. Ignored findings are left out of the output and the exit code. On a step that has findings before ignoring, a directive that cannot be read, or names an unknown rule, is reported as a warning on standard error. Write a reason after the closing bracket or in another comment, as in `# sekimori: ignore # accepted risk`. The level of the step does not change, so the remaining findings still show every axis, including the reason behind an ignored rule.
 
 ## Limitations
 

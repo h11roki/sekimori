@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 
 use serde_json::{Value, json};
 
-use crate::rules::{Assessment, Finding, HALVES_PER_POINT, MAX_TOTAL, Rule, USES_KEY};
+use crate::rules::{Assessment, Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
 const LABEL_WIDTH: usize = 21;
@@ -19,7 +19,7 @@ const URI_UNRESERVED: &str = "-._~/";
 
 pub fn warning(workflow: &Workflow, assessment: &Assessment, message: &str) -> String {
     let (line, column) = workflow
-        .position(&assessment.step.route.with_key(USES_KEY))
+        .position(&assessment.directive_route())
         .unwrap_or((1, 1));
     format!(
         "{}:{line}:{column}: warning: {message}",
