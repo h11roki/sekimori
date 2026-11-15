@@ -92,13 +92,39 @@ sekimori path/to/workflow.yml    # files or directories
 sekimori --format sarif > sekimori.sarif
 ```
 
+For this workflow, which lets anyone start Gemini CLI with a comment:
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  gemini:
+    if: contains(github.event.comment.body, '@gemini-cli')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: ${{ github.event.comment.body }}
+```
+
+sekimori prints:
+
 ```text
-.github/workflows/codex.yml:8:11: error[unrestricted-trigger]: openai/codex-action@v1 in job `codex` can be started without write access
-  who can trigger      1    allow-users: '*', on issue_comment
-  allowed tools        1    safety-strategy: unsafe
+.github/workflows/gemini.yml:10:9: error[unrestricted-trigger]: google-github-actions/run-gemini-cli@v0 in job `gemini` can be started without write access
+  who can trigger      1    the `if:` does not check who triggered it, on issue_comment
+  allowed tools        1    no `settings`, so tools.core is unset and every built-in tool runs under --yolo
+  permissions/secrets  1    no permissions are set, so GITHUB_TOKEN gets the repository default
+  total                3 of 3
+.github/workflows/gemini.yml:10:9: error[broad-tools]: google-github-actions/run-gemini-cli@v0 in job `gemini` can run unrestricted tools
+  who can trigger      1    the `if:` does not check who triggered it, on issue_comment
+  allowed tools        1    no `settings`, so tools.core is unset and every built-in tool runs under --yolo
   permissions/secrets  1    no permissions are set, so GITHUB_TOKEN gets the repository default
   total                3 of 3
 ```
+
+Each rule that matched is printed with the step's breakdown. [Fixing findings](#fixing-findings) shows how to change this workflow.
 
 | Exit code | Meaning |
 |---|---|
