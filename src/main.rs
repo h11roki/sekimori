@@ -17,6 +17,7 @@ use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
 const EXIT_FINDINGS: u8 = 1;
 const EXIT_FAILURE: u8 = 2;
+const PARTIAL_SUFFIX: &str = ".partial";
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Format {
@@ -143,9 +144,9 @@ fn main() -> ExitCode {
             return write_failure(&error);
         }
         if let Some(file) = &sarif_file
-            && let Err(error) = fs::write(file, &document)
+            && let Err(error) = write_whole(file, &document)
         {
-            failure = Some(file_failure(file, &error));
+            failure = Some(file_failure(&mut stdout, cli.format, file, &error));
         }
     }
     if let (Some(file), Some(text)) = (&summary_file, &summary_text) {
@@ -167,7 +168,7 @@ fn main() -> ExitCode {
                 }
             });
         if let Err(error) = appended {
-            failure = Some(file_failure(file, &error));
+            failure = Some(file_failure(&mut stdout, cli.format, file, &error));
         }
     }
     if let Some(failure) = failure {
@@ -187,9 +188,36 @@ fn write_failure(error: &io::Error) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
-fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
-    eprintln!("error: failed to write {}: {error}", file.display());
+fn file_failure(
+    stdout: &mut impl Write,
+    format: Format,
+    file: &Path,
+    error: &io::Error,
+) -> ExitCode {
+    let message = format!("failed to write {}: {error}", file.display());
+    let annotated = matches!(format, Format::Github)
+        && stdout
+            .write_all(github_error(None, &message).as_bytes())
+            .is_ok();
+    if !annotated {
+        eprintln!("error: {message}");
+    }
     ExitCode::from(EXIT_FAILURE)
+}
+
+fn write_whole(file: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut partial = file.as_os_str().to_owned();
+    partial.push(PARTIAL_SUFFIX);
+    let partial = PathBuf::from(partial);
+    fs::write(&partial, contents)
+        .and_then(|()| fs::rename(&partial, file))
+        .inspect_err(|_| {
+            if let Err(error) = fs::remove_file(&partial)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("error: failed to remove {}: {error}", partial.display());
+            }
+        })
 }
 
 fn given_path(value: Option<&OsStr>) -> Option<PathBuf> {
