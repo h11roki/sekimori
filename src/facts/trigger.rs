@@ -28,6 +28,7 @@ const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
 const UPSTREAM_BRANCH: &str = "github.event.workflow_run.head_branch";
+const THIS_REPOSITORY_NAMES: [&str; 2] = [THIS_REPOSITORY, "github.event.repository.full_name"];
 const DEFAULT_BRANCH: &str = "github.event.repository.default_branch";
 type EventPresent = fn(&Events) -> bool;
 const UPSTREAM_EVENTS: [(&str, UpstreamOrigin, EventPresent); 8] = [
@@ -522,7 +523,10 @@ pub(super) fn upstream_on_default_branch(step: &AgentStep) -> bool {
             .flatten()
             .any(|condition| requires_equal(condition, first, second))
     };
-    required(UPSTREAM_REPOSITORY, THIS_REPOSITORY) && required(UPSTREAM_BRANCH, DEFAULT_BRANCH)
+    THIS_REPOSITORY_NAMES
+        .iter()
+        .any(|this| required(UPSTREAM_REPOSITORY, this))
+        && required(UPSTREAM_BRANCH, DEFAULT_BRANCH)
 }
 
 fn requires_equal(expression: &SpannedExpr, first: &str, second: &str) -> bool {
@@ -651,14 +655,10 @@ fn upstream_fact(expression: &SpannedExpr) -> UpstreamPath {
             {
                 events(vec![name.to_ascii_lowercase()])
             }
-            (Expr::Context(_), Expr::Context(_))
-                if equal_contexts(expression, UPSTREAM_REPOSITORY, THIS_REPOSITORY) =>
-            {
-                UpstreamPath {
-                    same_repository: true,
-                    ..UpstreamPath::ANY
-                }
-            }
+            _ if equal_contexts(expression, UPSTREAM_REPOSITORY, THIS_REPOSITORY) => UpstreamPath {
+                same_repository: true,
+                ..UpstreamPath::ANY
+            },
             _ => UpstreamPath::ANY,
         },
         Expr::Call(call) if matches!(call.func, Function::Contains) => match call.args.as_slice() {

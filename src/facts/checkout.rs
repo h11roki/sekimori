@@ -41,6 +41,10 @@ const HEAD_REPOSITORIES: [&str; 2] = [
 ];
 const WORKFLOW_RUN_PULL_REQUESTS: &str = "github.event.workflow_run.pull_requests[";
 const UPSTREAM_HEAD: &str = "github.event.workflow_run.head_";
+const TRUSTED_UPSTREAM_VALUES: [&str; 2] = [
+    "${{github.event.workflow_run.head_sha}}",
+    "${{github.event.workflow_run.head_repository.full_name}}",
+];
 const PULL_REQUEST_HEAD_COMMIT: &str = ".head.sha";
 const PULL_REQUEST_HEAD_REPOSITORY: &str = ".head.repo.";
 const PULL_REFSPEC: &str = "pull/";
@@ -92,7 +96,8 @@ pub fn head_checkout<'w>(
         ),
         Agent::Codex => None,
     }?;
-    let trusted_upstream = upstream_on_default_branch(step);
+    let trusted_upstream =
+        events.contains(&ExternalEvent::WorkflowRun) && upstream_on_default_branch(step);
     let mut head = None;
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
@@ -191,23 +196,22 @@ fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
         Input::Text { key, value } => Some((key, value)),
         Input::Missing | Input::Unreadable => None,
     };
-    let repository = text("repository");
-    let reference = text("ref");
+    let trusted = |value: &str| {
+        trusted_upstream && TRUSTED_UPSTREAM_VALUES.contains(&normalized(value).as_str())
+    };
+    let repository = text("repository").filter(|(_, value)| !trusted(value));
+    let reference = text("ref").filter(|(_, value)| !trusted(value));
     if let Some((key, value)) = repository
-        .filter(|(_, value)| names_head_repository(&normalized(value), trusted_upstream))
-        .or(reference.filter(|(_, value)| names_head_commit(&normalized(value), trusted_upstream)))
+        .filter(|(_, value)| names_head_repository(&normalized(value), false))
+        .or(reference.filter(|(_, value)| names_head_commit(&normalized(value), false)))
     {
         return RootCheckout::Head(key, value);
     }
-    let trusted = |value: &str| trusted_upstream && value.contains(UPSTREAM_HEAD);
-    let base_repository = repository.is_none_or(|(_, value)| {
-        let value = normalized(value);
-        value == BASE_REPOSITORY_EXPRESSION || trusted(&value)
-    });
+    let base_repository =
+        repository.is_none_or(|(_, value)| normalized(value) == BASE_REPOSITORY_EXPRESSION);
     let base_reference = reference.is_none_or(|(_, value)| {
         let value = normalized(value);
         !value.contains(EXPRESSION_START)
-            || trusted(&value)
             || BASE_REFERENCES
                 .iter()
                 .any(|context| value.contains(context))
@@ -431,6 +435,12 @@ jobs:
             ),
             None
         );
+        assert_eq!(
+            with_condition(
+                "github.event.workflow_run.head_repository.full_name == github.event.repository.full_name && github.event.workflow_run.head_branch == github.event.repository.default_branch"
+            ),
+            None
+        );
         let checked_out_by = |steps: &str| {
             found(&format!(
                 "on: workflow_run
@@ -447,6 +457,18 @@ jobs:
         assert!(
             checked_out_by(
                 "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.pull_requests[0].head.sha }}\n"
+            )
+            .is_some()
+        );
+        assert!(
+            checked_out_by(
+                "      - run: gh pr checkout \"$PR\"\n      - uses: actions/checkout@v6\n        with:\n          ref: ${{ steps.pr.outputs.sha || github.event.workflow_run.head_sha }}\n"
+            )
+            .is_some()
+        );
+        assert!(
+            checked_out_by(
+                "      - uses: actions/checkout@v6\n        with:\n          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}\n"
             )
             .is_some()
         );

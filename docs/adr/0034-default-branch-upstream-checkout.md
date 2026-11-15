@@ -25,7 +25,8 @@
 
 高橋さんが判断を任せ(2026-11-15 に「止まらないで。開発改善を進めて」)、Claude が 1 を選んだ。
 
-- 2 つの等しさは、左右どちらの向きでもよい。`!=` や `||` の中は読まない
+- 2 つの等しさは、左右どちらの向きでもよい。同じリポジトリは `github.repository` か `github.event.repository.full_name` と比べる形を読む。`!=` や `||` の中は読まない
+- `actions/checkout` で base の取り出しとみなすのは、`ref` か `repository` の値がそのまま `${{ github.event.workflow_run.head_sha }}` か `${{ github.event.workflow_run.head_repository.full_name }}` のときだけ。他の値と `||` などで混ぜた式は、これまでどおり読む
 - 除くのは workflow_run の `head_sha` と `head_repository` だけ。`gh pr checkout`、`refs/pull/N/head`、`workflow_run.pull_requests[0].head.sha` のように PR を名指しする取り出しは、これまでどおり PR の head とする
 - 起動できる人の軸(ADR 0022、0024)は変えない。上流が `issue_comment` で動くなら、外部の人の実行も既定の枝で動き、この条件を通るため
 
