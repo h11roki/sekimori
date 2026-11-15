@@ -166,3 +166,14 @@ fn ignored_findings_leave_the_output_and_the_exit_code() {
     let log: serde_json::Value = serde_json::from_slice(&sarif.stdout).unwrap();
     assert_eq!(log["runs"][0]["results"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn an_unknown_rule_in_an_ignore_directive_is_warned_about_on_stderr() {
+    let output = sekimori(&["ignored/typo.yml"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("warning: `broad-tool` is not a sekimori rule"));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("[broad-tools]"));
+    assert!(!stdout.contains("[unrestricted-trigger]"));
+}

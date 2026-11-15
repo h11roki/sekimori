@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 
 use serde_json::{Value, json};
+use yamlpath::Route;
 
 use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
@@ -16,6 +17,14 @@ const UNC_URI_PREFIX: &str = "//";
 const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
+
+pub fn warning(workflow: &Workflow, route: &Route, message: &str) -> String {
+    let (line, column) = workflow.position(route).unwrap_or((1, 1));
+    format!(
+        "{}:{line}:{column}: warning: {message}",
+        workflow.path.display()
+    )
+}
 
 pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));

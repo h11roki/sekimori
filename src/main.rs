@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use sekimori::facts::Upstreams;
-use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results};
+use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results, warning};
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
@@ -48,6 +49,17 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
+        if let Format::Plain = cli.format {
+            let mut warned = HashSet::new();
+            for assessment in &assessments {
+                for message in assessment.warnings() {
+                    let line = warning(workflow, &assessment.directive_route(), message);
+                    if warned.insert(line.clone()) {
+                        eprintln!("{line}");
+                    }
+                }
+            }
+        }
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();
         if findings.is_empty() {
             continue;
