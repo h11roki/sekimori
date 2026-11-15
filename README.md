@@ -80,10 +80,10 @@ gh attestation verify sekimori-aarch64-apple-darwin \
 chmod +x sekimori-aarch64-apple-darwin
 ```
 
-Or build it from source with Rust 1.99.1:
+Or build it from [crates.io](https://crates.io/crates/sekimori) with Rust 1.99.1:
 
 ```sh
-cargo install --locked --git https://github.com/h11roki/sekimori --tag v0.15.0
+cargo install --locked sekimori
 ```
 
 Then run it in your repository:
