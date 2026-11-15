@@ -272,7 +272,7 @@ fn assess_step<'w>(
     }
     if let Some(secret) = injection.and_then(|injection| injection.secret) {
         secret_reasons.push(format!(
-            "{secret} reaches the step that runs the agent's output"
+            "{secret} reaches a later step that runs the agent's output"
         ));
     }
     secret_reasons.extend(write_permission(workflow, step.job));
@@ -758,7 +758,7 @@ jobs:
             assessment.permissions_and_secrets,
             score(
                 Weight::Full,
-                "secrets.DEPLOY_KEY reaches the step that runs the agent's output"
+                "secrets.DEPLOY_KEY reaches a later step that runs the agent's output"
             )
         );
     }

@@ -150,6 +150,12 @@ fn flowing_contexts<'a, 'src>(expression: &'a SpannedExpr<'src>) -> Vec<&'a Cont
         .collect()
 }
 
+fn constant_false(condition: &SpannedExpr) -> bool {
+    condition
+        .consteval()
+        .is_some_and(|value| !value.as_boolean())
+}
+
 fn parse_condition(condition: &If) -> Option<SpannedExpr<'_>> {
     match condition {
         If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),

@@ -220,6 +220,7 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
 - It only knows the settings of the three actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
 - `if:` conditions on earlier jobs in `needs:` count when the agent job waits for them to succeed, directly or through other jobs: a waiting job's `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. `needs:` names must match job IDs exactly, including case. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
+- `agent-output-injection` reads only steps later in the agent's job: `run` scripts and `actions/github-script` `script`, directly or through `${{ env.NAME }}`. It does not follow job `outputs` into other jobs, wildcards such as `steps.*.outputs.summary`, other actions that take code, or `shell:` and `working-directory:`.
 
 ## Survey
 

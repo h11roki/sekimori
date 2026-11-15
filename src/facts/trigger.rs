@@ -9,7 +9,7 @@ use github_actions_models::workflow::Job;
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
-use super::{input, input_route, parse_condition};
+use super::{constant_false, input, input_route, parse_condition};
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
 
@@ -167,12 +167,9 @@ pub struct OpenTrigger<'w> {
 }
 
 pub fn never_runs(step: &AgentStep) -> bool {
-    conditions(step).iter().any(|condition| {
-        condition
-            .as_ref()
-            .and_then(|expression| expression.consteval())
-            .is_some_and(|value| !value.as_boolean())
-    })
+    conditions(step)
+        .iter()
+        .any(|condition| condition.as_ref().is_some_and(constant_false))
 }
 
 pub fn open_trigger<'w>(

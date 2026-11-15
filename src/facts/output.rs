@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use github_actions_expressions::call::Function;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
@@ -6,8 +8,8 @@ use yamlpath::{Component, Route};
 
 use super::secrets::shell_secret;
 use super::{
-    Input, expression_spans, flowing_contexts, lookup_in, nearest_env, parse_condition,
-    parse_expression,
+    ENV_CONTEXT, Input, constant_false, expression_spans, flowing_contexts, input, lookup_in,
+    nearest_env, parse_condition, parse_expression,
 };
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
@@ -17,6 +19,8 @@ const SCRIPT_INPUT: &str = "script";
 const RUN_KEY: &str = "run";
 const WITH_KEY: &str = "with";
 const STEPS_CONTEXT: &str = "steps";
+const CLAUDE_ARGS_INPUT: &str = "claude_args";
+const JSON_SCHEMA_FLAG: &str = "--json-schema";
 
 #[derive(Debug)]
 pub struct OutputInjection<'w> {
@@ -39,24 +43,34 @@ pub fn output_injection<'w>(
         .iter()
         .map(|output| format!("steps.{id}.outputs.{output}"))
         .collect();
-    let aggregates = [
-        format!("steps.{id}.outputs"),
-        format!("steps.{id}"),
-        STEPS_CONTEXT.to_string(),
-    ];
+    let aggregates_hold_model_text = step.agent != Agent::ClaudeCode
+        || input(step, CLAUDE_ARGS_INPUT)
+            .is_some_and(|(_, value)| value.contains(JSON_SCHEMA_FLAG));
+    let aggregates: Vec<String> = if aggregates_hold_model_text {
+        vec![
+            format!("steps.{id}.outputs"),
+            format!("steps.{id}"),
+            STEPS_CONTEXT.to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
     let mut expansions = job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
         .filter_map(|(_, route, later)| {
-            let (shared, key, code, code_route) = match later {
+            let (shared, key, code, code_route, script_inputs) = match later {
                 JobStep::Run(run) => (
                     &run.shared,
                     RUN_KEY,
                     run.run.as_str(),
                     route.with_key(RUN_KEY),
+                    None,
                 ),
                 JobStep::Uses(uses) if is_root_action(&uses.uses, SCRIPT_ACTION) => {
-                    let Input::Text { key, value } = lookup_in(&uses.with, SCRIPT_INPUT) else {
+                    let (LoE::Literal(with), Input::Text { key, value }) =
+                        (&uses.with, lookup_in(&uses.with, SCRIPT_INPUT))
+                    else {
                         return None;
                     };
                     (
@@ -64,6 +78,7 @@ pub fn output_injection<'w>(
                         key,
                         value,
                         route.with_keys([Component::from(WITH_KEY), Component::from(key)]),
+                        Some(with),
                     )
                 }
                 JobStep::Uses(_) => return None,
@@ -72,39 +87,30 @@ pub fn output_injection<'w>(
                 .r#if
                 .as_ref()
                 .and_then(parse_condition)
-                .and_then(|condition| condition.consteval())
-                .is_some_and(|value| !value.as_boolean());
+                .is_some_and(|condition| constant_false(&condition));
             if never_runs {
                 return None;
             }
-            let output = expression_spans(code).into_iter().find_map(|span| {
-                let expression = parse_expression(&code[span])?;
-                let contexts = flowing_contexts(&expression);
-                text_outputs
+            let env = nearest_env(workflow, step.job_id, step.job, &shared.env, &route);
+            let mut sources = text_outputs.clone();
+            sources.extend(
+                env.variables
                     .iter()
-                    .find(|output| {
-                        contexts
-                            .iter()
-                            .any(|context| context.matches(output.as_str()))
+                    .filter(|variable| {
+                        expanded_output(&variable.value, &text_outputs, &[]).is_some()
                     })
-                    .or_else(|| {
-                        aggregates
-                            .iter()
-                            .find(|aggregate| expands_as_json(&expression, aggregate))
-                    })
-            })?;
-            let secret_source = match later {
-                JobStep::Run(_) => code.to_string(),
-                JobStep::Uses(uses) => match &uses.with {
-                    LoE::Literal(with) => with
-                        .values()
-                        .map(|value| value.to_string())
+                    .map(|variable| format!("{ENV_CONTEXT}.{}", variable.name)),
+            );
+            let output = expanded_output(code, &sources, &aggregates)?.to_string();
+            let secret_source = match script_inputs {
+                Some(with) => Cow::Owned(
+                    with.values()
+                        .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join("\n"),
-                    LoE::Expr(expression) => expression.as_raw().to_string(),
-                },
+                ),
+                None => Cow::Borrowed(code),
             };
-            let env = nearest_env(workflow, step.job_id, step.job, &shared.env, &route);
             Some(OutputInjection {
                 setting: format!("a later step expands `{output}` into its `{key}`"),
                 secret: shell_secret(env, &secret_source),
@@ -119,17 +125,54 @@ pub fn output_injection<'w>(
     Some(OutputInjection { secret, ..first })
 }
 
+fn expanded_output<'a>(
+    text: &str,
+    outputs: &'a [String],
+    aggregates: &'a [String],
+) -> Option<&'a String> {
+    expression_spans(text).into_iter().find_map(|span| {
+        let expression = parse_expression(&text[span])?;
+        let contexts = flowing_contexts(&expression);
+        outputs
+            .iter()
+            .find(|output| {
+                contexts
+                    .iter()
+                    .any(|context| context.matches(output.as_str()))
+            })
+            .or_else(|| {
+                aggregates
+                    .iter()
+                    .find(|aggregate| expands_as_json(&expression, aggregate))
+            })
+    })
+}
+
 fn expands_as_json(expression: &SpannedExpr, aggregate: &str) -> bool {
     match &expression.inner {
-        Expr::Call(call) if call.func == Function::ToJSON => call.args.iter().any(|argument| {
-            flowing_contexts(argument)
+        Expr::Call(call) => match call.func {
+            Function::ToJSON => call.args.iter().any(|argument| {
+                flowing_contexts(argument)
+                    .iter()
+                    .any(|context| context.matches(aggregate))
+            }),
+            Function::Format | Function::Join | Function::FromJSON => call
+                .args
                 .iter()
-                .any(|context| context.matches(aggregate))
-        }),
-        Expr::Call(call) if matches!(call.func, Function::Format | Function::Join) => call
-            .args
-            .iter()
-            .any(|argument| expands_as_json(argument, aggregate)),
+                .any(|argument| expands_as_json(argument, aggregate)),
+            Function::Case => call
+                .args
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .chain(call.args.last())
+                .any(|argument| expands_as_json(argument, aggregate)),
+            _ => false,
+        },
+        Expr::Context(context) => context
+            .parts
+            .first()
+            .is_some_and(|head| expands_as_json(head, aggregate)),
         Expr::BinExpr(BinExpr {
             op: BinOp::And,
             rhs,
@@ -210,6 +253,40 @@ jobs:
                 "      - run: echo '${{ format('{0}', toJSON(steps)) }}' | jq -r .agent.outputs.summary",
                 "8: a later step expands `steps` into its `run`",
             ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ case(github.event_name == 'issues', toJSON(steps.agent.outputs), '') }}\"",
+                "8: a later step expands `steps.agent.outputs` into its `run`",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ fromJSON(toJSON(steps.agent.outputs)).summary }}\"",
+                "8: a later step expands `steps.agent.outputs` into its `run`",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ steps.agent.outcome == 'success' && toJSON(steps.agent.outputs) || '' }}\"",
+                "8: a later step expands `steps.agent.outputs` into its `run`",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ join(toJSON(steps), ' ') }}\"",
+                "8: a later step expands `steps` into its `run`",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0",
+                "      - run: echo \"${{ env.ANSWER }}\"
+        env:
+          ANSWER: ${{ steps.agent.outputs.summary }}",
+                "8: a later step expands `env.ANSWER` into its `run`",
+            ),
+            (
+                "anthropics/claude-code-action@v1
+        with:
+          claude_args: --json-schema '{\"type\":\"object\"}'",
+                "      - run: echo '${{ toJSON(steps.agent.outputs) }}'",
+                "10: a later step expands `steps.agent.outputs` into its `run`",
+            ),
         ] {
             assert_eq!(
                 injection(agent, later).as_deref(),
@@ -249,6 +326,10 @@ jobs:
             (
                 "google-github-actions/run-gemini-cli@v0",
                 "      - run: echo \"${{ steps.agent.outputs }} ${{ steps.agent }}\"",
+            ),
+            (
+                "anthropics/claude-code-action@v1",
+                "      - run: echo '${{ toJSON(steps.agent.outputs) }}' | jq .session_id",
             ),
             (
                 "google-github-actions/run-gemini-cli@v0",

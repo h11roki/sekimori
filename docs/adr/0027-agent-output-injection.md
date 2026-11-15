@@ -31,7 +31,8 @@
 - エージェントのステップに `id` があり、同じジョブでそれより後のステップ(`parallel:` の中も含む)が次のどちらかを持つとき
   - `run` の `${{ }}` の値に、`steps.<id>.outputs.<出力>` が流れ込む。値に流れ込むかは、ADR 0015 と同じく式のパーサーの `dataflow_contexts` で決め、`fromJSON(...)` の中もたどる。比べるだけの式(`steps.x.outputs.summary != ''`)は数えない
   - `actions/github-script` の `script` の入力に、同じく流れ込む
-- 出力をまとめて `toJSON` で展開する形(`toJSON(steps.<id>.outputs)`、`toJSON(steps.<id>)`、`toJSON(steps)`)も、モデルの文を含むので数える。`toJSON` を通さずにまとめて展開すると `Object` という文字になるだけなので数えない
+- 展開する後のステップから見える `env`(そのステップ、ジョブ、ワークフロー)に出力を入れ、`${{ env.NAME }}` で展開する形も数える。調査では 0 件だが、README の直し方が `env` を経由させるので、`$NAME` ではなく `${{ env.NAME }}` と書く誤りを見逃さないため
+- 出力をまとめて `toJSON` で展開する形(`toJSON(steps.<id>.outputs)`、`toJSON(steps.<id>)`、`toJSON(steps)`)も、モデルの文を含むので数える。`case`、`format`、`join`、`fromJSON(...).x` の中もたどる。claude-code-action は `claude_args` に `--json-schema` があるときだけ数える(無ければ出力は Action が作る値だけ)。`toJSON` を通さずにまとめて展開すると `Object` という文字になるだけなので数えない
 - 後のステップの `if:` が定数で偽(`if: false` など)なら、動かないので数えない
 - 展開する後のステップに届く秘密情報(そのステップ、ジョブ、ワークフローの `env`、式で書いた `env`、`run` の本文や github-script の入力の `${{ secrets.* }}`。`GITHUB_TOKEN` は除く)は、権限と秘密情報の軸の理由に足す。注入されたコードはそのステップの秘密情報で動くため。展開する後のステップが複数あれば、全てから探す
 - 指摘の位置は、後のステップの `run` か `script`。複数あれば最初のもの
@@ -47,9 +48,9 @@
 
 ## 受け入れたトレードオフ
 
-- `steps.*.outputs.summary` のようにワイルドカードで全てのステップの出力を集める形は読まない
+- `steps.*.outputs.summary`、`toJSON(steps.*)`、`toJSON(steps.<id>.outputs.*)` のようにワイルドカードで集める形は読まない
 - 後のステップの `shell:` と `working-directory:` も展開されるが、調査で見つからなかったので読まない
-- `${{ env.NAME }}` やジョブの `outputs` を経由する展開、他のジョブ、github-script 以外の Action の入力(コマンドを受け取る Action など)は読まない
+- ジョブの `outputs` を経由する展開、他のジョブ、github-script 以外の Action の入力(コマンドを受け取る Action など)は読まない
 - エージェントのステップに `id` が無いと、出力は参照できないので数えない
 - run-gemini-cli の `error` は、モデルの文がどれだけ入るかを確かめていない。エラー出力に応答や道具の出力が混ざりうるので、数える側に倒す
 - claude-code-action の `branch_name` は、PR のイベントでは PR の head の枝の名前になりうる。モデルの書いた文ではないので、この規則では扱わない
