@@ -1,13 +1,15 @@
 mod checkout;
+mod output;
 mod secrets;
 mod tools;
 mod trigger;
 
 use std::ops::Range;
 
+use github_actions_expressions::context::Context;
 use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
-use github_actions_models::common::{Env, EnvValue};
+use github_actions_models::common::{Env, EnvValue, If};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::{Component, Route, route};
 
@@ -15,6 +17,7 @@ use crate::agent::AgentStep;
 use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
+pub use output::{OutputInjection, output_injection};
 pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{
@@ -129,6 +132,35 @@ fn expression_spans(text: &str) -> Vec<Range<usize>> {
         offset = end;
     }
     spans
+}
+
+fn flowing_contexts<'a, 'src>(expression: &'a SpannedExpr<'src>) -> Vec<&'a Context<'src>> {
+    expression
+        .dataflow_contexts()
+        .into_iter()
+        .flat_map(|(context, _)| {
+            let mut found = vec![context];
+            if let Some(head) = context.parts.first()
+                && matches!(head.inner, Expr::Call(_))
+            {
+                found.extend(flowing_contexts(head));
+            }
+            found
+        })
+        .collect()
+}
+
+fn constant_false(condition: &SpannedExpr) -> bool {
+    condition
+        .consteval()
+        .is_some_and(|value| !value.as_boolean())
+}
+
+fn parse_condition(condition: &If) -> Option<SpannedExpr<'_>> {
+    match condition {
+        If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
+        If::Expr(raw) => parse_expression(raw),
+    }
 }
 
 fn parse_expression(text: &str) -> Option<SpannedExpr<'_>> {

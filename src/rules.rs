@@ -6,9 +6,10 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, SecretUse, UpstreamOrigin, Upstreams,
-    broad_tool, condition_origin, external_events, head_checkout, long_lived_token, never_runs,
-    open_trigger, other_secret, outside_events, outside_text_cannot_reach, secret_env,
+    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
+    UpstreamOrigin, Upstreams, broad_tool, condition_origin, external_events, head_checkout,
+    long_lived_token, never_runs, open_trigger, other_secret, output_injection, outside_events,
+    outside_text_cannot_reach, secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -25,17 +26,19 @@ pub enum Rule {
     UnrestrictedTrigger,
     BroadTools,
     PrHeadCheckout,
+    AgentOutputInjection,
     LongLivedToken,
     OtherSecrets,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 5] = [
+    pub const ALL: [Rule; 6] = [
         Rule::UnrestrictedTrigger,
         Rule::BroadTools,
         Rule::LongLivedToken,
         Rule::PrHeadCheckout,
         Rule::OtherSecrets,
+        Rule::AgentOutputInjection,
     ];
 
     pub fn id(self) -> &'static str {
@@ -43,6 +46,7 @@ impl Rule {
             Rule::UnrestrictedTrigger => "unrestricted-trigger",
             Rule::BroadTools => "broad-tools",
             Rule::PrHeadCheckout => "pr-head-checkout",
+            Rule::AgentOutputInjection => "agent-output-injection",
             Rule::LongLivedToken => "long-lived-token",
             Rule::OtherSecrets => "other-secrets",
         }
@@ -53,6 +57,7 @@ impl Rule {
             Rule::UnrestrictedTrigger => "can be started without write access",
             Rule::BroadTools => "can run unrestricted tools",
             Rule::PrHeadCheckout => "loads settings from a checked-out PR head",
+            Rule::AgentOutputInjection => "has its output run as code by a later step",
             Rule::LongLivedToken => "gets a long-lived GitHub token",
             Rule::OtherSecrets => "can read other secrets",
         }
@@ -71,6 +76,9 @@ impl Rule {
             }
             Rule::PrHeadCheckout => {
                 "A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. Fills the allowed-tools axis."
+            }
+            Rule::AgentOutputInjection => {
+                "A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's structured_output, Codex's final-message, or Gemini CLI's summary or error in a `run` script or an actions/github-script `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. Fills the allowed-tools axis."
             }
             Rule::OtherSecrets => {
                 "A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. Fills the permissions/secrets axis."
@@ -239,6 +247,14 @@ fn assess_step<'w>(
         });
         tool_reasons.push(setting);
     }
+    let injection = output_injection(workflow, &step);
+    if let Some(OutputInjection { setting, route, .. }) = &injection {
+        hits.push(Hit {
+            rule: Rule::AgentOutputInjection,
+            route: route.clone(),
+        });
+        tool_reasons.push(setting.clone());
+    }
     let allowed_tools = (!tool_reasons.is_empty()).then(|| AxisScore {
         weight: Weight::Full,
         reason: tool_reasons.join("; "),
@@ -253,6 +269,11 @@ fn assess_step<'w>(
             hits.push(Hit { rule, route });
             secret_reasons.push(setting);
         }
+    }
+    if let Some(secret) = injection.and_then(|injection| injection.secret) {
+        secret_reasons.push(format!(
+            "{secret} reaches a later step that runs the agent's output"
+        ));
     }
     secret_reasons.extend(write_permission(workflow, step.job));
     let permissions_and_secrets = (!secret_reasons.is_empty()).then(|| AxisScore {
@@ -687,6 +708,59 @@ jobs:
             )
         );
         assert_eq!(assessment.total_halves(), 5);
+    }
+
+    #[test]
+    fn model_output_run_as_code_fills_the_allowed_tools_axis_even_with_scoped_tools() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - id: gemini
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: ${{ github.event.comment.body }}
+          settings: '{\"tools\": {\"core\": [\"read_file\"]}}'
+      - run: echo \"${{ steps.gemini.outputs.summary }}\" >> \"$GITHUB_STEP_SUMMARY\"
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let assessment = &assessments[0];
+        let rules: Vec<_> = assessment
+            .findings()
+            .iter()
+            .map(|finding| (finding.level, finding.hit.rule))
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::AgentOutputInjection)
+            ]
+        );
+        assert_eq!(
+            assessment.allowed_tools,
+            score(
+                Weight::Full,
+                "a later step expands `steps.gemini.outputs.summary` into its `run`"
+            )
+        );
+        assert_eq!(
+            assessment.permissions_and_secrets,
+            score(
+                Weight::Full,
+                "secrets.DEPLOY_KEY reaches a later step that runs the agent's output"
+            )
+        );
     }
 
     #[test]

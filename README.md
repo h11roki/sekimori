@@ -139,6 +139,7 @@ Each rule that matched is printed with the step's breakdown. [Fixing findings](#
 | `unrestricted-trigger` | who can trigger | The agent runs on an event that outside contributors can cause, and the workflow lets anyone start it: a wildcard user or bot allow-list, or no `if:` that checks who triggered it (a trusted actor or author association, or the label that was just added). On `workflow_run`, the upstream run also counts as checked when an `if:` limits its event, or when the upstream workflow, found by its `name:` among the files checked together in the same directory, has only triggers that outside contributors cannot cause, such as `workflow_dispatch`, `schedule`, `release` or `push`. Gemini CLI given no `prompt` input runs only a fixed prompt, so it does not count here when it runs only on `issues`, `issue_comment`, `discussion` or `discussion_comment` and every earlier step in the job is an `actions/checkout` of this repository at a fixed ref. |
 | `broad-tools` | allowed tools | The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a `tools.core` allow-list under `--yolo`. |
 | `pr-head-checkout` | allowed tools | A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. |
+| `agent-output-injection` | allowed tools | A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's `structured_output`, Codex's `final-message`, or Gemini CLI's `summary` or `error` in a `run` script or an `actions/github-script` `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. |
 | `long-lived-token` | permissions/secrets | The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of `GITHUB_TOKEN` or a short-lived app token. |
 | `other-secrets` | permissions/secrets | A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. |
 
@@ -198,6 +199,14 @@ Allow only the commands the task needs.
             }
 ```
 
+For `agent-output-injection`, pass the output through `env:` and read it as a variable, so it is never parsed as code. In `actions/github-script`, read it with `process.env.SUMMARY`.
+
+```yaml
+      - run: echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SUMMARY: ${{ steps.gemini.outputs.summary }}
+```
+
 For `pr-head-checkout`, do not check out the pull request head before the agent on a privileged event. Check out the base branch, or run the agent on `pull_request`, where it gets no secrets from forks.
 
 ### Permissions and secrets
@@ -211,6 +220,7 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
 - It only knows the settings of the three actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
 - `if:` conditions on earlier jobs in `needs:` count when the agent job waits for them to succeed, directly or through other jobs: a waiting job's `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. `needs:` names must match job IDs exactly, including case. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
+- `agent-output-injection` reads only steps later in the agent's job: `run` scripts and `actions/github-script` `script`, directly or through `${{ env.NAME }}`. It does not follow job `outputs` into other jobs, wildcards such as `steps.*.outputs.summary`, other actions that take code, or `shell:` and `working-directory:`.
 
 ## Survey
 

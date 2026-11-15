@@ -2,7 +2,6 @@ use github_actions_expressions::call::Function;
 use github_actions_expressions::literal::Literal;
 use github_actions_expressions::op::{BinExpr, BinOp};
 use github_actions_expressions::{Expr, SpannedExpr};
-use github_actions_models::common::If;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -10,7 +9,7 @@ use github_actions_models::workflow::Job;
 use github_actions_models::workflow::event::{Events, OptionalBody};
 use yamlpath::Route;
 
-use super::{input, input_route, parse_expression};
+use super::{constant_false, input, input_route, parse_condition};
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
 
@@ -168,12 +167,9 @@ pub struct OpenTrigger<'w> {
 }
 
 pub fn never_runs(step: &AgentStep) -> bool {
-    conditions(step).iter().any(|condition| {
-        condition
-            .as_ref()
-            .and_then(|expression| expression.consteval())
-            .is_some_and(|value| !value.as_boolean())
-    })
+    conditions(step)
+        .iter()
+        .any(|condition| condition.as_ref().is_some_and(constant_false))
 }
 
 pub fn open_trigger<'w>(
@@ -221,22 +217,18 @@ pub fn open_trigger<'w>(
 }
 
 fn conditions<'w>(step: &AgentStep<'w>) -> Vec<Option<SpannedExpr<'w>>> {
-    let parse = |condition: &'w If| match condition {
-        If::Bool(runs) => Expr::parse(if *runs { "true" } else { "false" }).ok(),
-        If::Expr(raw) => parse_expression(raw),
-    };
     let mut found: Vec<Option<SpannedExpr<'w>>> = step
         .step
         .shared
         .r#if
         .as_ref()
-        .map(parse)
+        .map(parse_condition)
         .into_iter()
         .collect();
     let mut visited = HashSet::from([step.job_id]);
     let mut waiting = vec![(step.job.r#if.as_ref(), &step.job.needs)];
     while let Some((condition, needs)) = waiting.pop() {
-        let parsed = condition.map(parse);
+        let parsed = condition.map(parse_condition);
         let waits_for = |need: &str| match &parsed {
             None => true,
             Some(Some(expression)) => {

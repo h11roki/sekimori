@@ -4,7 +4,7 @@ use yamlpath::Route;
 
 use super::{
     ENV_CONTEXT, EnvVariable, Input, NearestEnv, SETTINGS_INPUT, agent_env, expression_spans,
-    input, input_route, lookup, parse_expression, references_variable,
+    flowing_contexts, input, input_route, lookup, parse_expression, references_variable,
 };
 use crate::agent::{Agent, AgentStep};
 use crate::workflow::Workflow;
@@ -49,7 +49,18 @@ impl<'w> SecretEnv<'w> {
 }
 
 pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv<'w> {
-    let env = agent_env(workflow, step);
+    resolved_secrets(agent_env(workflow, step))
+}
+
+pub(super) fn shell_secret<'w>(env: NearestEnv<'w>, code: &str) -> Option<String> {
+    let env = resolved_secrets(env);
+    env.variables()
+        .find_map(|(_, secret)| secret.cloned())
+        .or_else(|| first_secret(env.env.expression.as_ref()?.0, None))
+        .or_else(|| first_secret(code, Some(&env)))
+}
+
+fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
     let direct = SecretEnv {
         secrets: env
             .variables
@@ -165,18 +176,9 @@ fn first_secret(text: &str, env: Option<&SecretEnv>) -> Option<String> {
 }
 
 fn secret_in(expression: &SpannedExpr, env: Option<&SecretEnv>) -> Option<String> {
-    expression
-        .dataflow_contexts()
+    flowing_contexts(expression)
         .into_iter()
-        .find_map(|(context, _)| {
-            secret_of(context, env).or_else(|| {
-                let head = context.parts.first()?;
-                match head.inner {
-                    Expr::Call(_) => secret_in(head, env),
-                    _ => None,
-                }
-            })
-        })
+        .find_map(|context| secret_of(context, env))
 }
 
 fn secret_of(context: &Context, env: Option<&SecretEnv>) -> Option<String> {
