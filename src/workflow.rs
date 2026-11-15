@@ -8,6 +8,8 @@ use yamlpath::{Document, QueryError, Route};
 pub enum LoadError {
     #[error("failed to read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
+    #[error("failed to read the directory {}: {source}", path.display())]
+    ReadDirectory { path: PathBuf, source: io::Error },
     #[error("{} is not a valid workflow: {source}", path.display())]
     Parse {
         path: PathBuf,
@@ -25,7 +27,7 @@ impl LoadError {
             Self::Read { path, .. } | Self::Parse { path, .. } | Self::Index { path, .. } => {
                 Some(path)
             }
-            Self::NoWorkflows { .. } => None,
+            Self::ReadDirectory { .. } | Self::NoWorkflows { .. } => None,
         }
     }
 }
@@ -181,7 +183,7 @@ fn paths_in(input: &Path) -> Result<Vec<PathBuf>, LoadError> {
     if !input.is_dir() {
         return Ok(vec![input.to_path_buf()]);
     }
-    let read_error = |source| LoadError::Read {
+    let read_error = |source| LoadError::ReadDirectory {
         path: input.to_path_buf(),
         source,
     };
@@ -341,6 +343,23 @@ jobs:
     fn loads_a_workflow_file() {
         let workflow = Workflow::load(&Path::new(FIXTURES).join("ci.yml")).unwrap();
         assert!(workflow.model.jobs.contains_key("test"));
+    }
+
+    #[test]
+    fn only_errors_about_one_workflow_name_its_path() {
+        let path = PathBuf::from(".github/workflows");
+        let error = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let file = LoadError::Read {
+            path: path.join("a.yml"),
+            source: error(),
+        };
+        let directory = LoadError::ReadDirectory {
+            path: path.clone(),
+            source: error(),
+        };
+        assert_eq!(file.workflow_path(), Some(path.join("a.yml").as_path()));
+        assert_eq!(directory.workflow_path(), None);
+        assert_eq!(LoadError::NoWorkflows { path }.workflow_path(), None);
     }
 
     #[test]

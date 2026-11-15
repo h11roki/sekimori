@@ -66,8 +66,10 @@ jobs:
       - if: steps.release.outputs.released == 'true'
         env:
           OUTCOME: ${{ steps.findings.outcome }}
+          EXIT_CODE: ${{ steps.findings.outputs.exit-code }}
           SARIF: ${{ steps.findings.outputs.sarif-file }}
         run: |
           test "$OUTCOME" = failure
+          test "$EXIT_CODE" = 1
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
