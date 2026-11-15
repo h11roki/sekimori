@@ -72,20 +72,24 @@ fn annotation(
     title: &str,
     message: &str,
 ) -> String {
-    let location = match path {
-        RepositoryPath::Relative(relative) => {
-            let (line, column) = workflow.position(route).unwrap_or((1, 1));
+    let (line, column) = workflow.position(route).unwrap_or((1, 1));
+    let (location, message) = match path {
+        RepositoryPath::Relative(relative) => (
             format!(
                 "file={},line={line},col={column},",
                 escape_property(&uri_path(relative))
-            )
-        }
-        RepositoryPath::Absolute(_) => String::new(),
+            ),
+            message.to_owned(),
+        ),
+        RepositoryPath::Absolute(absolute) => (
+            String::new(),
+            format!("{}:{line}:{column}: {message}", absolute.display()),
+        ),
     };
     format!(
         "::{command} {location}title={}::{}\n",
         escape_property(title),
-        escape_data(message)
+        escape_data(&message)
     )
 }
 

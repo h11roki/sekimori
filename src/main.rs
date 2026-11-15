@@ -44,12 +44,15 @@ fn main() -> ExitCode {
         match loaded {
             Ok(workflow) => workflows.push(workflow),
             Err(error) => {
-                eprintln!("error: {error}");
-                if let Format::Github = cli.format
-                    && let Err(error) =
-                        stdout.write_all(github_error(&error.to_string()).as_bytes())
-                {
-                    return write_failure(&error);
+                match cli.format {
+                    Format::Github => {
+                        if let Err(error) =
+                            stdout.write_all(github_error(&error.to_string()).as_bytes())
+                        {
+                            return write_failure(&error);
+                        }
+                    }
+                    Format::Plain | Format::Sarif => eprintln!("error: {error}"),
                 }
                 errors.push(error.to_string());
             }
@@ -58,6 +61,7 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
+        let path = repository_path(&workflow.path);
         let mut warned = HashSet::new();
         for assessment in &assessments {
             for message in assessment.warnings() {
@@ -70,12 +74,7 @@ fn main() -> ExitCode {
                         }
                     }
                     Format::Github => {
-                        let line = github_warning(
-                            workflow,
-                            &repository_path(&workflow.path),
-                            &route,
-                            message,
-                        );
+                        let line = github_warning(workflow, &path, &route, message);
                         if warned.insert(line.clone())
                             && let Err(error) = stdout.write_all(line.as_bytes())
                         {
@@ -100,7 +99,6 @@ fn main() -> ExitCode {
                 }
             }
             Format::Github => {
-                let path = repository_path(&workflow.path);
                 for finding in &findings {
                     if let Err(error) =
                         stdout.write_all(github(workflow, &path, finding).as_bytes())
@@ -110,7 +108,7 @@ fn main() -> ExitCode {
                 }
             }
             Format::Sarif => {
-                let uri = artifact_uri(&repository_path(&workflow.path));
+                let uri = artifact_uri(&path);
                 results.extend(sarif_results(workflow, &uri, &findings));
             }
         }

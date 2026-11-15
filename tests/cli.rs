@@ -211,4 +211,25 @@ fn an_unreadable_workflow_is_an_error_annotation_in_the_github_format() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("::error title=sekimori::"));
     assert!(stdout.contains("broken.yml is not a valid workflow"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn a_workflow_outside_the_repository_names_its_place_in_the_annotation_message() {
+    let directory = std::env::temp_dir().join(format!("sekimori-outside-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let copied = directory.join("typo.yml");
+    std::fs::copy(Path::new(FIXTURES).join("ignored/typo.yml"), &copied).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "github"])
+        .arg(&copied)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert!(lines[0].starts_with("::warning title=sekimori::"));
+    assert!(lines[0].contains("typo.yml:6:9: "));
+    assert!(lines[1].starts_with("::error title=sekimori "));
+    assert!(lines[1].contains("typo.yml:10:11: "));
 }
