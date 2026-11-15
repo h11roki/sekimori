@@ -142,7 +142,7 @@ Each rule that matched is printed with the step's breakdown. [Fixing findings](#
 | `agent-output-injection` | allowed tools | A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's `structured_output`, Codex's `final-message`, or Gemini CLI's `summary` or `error` in a `run` script or an `actions/github-script` `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. |
 | `long-lived-token` | permissions/secrets | The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of `GITHUB_TOKEN` or a short-lived app token. |
 | `other-secrets` | permissions/secrets | A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. |
-| `agent-code-with-secrets` | permissions/secrets | The agent can edit the workspace, and a later step in the job runs project code with a secret other than `GITHUB_TOKEN`: a `./` script, a script file given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. |
+| `agent-code-with-secrets` | permissions/secrets | The agent can edit the workspace, and a later step in the job runs project code with a secret other than `GITHUB_TOKEN`: a `./` script or a relative path to a script file, a script file given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. |
 
 ## Severity
 

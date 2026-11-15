@@ -1,36 +1,52 @@
 use yamlpath::Route;
 
 use super::secrets::shell_secret;
-use super::tools::gemini_may_edit;
-use super::{constant_false, input, nearest_env, parse_condition, program_name, shell_programs};
-use crate::agent::{Agent, AgentStep, JobStep, job_steps};
+use super::tools::{WRAPPERS, gemini_may_edit};
+use super::{input, nearest_env, program_name, running_later_steps, shell_programs};
+use crate::agent::{Agent, AgentStep, JobStep};
 use crate::workflow::Workflow;
 
 const RUN_KEY: &str = "run";
-const CODEX_READ_ONLY: [(&str, &str); 2] = [
+const CODEX_READ_ONLY: [(&str, &str); 3] = [
     ("sandbox", "read-only"),
     ("permission-profile", ":read-only"),
+    ("safety-strategy", "read-only"),
 ];
-const WORKSPACE_PATH: &str = "./";
-const SCRIPT_INTERPRETERS: [(&str, &[char]); 8] = [
-    ("bash", &['c']),
-    ("sh", &['c']),
-    ("zsh", &['c']),
-    ("python", &['c']),
-    ("node", &['e', 'p']),
-    ("ruby", &['e']),
-    ("perl", &['e', 'E']),
-    ("pwsh", &['c']),
-];
-const INLINE_CODE_LONG_FLAGS: [&str; 3] = ["--eval", "--print", "-Command"];
-const MODULE_FLAG: &str = "-m";
-const HEREDOC_OR_REDIRECT: char = '<';
-const WORKSPACE_VARIABLES: [&str; 3] = [
+const WORKSPACE_PATHS: [&str; 4] = [
+    "./",
     "$GITHUB_WORKSPACE/",
     "${GITHUB_WORKSPACE}/",
     "${{github.workspace}}/",
 ];
-const PROJECT_RUNNERS: [&str; 9] = [
+const OUTSIDE_PATH_STARTS: [char; 3] = ['/', '$', '~'];
+const STDIN_REDIRECT: &str = "<";
+const SCRIPT_INTERPRETERS: [(&str, &[char], &[&str]); 7] = [
+    ("bash", &['c'], &["-o", "-O", "--rcfile", "--init-file"]),
+    ("sh", &['c'], &["-o"]),
+    ("zsh", &['c'], &["-o"]),
+    ("python", &['c'], &["-W", "-X", "-Q"]),
+    (
+        "node",
+        &['e', 'p'],
+        &[
+            "-r",
+            "--require",
+            "--import",
+            "--loader",
+            "-C",
+            "--conditions",
+        ],
+    ),
+    ("ruby", &['e'], &["-r", "-I", "-C", "-E"]),
+    ("perl", &['e', 'E'], &["-I", "-M", "-m"]),
+];
+const INLINE_CODE_LONG_FLAGS: [&str; 2] = ["--eval", "--print"];
+const MODULE_FLAG: &str = "-m";
+const MODULE_INTERPRETER: &str = "python";
+const SCRIPT_EXTENSIONS: [&str; 9] = [
+    ".sh", ".bash", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl",
+];
+const PROJECT_RUNNERS: [&str; 11] = [
     "make",
     "pytest",
     "tox",
@@ -39,31 +55,29 @@ const PROJECT_RUNNERS: [&str; 9] = [
     "gradle",
     "mvn",
     "rake",
-    "npx",
+    "yarn",
+    "pnpm",
+    "bun",
 ];
-const SUBCOMMAND_RUNNERS: [(&str, &[&str]); 10] = [
+const SUBCOMMAND_RUNNERS: [(&str, &[&str]); 7] = [
     (
         "npm",
         &[
-            "run", "test", "install", "ci", "exec", "build", "start", "publish",
-        ],
-    ),
-    (
-        "pnpm",
-        &[
-            "run", "test", "install", "ci", "exec", "build", "start", "publish",
-        ],
-    ),
-    (
-        "yarn",
-        &[
-            "run", "test", "install", "ci", "exec", "build", "start", "publish",
-        ],
-    ),
-    (
-        "bun",
-        &[
-            "run", "test", "install", "ci", "exec", "build", "start", "publish",
+            "run",
+            "run-script",
+            "test",
+            "t",
+            "install",
+            "i",
+            "ci",
+            "it",
+            "install-test",
+            "exec",
+            "build",
+            "start",
+            "publish",
+            "rebuild",
+            "pack",
         ],
     ),
     ("cargo", &["test", "build", "run", "publish"]),
@@ -78,6 +92,7 @@ const SUBCOMMAND_RUNNERS: [(&str, &[&str]); 10] = [
 pub struct AgentCode<'w> {
     pub setting: String,
     pub route: Route<'w>,
+    pub secret: String,
 }
 
 pub fn agent_code_with_secrets<'w>(
@@ -94,22 +109,12 @@ pub fn agent_code_with_secrets<'w>(
     if !edits_workspace {
         return None;
     }
-    job_steps(step.job_id, step.job)
+    running_later_steps(step)
         .into_iter()
-        .filter(|(index, ..)| *index > step.index)
-        .find_map(|(_, route, later)| {
+        .find_map(|(route, later)| {
             let JobStep::Run(run) = later else {
                 return None;
             };
-            let never_runs = run
-                .shared
-                .r#if
-                .as_ref()
-                .and_then(parse_condition)
-                .is_some_and(|condition| constant_false(&condition));
-            if never_runs {
-                return None;
-            }
             let command = shell_programs(&run.run)
                 .iter()
                 .find_map(|program| project_command(program))?;
@@ -120,40 +125,63 @@ pub fn agent_code_with_secrets<'w>(
                     "`{command}` in a later step runs files the agent can edit, with {secret}"
                 ),
                 route: route.with_key(RUN_KEY),
+                secret,
             })
         })
 }
 
+fn in_workspace(path: &str) -> bool {
+    WORKSPACE_PATHS.iter().any(|start| path.starts_with(start))
+        || !path.starts_with(OUTSIDE_PATH_STARTS)
+}
+
 fn project_command(program: &[String]) -> Option<String> {
     let (first, arguments) = program.split_first()?;
-    if first.starts_with(WORKSPACE_PATH) {
+    let runs_workspace_file = WORKSPACE_PATHS.iter().any(|start| first.starts_with(start))
+        || (in_workspace(first)
+            && first.contains('/')
+            && SCRIPT_EXTENSIONS
+                .iter()
+                .any(|extension| first.ends_with(extension)));
+    if runs_workspace_file {
         return Some(first.clone());
     }
     let name = program_name(first).trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    let operand = arguments.iter().find(|argument| !argument.starts_with('-'));
-    if let Some((_, inline_letters)) = SCRIPT_INTERPRETERS
+    if WRAPPERS.contains(&name) {
+        return (1..program.len()).find_map(|start| project_command(&program[start..]));
+    }
+    if let Some((_, inline_letters, value_flags)) = SCRIPT_INTERPRETERS
         .iter()
-        .find(|(interpreter, _)| *interpreter == name)
+        .find(|(interpreter, ..)| *interpreter == name)
     {
-        let inline_code = arguments.iter().any(|argument| {
-            INLINE_CODE_LONG_FLAGS.contains(&argument.as_str())
-                || argument
-                    .strip_prefix('-')
-                    .filter(|letters| !letters.starts_with('-'))
-                    .is_some_and(|letters| letters.contains(*inline_letters))
-        });
-        if inline_code {
-            return None;
+        let mut words = arguments.iter();
+        while let Some(word) = words.next() {
+            if word == STDIN_REDIRECT {
+                let script = words.next()?;
+                return in_workspace(script).then(|| format!("{name} < {script}"));
+            }
+            if INLINE_CODE_LONG_FLAGS.contains(&word.as_str()) {
+                return None;
+            }
+            if name == MODULE_INTERPRETER && word == MODULE_FLAG {
+                return Some(format!("{name} {MODULE_FLAG}"));
+            }
+            if value_flags.contains(&word.as_str()) {
+                words.next();
+                continue;
+            }
+            if let Some(letters) = word.strip_prefix('-') {
+                let short_cluster =
+                    !letters.starts_with('-') && letters.chars().all(|c| c.is_ascii_alphanumeric());
+                if short_cluster && letters.contains(*inline_letters) {
+                    return None;
+                }
+                continue;
+            }
+            return (in_workspace(word) && !word.starts_with(STDIN_REDIRECT))
+                .then(|| format!("{name} {word}"));
         }
-        if arguments.iter().any(|argument| argument == MODULE_FLAG) {
-            return Some(format!("{name} {MODULE_FLAG}"));
-        }
-        let script = operand?;
-        let in_workspace = !script.starts_with(['/', '$', HEREDOC_OR_REDIRECT])
-            || WORKSPACE_VARIABLES
-                .iter()
-                .any(|variable| script.starts_with(variable));
-        return in_workspace.then(|| format!("{name} {script}"));
+        return None;
     }
     if PROJECT_RUNNERS.contains(&name) {
         return Some(name.to_string());
@@ -161,7 +189,10 @@ fn project_command(program: &[String]) -> Option<String> {
     let (_, subcommands) = SUBCOMMAND_RUNNERS
         .iter()
         .find(|(runner, _)| *runner == name)?;
-    let subcommand = operand.filter(|subcommand| subcommands.contains(&subcommand.as_str()))?;
+    let subcommand = arguments
+        .iter()
+        .find(|argument| !argument.starts_with('-'))
+        .filter(|subcommand| subcommands.contains(&subcommand.as_str()))?;
     Some(format!("{name} {subcommand}"))
 }
 
@@ -238,6 +269,54 @@ jobs:
     }
 
     #[test]
+    fn the_command_is_read_past_wrappers_flags_and_shorthands() {
+        for (run, expected) in [
+            (
+                "python scripts/deploy.py -c prod.yaml",
+                "python scripts/deploy.py",
+            ),
+            ("python -W ignore x.py", "python x.py"),
+            ("bash -o pipefail ./ci.sh", "bash ./ci.sh"),
+            ("bash < ./install.sh", "bash < ./install.sh"),
+            ("ruby -rbundler/setup test.rb", "ruby test.rb"),
+            ("scripts/release.sh", "scripts/release.sh"),
+            (
+                "$GITHUB_WORKSPACE/ci/deploy.sh",
+                "$GITHUB_WORKSPACE/ci/deploy.sh",
+            ),
+            ("timeout 20m npm test", "npm test"),
+            ("sudo -E make install", "make"),
+            ("/usr/bin/env CI=1 ./test.sh", "./test.sh"),
+            ("yarn", "yarn"),
+            ("npm i", "npm i"),
+        ] {
+            let program: Vec<String> = shell_programs(run).remove(0);
+            assert_eq!(
+                project_command(&program).as_deref(),
+                Some(expected),
+                "{run}"
+            );
+        }
+        for run in [
+            "https://example.com/a/b",
+            "s/[-_]+$//",
+            ".artifacts/report",
+            "npx prettier --check .",
+            "npm view react",
+            "python -c 'print(1)'",
+            "node -pe 1",
+            "bash ~/setup.sh",
+            "curl https://example.com",
+        ] {
+            assert_eq!(
+                project_command(&shell_programs(run).remove(0)),
+                None,
+                "{run}"
+            );
+        }
+    }
+
+    #[test]
     fn steps_without_project_code_secrets_or_an_editing_agent_are_not_found() {
         for (agent, later) in [
             (
@@ -268,6 +347,22 @@ jobs:
                 "anthropics/claude-code-action@v1",
                 "      - if: false
         run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+            ),
+            (
+                "openai/codex-action@v1
+        with:
+          safety-strategy: read-only",
+                "      - run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+            ),
+            (
+                "google-github-actions/run-gemini-cli@v0
+        with:
+          settings: '{\"tools\": {\"exclude\": [\"write_file\", \"replace\", \"ShellTool\"]}}'",
+                "      - run: npm test
         env:
           TOKEN: ${{ secrets.TOKEN }}",
             ),

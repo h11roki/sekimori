@@ -32,6 +32,7 @@ const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app toke
 pub struct SecretUse<'w> {
     pub setting: String,
     pub route: Route<'w>,
+    pub secret: String,
 }
 
 pub struct SecretEnv<'w> {
@@ -104,6 +105,7 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
     Some(SecretUse {
         setting: format!("{setting} uses {secret}, {LONG_LIVED}"),
         route,
+        secret,
     })
 }
 
@@ -115,12 +117,11 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     };
     let from_input = agent_inputs.iter().find_map(|name| {
         let (key, value) = input(step, name)?;
+        let secret = first_secret(value, Some(env))?;
         Some(SecretUse {
-            setting: format!(
-                "{key} passes {} to the agent",
-                first_secret(value, Some(env))?
-            ),
+            setting: format!("{key} passes {secret} to the agent"),
             route: input_route(step, key),
+            secret,
         })
     });
     let gemini_settings = match lookup(step, SETTINGS_INPUT) {
@@ -131,9 +132,11 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
         env.variables()
             .filter(|(variable, _)| reaches_agent(step.agent, variable.name, gemini_settings))
             .find_map(|(variable, secret)| {
+                let secret = secret?.clone();
                 Some(SecretUse {
-                    setting: format!("env {} passes {} to the agent", variable.name, secret?),
+                    setting: format!("env {} passes {secret} to the agent", variable.name),
                     route: variable.route.clone(),
+                    secret,
                 })
             })
     };
@@ -142,9 +145,11 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             return None;
         }
         let (text, route) = env.env.expression.as_ref()?;
+        let secret = first_secret(text, None)?;
         Some(SecretUse {
-            setting: format!("env passes {} to the agent", first_secret(text, None)?),
+            setting: format!("env passes {secret} to the agent"),
             route: route.clone(),
+            secret,
         })
     };
     from_input.or_else(from_variable).or_else(from_expression)

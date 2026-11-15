@@ -14,7 +14,7 @@ use github_actions_models::common::{Env, EnvValue, If};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::{Component, Route, route};
 
-use crate::agent::AgentStep;
+use crate::agent::{AgentStep, JobStep, job_steps};
 use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
@@ -93,6 +93,25 @@ fn before_comment(text: &str) -> &str {
         previous = c;
     }
     text
+}
+
+fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)> {
+    job_steps(step.job_id, step.job)
+        .into_iter()
+        .filter(|(index, ..)| *index > step.index)
+        .filter(|(.., later)| {
+            let shared = match later {
+                JobStep::Run(run) => &run.shared,
+                JobStep::Uses(uses) => &uses.shared,
+            };
+            !shared
+                .r#if
+                .as_ref()
+                .and_then(parse_condition)
+                .is_some_and(|condition| constant_false(&condition))
+        })
+        .map(|(_, route, later)| (route, later))
+        .collect()
 }
 
 fn shell_programs(run: &str) -> Vec<Vec<String>> {

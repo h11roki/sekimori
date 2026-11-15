@@ -27,14 +27,17 @@
 - 規則の ID は `agent-code-with-secrets`。権限と秘密情報の軸を満たす(重さ 1)。軸の理由は他の秘密情報の理由と `; ` でつなぐ
 - エージェントが書き換えられるとみなす条件
   - claude-code-action: 常に
-  - codex-action: `sandbox` が `read-only` でなく、`permission-profile` が `:read-only` でない
-  - run-gemini-cli: `settings` が無いか、読めて `tools.core` が無いか、`tools.core` に `write_file`、`replace`、`run_shell_command` のどれかがあり `tools.exclude` で外していない。`settings` が式などで読めないときは、書き換えられるとみなす
+  - codex-action: `sandbox: read-only`、`permission-profile: ":read-only"`、`safety-strategy: read-only` のどれでもない
+  - run-gemini-cli: 書く道具(`write_file`、`replace`、シェルの `run_shell_command` か `ShellTool`)のどれかが、`tools.core` に無いと止められておらず(`tools.core` が無ければ全て使える)、`tools.exclude` でも外されていない。`settings` が式などで読めないときは、書き換えられるとみなす
 - コードを動かすコマンドは、`run` を ADR 0014 と同じくシェルの順で区切り、各コマンドの名前で決める
-  - `./` で始まるパス、`bash` などのシェルとインタプリタ(`python`、`node`、`ruby`、`perl`、`pwsh`)にファイルか `-m` を渡す形。その場のコードを渡すフラグ(`-c`、`-e`、`-0pe` のようにまとめた形も)、ヒアドキュメント(`<<`)、作業場所の外のパス(`/` や、`$GITHUB_WORKSPACE` 以外の `$` で始まるもの)は除く
-  - `make`、`pytest`、`tox`、`nox`、`pre-commit`、`gradle`、`mvn`、`rake`、`npx`
-  - 部分コマンドまで決めるもの: `npm`、`pnpm`、`yarn`、`bun` の `run`、`test`、`install`、`ci`、`exec`、`build`、`start`、`publish`。`cargo` の `test`、`build`、`run`、`publish`。`go` の `test`、`build`、`run`、`generate`。`dotnet` の `test`、`build`、`run`。`bundle exec`、`uv run`、`poetry run`
+  - 作業場所のファイルを直接動かす形。`./` か `$GITHUB_WORKSPACE` で始まるパス、またはスクリプトの拡張子(`.sh`、`.py`、`.js`、`.ts`、`.rb`、`.pl` など)を持つ相対パス(`scripts/x.sh`)。拡張子の無い相対パスは、URL や `sed` の式と区別できないので数えない
+  - シェルとインタプリタ(`bash`、`sh`、`zsh`、`python`、`node`、`ruby`、`perl`)にファイルか、`python -m` でモジュールを渡す形。スクリプトより前のフラグだけを読み、値を取るフラグ(`bash -o`、`python -W` など)の値は飛ばす。`bash < ./x.sh` も読む。その場のコードを渡すフラグ(`-c`、`-e`、`-0pe` のようにまとめた形も)、ヒアドキュメント(`<<`)、作業場所の外のパス(`/`、`~`、`$GITHUB_WORKSPACE` 以外の `$` で始まるもの)は除く
+  - `sudo`、`timeout`、`env` などの包むコマンド(ADR 0013 の一覧)の中のコマンド
+  - `make`、`pytest`、`tox`、`nox`、`pre-commit`、`gradle`、`mvn`、`rake`、`yarn`、`pnpm`、`bun`(この 3 つは引数だけでも `package.json` のスクリプトを動かすので、部分コマンドを問わない)
+  - 部分コマンドまで決めるもの: `npm` の `run`、`run-script`、`test`、`t`、`install`、`i`、`ci`、`it`、`install-test`、`exec`、`build`、`start`、`publish`、`rebuild`、`pack`。`cargo` の `test`、`build`、`run`、`publish`。`go` の `test`、`build`、`run`、`generate`。`dotnet` の `test`、`build`、`run`。`bundle exec`、`uv run`、`poetry run`
 - 秘密情報は、ADR 0027 と同じく、そのステップ、ジョブ、ワークフローの `env` と、`run` の本文の `${{ secrets.* }}`(`GITHUB_TOKEN` を除く)
 - 後のステップの `if:` が定数で偽なら数えない
+- 見つけた秘密情報が、すでにエージェントに届くもの(`long-lived-token` か `other-secrets` の秘密情報)と同じなら、この規則の指摘は出さない。同じ秘密情報で指摘を重ねないため
 - 指摘の位置は、コードを動かすコマンドを持ち、秘密情報も届く最初の後のステップの `run`
 
 ## 理由
@@ -46,6 +49,7 @@
 
 ## 受け入れたトレードオフ
 
+- `npx` はレジストリの道具を動かすことが多いので数えない。作業場所の設定ファイル(`eslint.config.js` など)を読む道具もあるが、見逃す側に倒す
 - 一覧にないコマンド(`deno`、`php`、独自のビルド道具など)、`uses:` の Action が動かすコード、他のジョブは数えない
 - `npm publish` のように、エージェントの書いたコードを動かさず公開するだけのコマンドも数える。公開物そのものがエージェントの書いたものになるため
 - claude-code-action で `--disallowedTools` により Edit と Write を禁じても、書き換えられるとみなす。Bash で書き換える道は残ることがあり、確かめていない

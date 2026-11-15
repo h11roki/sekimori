@@ -21,7 +21,7 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
-const GEMINI_EDIT_TOOLS: [&str; 4] = ["write_file", "replace", "run_shell_command", "ShellTool"];
+const GEMINI_EDIT_TOOLS: [&[&str]; 3] = [&["write_file"], &["replace"], &GEMINI_SHELL_TOOLS];
 const INTERPRETERS: [&str; 24] = [
     "bash",
     "sh",
@@ -48,7 +48,7 @@ const INTERPRETERS: [&str; 24] = [
     "eval",
     "exec",
 ];
-const WRAPPERS: [&str; 10] = [
+pub(super) const WRAPPERS: [&str; 10] = [
     "env", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "command", "busybox", "time",
 ];
 
@@ -325,28 +325,24 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
 }
 
 pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
-    let Input::Text { value, .. } = lookup(step, SETTINGS_INPUT) else {
-        return true;
+    let settings = match lookup(step, SETTINGS_INPUT) {
+        Input::Text { value, .. } => settings_json(value),
+        Input::Missing | Input::Unreadable => None,
     };
-    let Some(settings) = settings_json(value) else {
-        return true;
-    };
-    let tools = settings.get("tools");
-    let Some(core) = tools
+    let tools = settings.as_ref().and_then(|settings| settings.get("tools"));
+    let core: Option<Vec<&str>> = tools
         .and_then(|tools| tools.get("core"))
         .filter(|core| !core.is_null())
-    else {
-        return true;
-    };
+        .map(|core| string_array(Some(core)).map(str::trim).collect());
     let excluded: Vec<&str> = string_array(tools.and_then(|tools| tools.get("exclude")))
         .map(str::trim)
         .collect();
-    string_array(Some(core)).map(str::trim).any(|tool| {
-        GEMINI_EDIT_TOOLS.iter().any(|edit| {
-            pattern_of(tool, edit).is_some()
-                && !excluded.contains(edit)
-                && !excluded.contains(&tool)
-        })
+    GEMINI_EDIT_TOOLS.iter().any(|names| {
+        let allowed = core.as_ref().is_none_or(|core| {
+            core.iter()
+                .any(|tool| names.iter().any(|name| pattern_of(tool, name).is_some()))
+        });
+        allowed && !names.iter().any(|name| excluded.contains(name))
     })
 }
 

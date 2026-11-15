@@ -85,7 +85,7 @@ impl Rule {
                 "A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's structured_output, Codex's final-message, or Gemini CLI's summary or error in a `run` script or an actions/github-script `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. Fills the allowed-tools axis."
             }
             Rule::AgentCodeWithSecrets => {
-                "The agent can edit files in the workspace, and a later step in the job runs project code with a secret other than GITHUB_TOKEN: a `./` script, a script given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. Fills the permissions/secrets axis."
+                "The agent can edit files in the workspace, and a later step in the job runs project code with a secret other than GITHUB_TOKEN: a `./` script or a relative path to a script file, a script given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. Fills the permissions/secrets axis."
             }
             Rule::OtherSecrets => {
                 "A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. Fills the permissions/secrets axis."
@@ -268,16 +268,29 @@ fn assess_step<'w>(
     });
     let env = secret_env(workflow, &step);
     let mut secret_reasons = Vec::new();
+    let mut reached_agent = Vec::new();
     for (rule, found) in [
         (Rule::LongLivedToken, long_lived_token(&step, &env)),
         (Rule::OtherSecrets, other_secret(&step, &env)),
     ] {
-        if let Some(SecretUse { setting, route }) = found {
+        if let Some(SecretUse {
+            setting,
+            route,
+            secret,
+        }) = found
+        {
             hits.push(Hit { rule, route });
             secret_reasons.push(setting);
+            reached_agent.push(secret);
         }
     }
-    if let Some(AgentCode { setting, route }) = agent_code_with_secrets(workflow, &step) {
+    if let Some(AgentCode {
+        setting,
+        route,
+        secret,
+    }) = agent_code_with_secrets(workflow, &step)
+        && !reached_agent.contains(&secret)
+    {
         hits.push(Hit {
             rule: Rule::AgentCodeWithSecrets,
             route,
@@ -820,6 +833,30 @@ jobs:
                 "`npm test` in a later step runs files the agent can edit, with secrets.NPM_TOKEN"
             )
         );
+    }
+
+    #[test]
+    fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
     }
 
     #[test]
