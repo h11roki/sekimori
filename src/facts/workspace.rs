@@ -1,7 +1,7 @@
 use yamlpath::Route;
 
 use super::secrets::{EVERY_SECRET, shell_secrets};
-use super::tools::{WRAPPERS, broad_tool, gemini_may_edit};
+use super::tools::{WRAPPERS, claude_may_edit, gemini_may_edit};
 use super::{input, is_assignment, nearest_env, program_name, running_later_steps, shell_programs};
 use crate::agent::{Agent, AgentStep, JobStep};
 use crate::workflow::Workflow;
@@ -130,7 +130,7 @@ pub fn agent_code_with_secrets<'w>(
             input(step, name).is_some_and(|(_, value)| value.trim() == *read_only)
         }),
         Agent::GeminiCli => gemini_may_edit(step),
-        Agent::ClaudeBase => broad_tool(step).is_some(),
+        Agent::ClaudeBase => claude_may_edit(step),
     };
     if !edits_workspace {
         return None;
@@ -353,6 +353,15 @@ jobs:
           TOKEN: ${{ secrets.TOKEN }}",
                 "9: `npm test` in a later step runs files the agent can edit, with secrets.TOKEN",
             ),
+            (
+                "anthropics/claude-code-action/base-action@v1
+        with:
+          claude_args: --permission-mode acceptEdits",
+                "      - run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+                "9: `npm test` in a later step runs files the agent can edit, with secrets.TOKEN",
+            ),
         ] {
             assert_eq!(found(agent, later).as_deref(), Some(expected), "{later}");
         }
@@ -460,6 +469,14 @@ jobs:
                 "anthropics/claude-code-action@v1",
                 "      - if: false
         run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}",
+            ),
+            (
+                "anthropics/claude-code-base-action@beta
+        with:
+          allowed_tools: Read",
+                "      - run: npm test
         env:
           TOKEN: ${{ secrets.TOKEN }}",
             ),

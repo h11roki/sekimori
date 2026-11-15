@@ -86,7 +86,7 @@ pub fn head_checkout<'w>(
             "with no `settings` and GEMINI_CLI_TRUST_WORKSPACE=true, Gemini CLI loads the PR's .gemini/settings.json",
         ),
         Agent::ClaudeBase => privileged.then_some(
-            "claude-code-base-action loads the PR's .claude/ settings and CLAUDE.md",
+            "the Claude Code base action loads the PR's .claude/ settings, .mcp.json and CLAUDE.md",
         ),
         Agent::Codex => None,
     }?;

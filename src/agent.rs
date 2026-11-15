@@ -13,29 +13,34 @@ pub enum Agent {
     GeminiCli,
 }
 
-const CLAUDE_ACTION: &str = "anthropics/claude-code-action";
-const CLAUDE_BASE_SUBPATH: &str = "base-action";
-const AGENT_ACTIONS: [(&str, Agent); 4] = [
-    (CLAUDE_ACTION, Agent::ClaudeCode),
-    ("anthropics/claude-code-base-action", Agent::ClaudeBase),
-    ("openai/codex-action", Agent::Codex),
-    ("google-github-actions/run-gemini-cli", Agent::GeminiCli),
+const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
+    ("anthropics/claude-code-action", "", Agent::ClaudeCode),
+    (
+        "anthropics/claude-code-action",
+        "base-action",
+        Agent::ClaudeBase,
+    ),
+    ("anthropics/claude-code-base-action", "", Agent::ClaudeBase),
+    ("openai/codex-action", "", Agent::Codex),
+    ("google-github-actions/run-gemini-cli", "", Agent::GeminiCli),
 ];
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
-        if let Uses::Repository(repository) = uses
-            && repository.slug().eq_ignore_ascii_case(CLAUDE_ACTION)
-            && repository
-                .subpath()
-                .is_some_and(|subpath| subpath.trim_matches('/') == CLAUDE_BASE_SUBPATH)
-        {
-            return Some(Agent::ClaudeBase);
-        }
+        let Uses::Repository(repository) = uses else {
+            return None;
+        };
+        let subpath = repository.subpath().unwrap_or_default().trim_matches('/');
         AGENT_ACTIONS
             .iter()
-            .find(|(action, _)| is_root_action(uses, action))
-            .map(|(_, agent)| *agent)
+            .find(|(action, action_subpath, _)| {
+                action.eq_ignore_ascii_case(repository.slug()) && subpath == *action_subpath
+            })
+            .map(|(.., agent)| *agent)
+    }
+
+    pub fn is_claude(self) -> bool {
+        matches!(self, Agent::ClaudeCode | Agent::ClaudeBase)
     }
 }
 

@@ -11,6 +11,7 @@ const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
 const CLAUDE_PERMISSION_MODE_FLAG: &str = "--permission-mode";
 const CLAUDE_SETTINGS_FLAG: &str = "--settings";
 const CLAUDE_BYPASS_MODE: &str = "bypassPermissions";
+const CLAUDE_ACCEPT_EDITS_MODE: &str = "acceptEdits";
 const CLAUDE_BYPASS_DISABLED: &str = "disable";
 const CLAUDE_SHELL_TOOL: &str = "Bash";
 const CLAUDE_LEGACY_ALLOWED_INPUT: &str = "allowed_tools";
@@ -323,6 +324,16 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
         setting: format!("{key} allows `{tool}` in tools.core"),
         route,
     })
+}
+
+pub(super) fn claude_may_edit(step: &AgentStep) -> bool {
+    let permissions = ClaudePermissions::of(step);
+    let accepts_edits = permissions
+        .cli_mode
+        .as_ref()
+        .or(permissions.settings_mode.as_ref())
+        .is_some_and(|(mode, _)| mode == CLAUDE_ACCEPT_EDITS_MODE);
+    accepts_edits || permissions.broad_tool().is_some()
 }
 
 pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {

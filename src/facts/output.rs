@@ -43,7 +43,7 @@ pub fn output_injection<'w>(
         .iter()
         .map(|output| format!("steps.{id}.outputs.{output}"))
         .collect();
-    let aggregates_hold_model_text = !matches!(step.agent, Agent::ClaudeCode | Agent::ClaudeBase)
+    let aggregates_hold_model_text = !step.agent.is_claude()
         || input(step, CLAUDE_ARGS_INPUT)
             .is_some_and(|(_, value)| value.contains(JSON_SCHEMA_FLAG));
     let aggregates: Vec<String> = if aggregates_hold_model_text {

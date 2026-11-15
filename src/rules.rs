@@ -1063,12 +1063,12 @@ jobs:
   claude:
     runs-on: ubuntu-latest
     steps:
-      - uses: anthropics/claude-code-base-action@v1
+      - uses: anthropics/claude-code-base-action@beta
         with:
           prompt: ${{ github.event.comment.body }}
-          claude_args: --allowedTools Bash
-        env:
-          GH_TOKEN: ${{ secrets.BOT_PAT }}
+          allowed_tools: Bash
+          claude_env: |
+            GH_TOKEN: ${{ secrets.BOT_PAT }}
 "
             ),
             [
@@ -1104,7 +1104,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: anthropics/claude-code-base-action@v1
+      - uses: anthropics/claude-code-base-action@v0.0.63
         with:
           prompt: Review this pull request.
 "
@@ -1113,6 +1113,49 @@ jobs:
                 (Level::Error, Rule::UnrestrictedTrigger),
                 (Level::Error, Rule::PrHeadCheckout),
             ]
+        );
+        let secrets_of = |inputs: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: push
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@beta
+        with:
+          prompt: Fix the tests.
+{inputs}"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .permissions_and_secrets
+                .as_ref()
+                .map(|score| score.reason.clone())
+        };
+        assert_eq!(
+            secrets_of(
+                "          mcp_config: '{\"mcpServers\": {\"x\": {\"env\": {\"KEY\": \"${{ secrets.MCP_KEY }}\"}}}}'\n"
+            )
+            .as_deref(),
+            Some("mcp_config passes secrets.MCP_KEY to the agent")
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
+            )
+            .as_deref(),
+            Some("claude_env DEPLOY_KEY passes secrets.DEPLOY_KEY to the agent")
+        );
+        assert_eq!(
+            secrets_of(
+                "          claude_env: |\n            ANTHROPIC_API_KEY: ${{ secrets.KEY }}\n"
+            ),
+            None
         );
     }
 
