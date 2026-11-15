@@ -33,8 +33,7 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
-const CODEX_CREDENTIAL_VARIABLES: [&str; 1] = ["OPENAI_API_KEY"];
-const CODEX_CREDENTIAL_PREFIXES: [&str; 1] = ["AWS_"];
+const CODEX_CREDENTIAL_VARIABLES: [&str; 2] = ["OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"];
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 
@@ -97,9 +96,13 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
         .collect();
     secrets.extend(
         env.variables()
-            .filter(|(variable, _)| {
-                reaches_agent(step.agent, variable.name, gemini_settings)
-                    || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
+            .filter(|(variable, _)| match step.agent {
+                Agent::Codex => true,
+                Agent::ClaudeCode => reaches_agent(step.agent, variable.name, gemini_settings),
+                Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::GeminiCli => {
+                    reaches_agent(step.agent, variable.name, gemini_settings)
+                        || TOKEN_VARIABLES.contains(&variable.name)
+                }
             })
             .filter_map(|(_, secret)| secret.cloned()),
     );
@@ -217,12 +220,7 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                     .iter()
                     .any(|prefix| name.starts_with(prefix))
         }
-        Agent::Codex => {
-            !CODEX_CREDENTIAL_VARIABLES.contains(&name)
-                && !CODEX_CREDENTIAL_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-        }
+        Agent::Codex => !CODEX_CREDENTIAL_VARIABLES.contains(&name),
         Agent::GeminiCli => {
             !GEMINI_CREDENTIAL_VARIABLES.contains(&name)
                 && references_variable(gemini_settings, name)
@@ -384,6 +382,19 @@ mod tests {
             found(other_secret, &source),
             Some("9: claude_args passes secrets.SENTRY_TOKEN to the agent".to_string())
         );
+    }
+
+    #[test]
+    fn codex_holds_every_variable_of_its_env() {
+        let held = |with: &str| {
+            let source = format!(
+                "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      AWS_BEARER_TOKEN_BEDROCK: ${{{{ secrets.BEDROCK }}}}\n      NPM_TOKEN: ${{{{ secrets.NPM }}}}\n    steps:\n      - uses: openai/codex-action@v1\n{with}"
+            );
+            let workflow = Workflow::parse(Path::new("test.yml"), source).unwrap();
+            let steps = agent_steps(&workflow);
+            agent_secrets(&steps[0], &secret_env(&workflow, &steps[0]))
+        };
+        assert_eq!(held(""), ["secrets.BEDROCK", "secrets.NPM"]);
     }
 
     #[test]

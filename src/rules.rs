@@ -916,10 +916,8 @@ jobs:
     }
 
     #[test]
-    fn the_codex_bedrock_key_is_only_reported_where_later_code_runs_with_it() {
-        let workflow = Workflow::parse(
-            Path::new("test.yml"),
-            "on: issue_comment
+    fn codex_holds_every_variable_of_its_env_but_not_those_of_later_steps() {
+        let source = "on: issue_comment
 permissions:
   contents: read
 jobs:
@@ -927,16 +925,24 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI }}
     steps:
       - uses: openai/codex-action@v1
       - run: npm test
-"
-            .to_string(),
-        )
-        .unwrap();
-        let assessments = assess(&workflow, &Upstreams::default());
-        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
-        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+";
+        let rules = |source: String| -> Vec<Rule> {
+            let workflow = Workflow::parse(Path::new("test.yml"), source).unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect()
+        };
+        assert_eq!(rules(source.to_string()), [Rule::AgentCodeWithSecrets]);
+        let without_npm = source.replace("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", "CI: true");
+        assert!(rules(without_npm).is_empty());
     }
 
     #[test]
