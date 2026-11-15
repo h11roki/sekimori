@@ -27,7 +27,7 @@
 
 高橋さんが判断を任せ(2026-11-15 に「止まらないで。開発改善を進めて」)、Claude が 1 を選んだ。
 
-- `anthropics/claude-code-base-action` と、`anthropics/claude-code-action` の下の階層 `base-action` を、Claude Code の base action とする
+- `anthropics/claude-code-base-action`(公開版)と、`anthropics/claude-code-action` の下の階層 `base-action`(main)を、入力の違う 2 つのエージェントとして扱う。公開版は `allowed_tools`、`disallowed_tools`、`settings`、`mcp_config`、`system_prompt`、`append_system_prompt`、`claude_env` を、main は `claude_args` と `settings` を読む。Action が受け取らない入力は読まない
 - 起動できる人:run-gemini-cli と同じく、ジョブかステップの `if:` が起動した人を確かめなければ、誰でも起動できる
 - 道具:claude-code-action と同じく、`claude_args`、`settings`、`allowed_tools`、`disallowed_tools` の許可と権限のモードを読む(ADR 0013)
 - 秘密情報:`prompt`、`settings`、`claude_args`、`mcp_config`、`system_prompt`、`append_system_prompt` に流れ込む秘密情報と、`env` の全ての秘密情報が届く。公開版(`anthropics/claude-code-base-action`)では、`claude_env` の行(`#` で始まる行を除く)をエージェントの `env` として読み、同じ名前の `env` より優先する。main の `base-action` には `claude_env` が無いので読まない。Claude 自身の認証情報(`ANTHROPIC_API_KEY` など)は除く。`claude_env` か `env` の `GITHUB_TOKEN` か `GH_TOKEN` が保存した秘密情報なら、期限の無いトークンとする(codex と run-gemini-cli と同じ)
@@ -44,6 +44,8 @@
 
 - `Edit` や `Write` だけを許した形は、作業場所を書き換えられるが、`agent-code-with-secrets` では数えない
 - `prompt_file` の中身は読まない
+- `claude_env` の行は `with:` の中の `${{ env.X }}` からも見えるものとして読む(実際の GitHub では見えない)。同じ名前を `claude_env` と `env:` の両方に書き、片方が他方を参照する形では判定を誤る
+- `claude_env` 全体が 1 つの式(`${{ secrets.X }}`)の形は、行に分けられないので読まない
 - 調査のデータ(ADR 0021)は 3 つの Action だけを集めたので、base action の件数と誤検知の割合は測っていない
 
 ## 再検討する条件

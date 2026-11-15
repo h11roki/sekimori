@@ -15,10 +15,10 @@ pub(super) const EVERY_SECRET: &str = "every secret";
 const CLAUDE_TOKEN_INPUT: &str = "github_token";
 const TOKEN_VARIABLES: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
 const CLAUDE_AGENT_INPUTS: [&str; 3] = ["prompt", "settings", "claude_args"];
-const CLAUDE_BASE_INPUTS: [&str; 6] = [
+const CLAUDE_BASE_INPUTS: [&str; 3] = ["prompt", "settings", "claude_args"];
+const CLAUDE_BASE_BETA_INPUTS: [&str; 5] = [
     "prompt",
     "settings",
-    "claude_args",
     "mcp_config",
     "system_prompt",
     "append_system_prompt",
@@ -81,6 +81,7 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
     let agent_inputs: &[&str] = match step.agent {
         Agent::ClaudeCode => &CLAUDE_INPUTS_WITH_TOKEN,
         Agent::ClaudeBase => &CLAUDE_BASE_INPUTS,
+        Agent::ClaudeBaseBeta => &CLAUDE_BASE_BETA_INPUTS,
         Agent::Codex => &CODEX_AGENT_INPUTS,
         Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
     };
@@ -142,7 +143,7 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
             let secret = first_secret(value, Some(env))?;
             (key.to_string(), secret, input_route(step, key))
         }
-        Agent::ClaudeBase | Agent::Codex | Agent::GeminiCli => env
+        Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::Codex | Agent::GeminiCli => env
             .variables()
             .filter(|(variable, _)| TOKEN_VARIABLES.contains(&variable.name))
             .find_map(|(variable, secret)| {
@@ -163,6 +164,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     let agent_inputs: &[&str] = match step.agent {
         Agent::ClaudeCode => &CLAUDE_AGENT_INPUTS,
         Agent::ClaudeBase => &CLAUDE_BASE_INPUTS,
+        Agent::ClaudeBaseBeta => &CLAUDE_BASE_BETA_INPUTS,
         Agent::Codex => &CODEX_AGENT_INPUTS,
         Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
     };
@@ -208,7 +210,7 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
         return false;
     }
     match agent {
-        Agent::ClaudeCode | Agent::ClaudeBase => {
+        Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta => {
             !CLAUDE_CREDENTIAL_VARIABLES.contains(&name)
                 && !CLAUDE_CREDENTIAL_PREFIXES
                     .iter()

@@ -1216,6 +1216,56 @@ jobs:
     }
 
     #[test]
+    fn each_base_action_reads_only_the_inputs_it_has() {
+        let hits_of = |uses: &str, inputs: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {uses}
+        with:
+          prompt: Fix the tests.
+{inputs}"
+                ),
+            )
+            .unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect::<Vec<_>>()
+        };
+        let main = "anthropics/claude-code-action/base-action@v1";
+        let beta = "anthropics/claude-code-base-action@beta";
+        assert_eq!(
+            hits_of(main, "          allowed_tools: Bash\n"),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(beta, "          claude_args: --allowedTools Bash\n"),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(
+                main,
+                "          mcp_config: '{\"env\": \"${{ secrets.KEY }}\"}'\n"
+            ),
+            [Rule::UnrestrictedTrigger]
+        );
+        assert_eq!(
+            hits_of(
+                beta,
+                "          mcp_config: '{\"env\": \"${{ secrets.KEY }}\"}'\n"
+            ),
+            [Rule::UnrestrictedTrigger, Rule::OtherSecrets]
+        );
+    }
+
+    #[test]
     fn tokens_secrets_and_write_access_share_the_permissions_axis() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

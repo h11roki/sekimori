@@ -9,6 +9,7 @@ use crate::workflow::Workflow;
 pub enum Agent {
     ClaudeCode,
     ClaudeBase,
+    ClaudeBaseBeta,
     Codex,
     GeminiCli,
 }
@@ -20,7 +21,11 @@ const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
         "base-action",
         Agent::ClaudeBase,
     ),
-    ("anthropics/claude-code-base-action", "", Agent::ClaudeBase),
+    (
+        "anthropics/claude-code-base-action",
+        "",
+        Agent::ClaudeBaseBeta,
+    ),
     ("openai/codex-action", "", Agent::Codex),
     ("google-github-actions/run-gemini-cli", "", Agent::GeminiCli),
 ];
@@ -31,10 +36,6 @@ impl Agent {
             .iter()
             .find(|(action, subpath, _)| is_action(uses, action, subpath))
             .map(|(.., agent)| *agent)
-    }
-
-    pub fn is_claude(self) -> bool {
-        matches!(self, Agent::ClaudeCode | Agent::ClaudeBase)
     }
 }
 
@@ -238,7 +239,7 @@ jobs:
             .iter()
             .map(|step| step.agent)
             .collect();
-        assert_eq!(agents, [Agent::ClaudeBase, Agent::ClaudeBase]);
+        assert_eq!(agents, [Agent::ClaudeBase, Agent::ClaudeBaseBeta]);
     }
 
     #[test]

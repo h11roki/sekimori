@@ -130,7 +130,7 @@ pub fn agent_code_with_secrets<'w>(
             input(step, name).is_some_and(|(_, value)| value.trim() == *read_only)
         }),
         Agent::GeminiCli => gemini_may_edit(step),
-        Agent::ClaudeBase => claude_may_edit(step),
+        Agent::ClaudeBase | Agent::ClaudeBaseBeta => claude_may_edit(step),
     };
     if !edits_workspace {
         return None;
