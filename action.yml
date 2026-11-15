@@ -18,10 +18,10 @@ inputs:
 
 outputs:
   sarif-file:
-    description: Path to the findings in SARIF format. Empty when the SARIF file could not be written.
+    description: Path to the findings in SARIF format. Empty when sekimori did not write the SARIF file.
     value: ${{ steps.check.outputs.sarif-file }}
   exit-code:
-    description: "Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file, could not write the SARIF file or the job summary, or could not run, another non-zero value if it crashed. Empty when sekimori was not installed."
+    description: "Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file, could not write its output, or could not run, another non-zero value if it crashed. Empty when sekimori was not installed."
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
