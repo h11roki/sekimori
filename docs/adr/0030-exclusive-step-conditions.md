@@ -23,12 +23,12 @@
 高橋さんが判断を任せ(2026-11-15 に「止まらないで。開発改善を進めて」)、Claude が 1 を選んだ。
 
 - 項は、`if:` の式の最も外の「かつ」で分ける。`||` の中や、他の関数は読まない
-- 値が `inputs.`、`vars.`、`needs.`、`matrix.`、`github.event`、`github.ref`、`github.head_ref`、`github.base_ref`、`github.repository`、`github.actor`、`github.triggering_actor`、`github.workflow`、`github.sha`、`github.job` で始まるときだけ使う。`env`、`steps`、ステップごとに変わる `github` の値は使わない
+- 値が `inputs.`、`vars.`、`needs.`、`matrix.`、`github.event.`、`github.event_name`、`github.ref`、`github.head_ref`、`github.base_ref`、`github.repository`、`github.actor`、`github.triggering_actor`、`github.workflow`、`github.sha`、`github.job` で始まるときだけ使う。`env`、`steps`、ステップごとに変わる `github` の値は使わない
 - 添字(`labels[0]`、`matrix['os.name']`)やワイルドカードを含む値は、別の値を同じ名前で呼んでしまうので使わない
 - 英字か `_` で始まる ASCII の定数だけを使う。数に直りうる定数(`10`、`0x10`、`Infinity` など)と空の文字列は、型を変えて比べられて別の定数と等しくなりうる。ASCII 以外の文字は、GitHub の大小を区別しない比べ方と小文字のそろえ方が一致しない
 - 同じ値について、取りうる値の集まりが空になれば両立しない。「この中のどれか」と「この中のどれか」の共通が空、または「この中のどれか」が全て「どれでもない」に含まれる
 - 定数は大小を区別せずに比べる
-- エージェントのステップ自身の項が両立しないときは、エージェントの項を使わない
+- エージェントのステップ自身の項が両立しないときは、エージェントは動かないので、後のステップを全て読まない
 - エージェントのステップに `if:` が無くても、後のステップ自身の項が両立しなければ読まない
 - ADR 0027 と 0028 の、後のステップをたどる処理(`running_later_steps`)に効かせる
 

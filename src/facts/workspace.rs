@@ -545,6 +545,7 @@ jobs:
             ),
             ("matrix.agent == 'claude'", "matrix.agent != 'claude'"),
             ("true", "inputs.mode == 'a' && inputs.mode == 'b'"),
+            ("inputs.m == 'a' && inputs.m == 'b'", "success()"),
         ] {
             assert!(
                 !found_with(agent_condition, later_condition),
@@ -572,7 +573,6 @@ jobs:
             ("inputs.lang == 'ς'", "inputs.lang == 'σ'"),
             ("matrix.n == '0x10'", "matrix.n == '0o20'"),
             ("matrix['os.name'] == 'linux'", "matrix.os.name == 'mac'"),
-            ("inputs.m == 'a' && inputs.m == 'b'", "success()"),
         ] {
             assert!(
                 found_with(agent_condition, later_condition),

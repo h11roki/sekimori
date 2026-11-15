@@ -130,9 +130,10 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
         .r#if
         .as_ref()
         .and_then(parse_condition)
-        .map(|condition| value_facts(&condition))
-        .filter(|facts| !contradicts(facts, &[]))
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |condition| value_facts(&condition));
+    if contradicts(&agent_facts, &[]) {
+        return Vec::new();
+    }
     job_steps(step.job_id, step.job)
         .into_iter()
         .filter(|(index, ..)| *index > step.index)
@@ -150,64 +151,49 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Membership {
+    OneOf,
+    NoneOf,
+}
+
 struct ValueFact {
     value: String,
-    one_of: bool,
+    membership: Membership,
     constants: Vec<String>,
+}
+
+impl ValueFact {
+    fn rules_out(&self, constant: &String) -> bool {
+        match self.membership {
+            Membership::OneOf => !self.constants.contains(constant),
+            Membership::NoneOf => self.constants.contains(constant),
+        }
+    }
 }
 
 fn contradicts(first: &[ValueFact], second: &[ValueFact]) -> bool {
     let facts = || first.iter().chain(second);
-    facts().filter(|fact| fact.one_of).any(|fact| {
-        fact.constants.iter().all(|constant| {
-            facts().any(|other| {
-                other.value == fact.value && other.one_of != other.constants.contains(constant)
+    facts()
+        .filter(|fact| fact.membership == Membership::OneOf)
+        .any(|fact| {
+            fact.constants.iter().all(|constant| {
+                facts().any(|other| other.value == fact.value && other.rules_out(constant))
             })
         })
-    })
 }
 
 fn value_facts(condition: &SpannedExpr) -> Vec<ValueFact> {
-    let stable = |expression: &SpannedExpr| match &expression.inner {
-        Expr::Context(context)
-            if !context
-                .parts
-                .iter()
-                .any(|part| matches!(part.inner, Expr::Index(_) | Expr::Star)) =>
-        {
-            context.as_pattern().filter(|pattern| {
-                STABLE_CONTEXTS
-                    .iter()
-                    .any(|prefix| pattern.starts_with(prefix))
-            })
-        }
-        _ => None,
+    let fact = |value: &SpannedExpr, membership, constants: Vec<String>| {
+        Some(ValueFact {
+            value: stable_value(value)?,
+            membership,
+            constants: comparable_constants(constants)?,
+        })
     };
-    let comparable = |constants: Vec<String>| {
-        constants
-            .iter()
-            .all(|constant| {
-                let trimmed = constant.trim();
-                trimmed.is_ascii()
-                    && trimmed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                    && !NUMBER_WORDS
-                        .iter()
-                        .any(|word| trimmed.eq_ignore_ascii_case(word))
-            })
-            .then(|| {
-                constants
-                    .iter()
-                    .map(|constant| constant.to_ascii_lowercase())
-                    .collect::<Vec<_>>()
-            })
-    };
-    let membership = |expression: &SpannedExpr, one_of: bool| match &expression.inner {
+    let membership_fact = |expression: &SpannedExpr, membership| match &expression.inner {
         Expr::Call(call) if call.func == Function::Contains => match call.args.as_slice() {
-            [list, value] => Some(ValueFact {
-                value: stable(value)?,
-                one_of,
-                constants: comparable(json_string_list(list)?)?,
-            }),
+            [list, value] => fact(value, membership, json_string_list(list)?),
             _ => None,
         },
         _ => None,
@@ -227,27 +213,66 @@ fn value_facts(condition: &SpannedExpr) -> Vec<ValueFact> {
             lhs,
             rhs,
         }) => {
-            let (value, constant) = match (&lhs.inner, &rhs.inner) {
-                (_, Expr::Literal(Literal::String(constant))) => (stable(lhs), constant),
-                (Expr::Literal(Literal::String(constant)), _) => (stable(rhs), constant),
-                _ => return Vec::new(),
+            let membership = if *op == BinOp::Eq {
+                Membership::OneOf
+            } else {
+                Membership::NoneOf
             };
-            value
-                .zip(comparable(vec![constant.to_string()]))
-                .map(|(value, constants)| ValueFact {
-                    value,
-                    one_of: *op == BinOp::Eq,
-                    constants,
-                })
-                .into_iter()
-                .collect()
+            match (&lhs.inner, &rhs.inner) {
+                (_, Expr::Literal(Literal::String(constant))) => {
+                    fact(lhs, membership, vec![constant.to_string()])
+                }
+                (Expr::Literal(Literal::String(constant)), _) => {
+                    fact(rhs, membership, vec![constant.to_string()])
+                }
+                _ => None,
+            }
+            .into_iter()
+            .collect()
         }
         Expr::UnExpr {
             op: UnOp::Not,
             expr,
-        } => membership(expr, false).into_iter().collect(),
-        _ => membership(condition, true).into_iter().collect(),
+        } => membership_fact(expr, Membership::NoneOf)
+            .into_iter()
+            .collect(),
+        _ => membership_fact(condition, Membership::OneOf)
+            .into_iter()
+            .collect(),
     }
+}
+
+fn stable_value(expression: &SpannedExpr) -> Option<String> {
+    let Expr::Context(context) = &expression.inner else {
+        return None;
+    };
+    if context
+        .parts
+        .iter()
+        .any(|part| matches!(part.inner, Expr::Index(_) | Expr::Star))
+    {
+        return None;
+    }
+    context.as_pattern().filter(|pattern| {
+        STABLE_CONTEXTS
+            .iter()
+            .any(|prefix| pattern.starts_with(prefix))
+    })
+}
+
+fn comparable_constants(constants: Vec<String>) -> Option<Vec<String>> {
+    constants
+        .into_iter()
+        .map(|constant| {
+            let trimmed = constant.trim();
+            let comparable = trimmed.is_ascii()
+                && trimmed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && !NUMBER_WORDS
+                    .iter()
+                    .any(|word| trimmed.eq_ignore_ascii_case(word));
+            comparable.then(|| constant.to_ascii_lowercase())
+        })
+        .collect()
 }
 
 fn json_string_list(expression: &SpannedExpr) -> Option<Vec<String>> {
