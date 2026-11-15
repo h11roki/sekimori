@@ -27,6 +27,8 @@ const EVENT_SENDER: &str = "github.event.sender";
 const UPSTREAM_EVENT: &str = "github.event.workflow_run.event";
 const UPSTREAM_REPOSITORY: &str = "github.event.workflow_run.head_repository.full_name";
 const THIS_REPOSITORY: &str = "github.repository";
+const UPSTREAM_BRANCH: &str = "github.event.workflow_run.head_branch";
+const DEFAULT_BRANCH: &str = "github.event.repository.default_branch";
 type EventPresent = fn(&Events) -> bool;
 const UPSTREAM_EVENTS: [(&str, UpstreamOrigin, EventPresent); 8] = [
     ("workflow_dispatch", UpstreamOrigin::Writers, |events| {
@@ -509,6 +511,39 @@ fn trigger_origin(events: &Events) -> UpstreamOrigin {
     match origins.iter().max() {
         Some(widest) if origins.len() as u32 == started_by_name => *widest,
         _ => UpstreamOrigin::Anyone,
+    }
+}
+
+pub(super) fn upstream_on_default_branch(step: &AgentStep) -> bool {
+    let conditions = conditions(step);
+    let required = |first: &str, second: &str| {
+        conditions
+            .iter()
+            .flatten()
+            .any(|condition| requires_equal(condition, first, second))
+    };
+    required(UPSTREAM_REPOSITORY, THIS_REPOSITORY) && required(UPSTREAM_BRANCH, DEFAULT_BRANCH)
+}
+
+fn requires_equal(expression: &SpannedExpr, first: &str, second: &str) -> bool {
+    match &expression.inner {
+        Expr::BinExpr(BinExpr {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) => requires_equal(lhs, first, second) || requires_equal(rhs, first, second),
+        Expr::BinExpr(BinExpr {
+            op: BinOp::Eq,
+            lhs,
+            rhs,
+        }) => match (&lhs.inner, &rhs.inner) {
+            (Expr::Context(left), Expr::Context(right)) => {
+                (left.matches(first) && right.matches(second))
+                    || (left.matches(second) && right.matches(first))
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 

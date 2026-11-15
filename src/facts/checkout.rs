@@ -1,6 +1,7 @@
 use github_actions_models::workflow::job::{RunStep, UsesStep};
 use yamlpath::{Component, Route};
 
+use super::trigger::upstream_on_default_branch;
 use super::{
     ENV_CONTEXT, EXPRESSION_START, ExternalEvent, Input, NearestEnv, SETTINGS_INPUT, agent_env,
     ends_word, lookup, lookup_in, nearest_env, program_name, references_variable, shell_programs,
@@ -70,14 +71,25 @@ pub fn head_checkout<'w>(
     step: &AgentStep<'w>,
     events: &[ExternalEvent],
 ) -> Option<HeadCheckout<'w>> {
-    let privileged = events.iter().any(|event| {
-        matches!(
-            event,
-            ExternalEvent::PullRequestTarget
-                | ExternalEvent::WorkflowRun
-                | ExternalEvent::IssueComment
-        )
-    });
+    let privileged_events: Vec<&ExternalEvent> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ExternalEvent::PullRequestTarget
+                    | ExternalEvent::WorkflowRun
+                    | ExternalEvent::IssueComment
+            )
+        })
+        .collect();
+    let privileged = !privileged_events.is_empty();
+    if privileged_events
+        .iter()
+        .all(|event| **event == ExternalEvent::WorkflowRun)
+        && upstream_on_default_branch(step)
+    {
+        return None;
+    }
     let loads = match step.agent {
         Agent::ClaudeCode => events.contains(&ExternalEvent::WorkflowRun).then_some(
             "on workflow_run claude-code-action keeps the PR's .claude/ and CLAUDE.md",
@@ -399,6 +411,38 @@ jobs:
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn a_workflow_run_limited_to_the_default_branch_of_this_repository_checks_out_no_pr_head() {
+        let with_condition = |condition: &str| {
+            found(&format!(
+                "on: workflow_run
+jobs:
+  agent:
+    if: {condition}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{{{ github.event.workflow_run.head_sha }}}}
+      - uses: anthropics/claude-code-base-action@beta
+"
+            ))
+        };
+        assert_eq!(
+            with_condition(
+                "github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.repository.default_branch == github.event.workflow_run.head_branch"
+            ),
+            None
+        );
+        for condition in [
+            "github.event.workflow_run.head_repository.full_name == github.repository",
+            "github.event.workflow_run.head_branch == github.event.repository.default_branch",
+            "github.event.workflow_run.head_repository.full_name == github.repository || github.event.workflow_run.head_branch == github.event.repository.default_branch",
+        ] {
+            assert!(with_condition(condition).is_some(), "{condition}");
+        }
     }
 
     #[test]

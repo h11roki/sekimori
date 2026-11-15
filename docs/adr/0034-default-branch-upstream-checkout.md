@@ -5,7 +5,7 @@
 
 ## 文脈
 
-- Claude Code の base action のワークフローを集めた調査(PR #47)で、`pr-head-checkout` の 2 件が誤検知だった。どちらも次の形だった
+- Claude Code の base action のワークフローを集めた調査(PR #46)で、`pr-head-checkout` の 2 件が誤検知だった。どちらも次の形だった
   - `on: workflow_run`
   - ジョブの `if:` に、`github.event.workflow_run.head_repository.full_name == github.repository` と `github.event.workflow_run.head_branch == github.event.repository.default_branch` が「かつ」でつながる
   - `actions/checkout` の `ref: ${{ github.event.workflow_run.head_sha }}`
