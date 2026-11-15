@@ -3,7 +3,8 @@ use serde_json::Value;
 use yamlpath::Route;
 
 use super::{
-    Input, SETTINGS_INPUT, before_comment, input, input_route, is_assignment, lookup, program_name,
+    Input, SETTINGS_INPUT, before_comment, enabled, input, input_route, is_assignment, lookup,
+    program_name,
 };
 use crate::agent::{Agent, AgentStep};
 
@@ -54,16 +55,17 @@ const INTERPRETERS: [&str; 24] = [
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
-const RUN_SUBCOMMANDS: [(&str, &[&str]); 12] = [
+const RUN_SUBCOMMANDS: [(&str, &[&str]); 13] = [
     (
         "npm",
         &["exec", "x", "init", "create", "install", "i", "add"],
     ),
     ("pnpm", &["dlx", "exec", "create", "add"]),
     ("yarn", &["dlx", "exec", "create", "add"]),
-    ("bun", &["x", "create", "add"]),
+    ("bun", &["x", "create", "add", "install", "i"]),
     ("pip", &["install"]),
-    ("deno", &["run"]),
+    ("pipx", &["run", "install"]),
+    ("deno", &["run", "eval"]),
     ("uv", &["run"]),
     ("poetry", &["run"]),
     ("go", &["run"]),
@@ -108,9 +110,9 @@ const PROJECT_CODE_TOOLS: [&str; 32] = [
 const RELATIVE_PATH_PREFIXES: [&str; 2] = ["./", "../"];
 const CLAUDE_EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 const CLAUDE_EDIT_RULE: &str = "Edit";
-const CLAUDE_EDIT_ANYWHERE: [&str; 5] = ["", "*", "**", "./**", "/**"];
 const CLAUDE_AUTO_MODE: &str = "auto";
 const CLAUDE_PROMPT_INPUT: &str = "prompt";
+const CLAUDE_TRACK_PROGRESS_INPUT: &str = "track_progress";
 const CLAUDE_NO_AUTO_MODE_INPUTS: [&str; 3] = [
     "allowed_non_write_users",
     "allowed_bots",
@@ -190,19 +192,15 @@ impl<'w> ClaudePermissions<'w> {
             .map(|(mode, _)| mode.as_str())
     }
 
-    fn edits(&self) -> bool {
-        self.edit_allowed
-            || self
-                .mode()
-                .is_some_and(|mode| [CLAUDE_ACCEPT_EDITS_MODE, CLAUDE_AUTO_MODE].contains(&mode))
-    }
-
     fn may_edit(&self, edits_by_default: bool) -> bool {
-        (edits_by_default || self.edits())
-            && !self.denied.iter().any(|deny| {
-                pattern_of(deny, CLAUDE_EDIT_RULE)
-                    .is_some_and(|pattern| CLAUDE_EDIT_ANYWHERE.contains(&pattern.trim()))
-            })
+        let edit_mode = self
+            .mode()
+            .is_some_and(|mode| [CLAUDE_ACCEPT_EDITS_MODE, CLAUDE_AUTO_MODE].contains(&mode));
+        (edits_by_default || self.edit_allowed || edit_mode)
+            && !self
+                .denied
+                .iter()
+                .any(|deny| pattern_of(deny, CLAUDE_EDIT_RULE).is_some_and(covers_every_file))
     }
 
     fn broad_tool(self, edits_by_default: bool) -> Option<BroadTool<'w>> {
@@ -325,10 +323,10 @@ impl<'w> ClaudePermissions<'w> {
 
     fn allow(&mut self, tool: &str, setting: String, route: &Route<'w>) {
         let tool = tool.trim();
-        if CLAUDE_EDIT_TOOLS.iter().any(|edit| {
-            pattern_of(tool, edit)
-                .is_some_and(|pattern| CLAUDE_EDIT_ANYWHERE.contains(&pattern.trim()))
-        }) {
+        if CLAUDE_EDIT_TOOLS
+            .iter()
+            .any(|edit| pattern_of(tool, edit).is_some_and(covers_every_file))
+        {
             self.edit_allowed = true;
         }
         let Some(pattern) = pattern_of(tool, CLAUDE_SHELL_TOOL).map(str::trim) else {
@@ -452,6 +450,10 @@ fn command_reach(prefix: &str) -> Reach {
     }
 }
 
+fn covers_every_file(pattern: &str) -> bool {
+    pattern.trim().chars().all(|c| matches!(c, '*' | '/' | '.'))
+}
+
 fn command_name(program: &str) -> &str {
     program_name(program).trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
@@ -522,13 +524,17 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
 }
 
 fn claude_code_edits_by_default(step: &AgentStep, permissions: &ClaudePermissions) -> bool {
-    if step.agent != Agent::ClaudeCode || permissions.mode().is_some() {
+    if step.agent != Agent::ClaudeCode || permissions.cli_mode.is_some() {
         return false;
     }
-    input(step, CLAUDE_PROMPT_INPUT).is_none()
-        || !CLAUDE_NO_AUTO_MODE_INPUTS
-            .iter()
-            .any(|name| input(step, name).is_some_and(|(_, value)| !value.trim().is_empty()))
+    let agent_mode = input(step, CLAUDE_PROMPT_INPUT)
+        .is_some_and(|(_, value)| !value.trim().is_empty())
+        && !enabled(step, CLAUDE_TRACK_PROGRESS_INPUT);
+    !agent_mode
+        || permissions.settings_mode.is_none()
+            && !CLAUDE_NO_AUTO_MODE_INPUTS
+                .iter()
+                .any(|name| input(step, name).is_some_and(|(_, value)| !value.trim().is_empty()))
 }
 
 pub(super) fn claude_may_edit(step: &AgentStep) -> bool {
@@ -906,6 +912,24 @@ jobs:
         assert!(claude("        with:\n          claude_args: --allowedTools \"Bash(npx tsx scripts/build.ts)\"\n").is_some());
         assert!(claude("        with:\n          claude_args: --allowedTools \"Bash(CI=true npm test:*)\"\n").is_some());
         assert_eq!(claude(&args(" --disallowedTools \"Edit(**)\"")), None);
+        assert_eq!(claude(&args(" --disallowedTools \"Edit(//**)\"")), None);
+        let tag_mode = "        with:\n          settings: '{\"permissions\": {\"defaultMode\": \"default\"}}'\n          claude_args: --allowedTools \"Bash(npm test:*)\"\n";
+        assert!(claude(tag_mode).is_some());
+        assert!(
+            claude(&format!(
+                "{}          allowed_bots: dependabot\n          track_progress: true\n",
+                args("")
+            ))
+            .is_some()
+        );
+        assert!(
+            base("        with:\n          claude_args: --allowedTools \"Write(**/*),Bash(npm test:*)\"\n")
+                .is_some()
+        );
+        assert!(
+            base("        with:\n          claude_args: --allowedTools \"Bash(pipx run:*)\"\n")
+                .is_some()
+        );
         assert!(
             base("        with:\n          claude_args: --allowedTools \"Edit(/**),Bash(npm test:*)\"\n")
                 .is_some()

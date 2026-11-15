@@ -946,6 +946,38 @@ jobs:
     }
 
     #[test]
+    fn later_code_is_not_reported_when_claude_code_cannot_edit() {
+        let source = "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: review
+          allowed_bots: dependabot
+      - run: npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+";
+        let rules = |source: String| -> Vec<Rule> {
+            let workflow = Workflow::parse(Path::new("test.yml"), source).unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect()
+        };
+        assert!(!rules(source.to_string()).contains(&Rule::AgentCodeWithSecrets));
+        assert!(
+            rules(source.replace("          allowed_bots: dependabot\n", ""))
+                .contains(&Rule::AgentCodeWithSecrets)
+        );
+    }
+
+    #[test]
     fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
