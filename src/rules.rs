@@ -17,6 +17,8 @@ const COUNTED_WRITE_SCOPES: [&str; 5] =
     ["contents", "actions", "packages", "deployments", "id-token"];
 pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
+const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
+const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
@@ -296,12 +298,32 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
+    let agent_line = step.route.with_key(USES_KEY);
+    hits.retain(|hit| {
+        ![&hit.route, &agent_line]
+            .iter()
+            .any(|route| ignores(workflow.line_comment(route), hit.rule))
+    });
     Assessment {
         step,
         who_can_trigger,
         allowed_tools,
         permissions_and_secrets,
         hits,
+    }
+}
+
+fn ignores(comment: Option<&str>, rule: Rule) -> bool {
+    let Some((_, directive)) = comment.and_then(|comment| comment.split_once(IGNORE_DIRECTIVE))
+    else {
+        return false;
+    };
+    match directive.strip_prefix('[') {
+        Some(list) => list
+            .split(']')
+            .next()
+            .is_some_and(|ids| ids.split(',').any(|id| id.trim() == rule.id())),
+        None => directive.is_empty() || directive.starts_with(char::is_whitespace),
     }
 }
 
@@ -910,6 +932,51 @@ jobs:
         let assessments = assess(&two_secrets, &Upstreams::default());
         let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
         assert_eq!(rules, [Rule::OtherSecrets]);
+    }
+
+    #[test]
+    fn ignore_comments_drop_the_named_findings_without_changing_the_level() {
+        let rules_with = |agent_comment: &str, args_comment: &str| {
+            let workflow = Workflow::parse(
+                Path::new("test.yml"),
+                format!(
+                    "on: issue_comment
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1 {agent_comment}
+        with:
+          github_token: ${{{{ github.token }}}}
+          allowed_non_write_users: '*'
+          claude_args: --allowedTools Bash {args_comment}
+"
+                ),
+            )
+            .unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assessments[0]
+                .findings()
+                .iter()
+                .map(|finding| (finding.level, finding.hit.rule))
+                .collect::<Vec<_>>()
+        };
+        let both = vec![
+            (Level::Error, Rule::UnrestrictedTrigger),
+            (Level::Error, Rule::BroadTools),
+        ];
+        assert_eq!(rules_with("", ""), both);
+        assert_eq!(rules_with("# sekimori: ignore", ""), []);
+        assert_eq!(
+            rules_with("# sekimori: ignore[broad-tools] reviewed", ""),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
+        assert_eq!(
+            rules_with("", "# sekimori: ignore[unrestricted-trigger, broad-tools]"),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
+        assert_eq!(rules_with("# sekimori: ignored", ""), both);
+        assert_eq!(rules_with("# sekimori: ignore[pr-head]", ""), both);
     }
 
     #[test]

@@ -217,6 +217,16 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 - `agent-code-with-secrets`: run build and test steps that need secrets in a separate job that checks out the repository again, or before the agent step, so they never run files the agent edited.
 - Set `permissions:` on the job, and give write access to `contents`, `actions`, `packages`, `deployments` or `id-token` only when the agent needs it. Without `permissions:`, `GITHUB_TOKEN` gets the repository default.
 
+### Ignoring a finding
+
+If you accept a finding, add a comment on the line sekimori reports, or on the agent step's `uses:` line to cover every finding of that step:
+
+```yaml
+      - uses: google-github-actions/run-gemini-cli@v0 # sekimori: ignore[broad-tools]
+```
+
+List several rule IDs with commas, or write `# sekimori: ignore` alone to ignore every rule on that line. Ignored findings are left out of the output and the exit code; the other findings of the step keep their level.
+
 ## Limitations
 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
