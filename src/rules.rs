@@ -916,10 +916,8 @@ jobs:
     }
 
     #[test]
-    fn the_codex_bedrock_key_is_already_in_the_agents_hands() {
-        let workflow = Workflow::parse(
-            Path::new("test.yml"),
-            "on: issue_comment
+    fn codex_holds_every_variable_of_its_env_but_not_those_of_later_steps() {
+        let source = "on: issue_comment
 permissions:
   contents: read
 jobs:
@@ -927,15 +925,25 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI }}
     steps:
       - uses: openai/codex-action@v1
       - run: npm test
-"
-            .to_string(),
-        )
-        .unwrap();
-        let assessments = assess(&workflow, &Upstreams::default());
-        assert!(assessments[0].hits.is_empty());
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+";
+        let rules = |source: String| -> Vec<Rule> {
+            let workflow = Workflow::parse(Path::new("test.yml"), source).unwrap();
+            assess(&workflow, &Upstreams::default())[0]
+                .hits
+                .iter()
+                .map(|hit| hit.rule)
+                .collect()
+        };
+        assert_eq!(rules(source.to_string()), [Rule::AgentCodeWithSecrets]);
+        assert!(
+            rules(source.replace("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", "CI: true")).is_empty()
+        );
     }
 
     #[test]

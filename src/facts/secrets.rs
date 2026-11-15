@@ -97,10 +97,13 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
         .collect();
     secrets.extend(
         env.variables()
-            .filter(|(variable, _)| {
-                reaches_agent(step.agent, variable.name, gemini_settings)
-                    || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
-                    || (step.agent == Agent::Codex && codex_credential(variable.name))
+            .filter(|(variable, _)| match step.agent {
+                Agent::Codex => true,
+                Agent::ClaudeCode => reaches_agent(step.agent, variable.name, gemini_settings),
+                Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::GeminiCli => {
+                    reaches_agent(step.agent, variable.name, gemini_settings)
+                        || TOKEN_VARIABLES.contains(&variable.name)
+                }
             })
             .filter_map(|(_, secret)| secret.cloned()),
     );
