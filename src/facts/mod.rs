@@ -29,6 +29,10 @@ const EXPRESSION_START: &str = "${{";
 const EXPRESSION_END: &str = "}}";
 const ENV_CONTEXT: &str = "env";
 const SETTINGS_INPUT: &str = "settings";
+const LINE_CONTINUATION: &str = "\\\n";
+const SHELL_COMMAND_FLAG: &str = "-c";
+const COMMAND_SEPARATORS: &str = ";&|()`";
+const WORD_SEPARATORS: &str = "\"'";
 
 enum Input<'w> {
     Missing,
@@ -87,6 +91,63 @@ fn before_comment(text: &str) -> &str {
         previous = c;
     }
     text
+}
+
+fn shell_programs(run: &str) -> Vec<Vec<String>> {
+    let script = flatten_expressions(&run.replace(LINE_CONTINUATION, " "));
+    let mut programs = Vec::new();
+    let commands = script
+        .lines()
+        .map(before_comment)
+        .flat_map(|line| line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
+    for command in commands {
+        let words: Vec<&str> = command
+            .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(c))
+            .filter(|word| !word.is_empty())
+            .collect();
+        for position in program_positions(&words) {
+            programs.push(
+                words[position..]
+                    .iter()
+                    .map(|word| word.to_string())
+                    .collect(),
+            );
+        }
+    }
+    programs
+}
+
+fn flatten_expressions(text: &str) -> String {
+    let mut flattened = String::new();
+    let mut last = 0;
+    for span in expression_spans(text) {
+        flattened.push_str(&text[last..span.start]);
+        flattened.extend(text[span.clone()].chars().filter(|c| {
+            !c.is_whitespace() && !COMMAND_SEPARATORS.contains(*c) && !WORD_SEPARATORS.contains(*c)
+        }));
+        last = span.end;
+    }
+    flattened.push_str(&text[last..]);
+    flattened
+}
+
+fn program_positions(words: &[&str]) -> Vec<usize> {
+    let first = words.iter().position(|word| !is_assignment(word));
+    let after_shell_flag = words
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| **word == SHELL_COMMAND_FLAG)
+        .map(|(index, _)| index + 1)
+        .filter(|index| *index < words.len());
+    first.into_iter().chain(after_shell_flag).collect()
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 fn program_name(word: &str) -> &str {
