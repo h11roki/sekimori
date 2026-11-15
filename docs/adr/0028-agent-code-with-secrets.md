@@ -30,12 +30,12 @@
   - codex-action: `sandbox` が `read-only` でなく、`permission-profile` が `:read-only` でない
   - run-gemini-cli: `settings` が無いか、読めて `tools.core` が無いか、`tools.core` に `write_file`、`replace`、`run_shell_command` のどれかがあり `tools.exclude` で外していない。`settings` が式などで読めないときは、書き換えられるとみなす
 - コードを動かすコマンドは、`run` を ADR 0014 と同じくシェルの順で区切り、各コマンドの名前で決める
-  - `./` で始まるパス、`bash` などのシェルとインタプリタ(`python`、`node`、`ruby`、`perl`)にファイルか `-m` を渡す形
+  - `./` で始まるパス、`bash` などのシェルとインタプリタ(`python`、`node`、`ruby`、`perl`、`pwsh`)にファイルか `-m` を渡す形。その場のコードを渡すフラグ(`-c`、`-e`、`-0pe` のようにまとめた形も)、ヒアドキュメント(`<<`)、作業場所の外のパス(`/` や、`$GITHUB_WORKSPACE` 以外の `$` で始まるもの)は除く
   - `make`、`pytest`、`tox`、`nox`、`pre-commit`、`gradle`、`mvn`、`rake`、`npx`
   - 部分コマンドまで決めるもの: `npm`、`pnpm`、`yarn`、`bun` の `run`、`test`、`install`、`ci`、`exec`、`build`、`start`、`publish`。`cargo` の `test`、`build`、`run`、`publish`。`go` の `test`、`build`、`run`、`generate`。`dotnet` の `test`、`build`、`run`。`bundle exec`、`uv run`、`poetry run`
 - 秘密情報は、ADR 0027 と同じく、そのステップ、ジョブ、ワークフローの `env` と、`run` の本文の `${{ secrets.* }}`(`GITHUB_TOKEN` を除く)
 - 後のステップの `if:` が定数で偽なら数えない
-- 指摘の位置は、最初に当たった後のステップの `run`。秘密情報は、当たった後のステップ全てから探す
+- 指摘の位置は、コードを動かすコマンドを持ち、秘密情報も届く最初の後のステップの `run`
 
 ## 理由
 

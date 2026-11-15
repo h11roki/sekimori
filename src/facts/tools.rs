@@ -21,6 +21,7 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
+const GEMINI_EDIT_TOOLS: [&str; 4] = ["write_file", "replace", "run_shell_command", "ShellTool"];
 const INTERPRETERS: [&str; 24] = [
     "bash",
     "sh",
@@ -293,9 +294,7 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
             });
         }
     };
-    let settings: Value =
-        serde_json::from_reader(CommentSettings::c_style().strip_comments(value.as_bytes()))
-            .ok()?;
+    let settings = settings_json(value)?;
     let route = input_route(step, key);
     let Some(core) = settings
         .get("tools")
@@ -323,6 +322,36 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
         setting: format!("{key} allows `{tool}` in tools.core"),
         route,
     })
+}
+
+pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
+    let Input::Text { value, .. } = lookup(step, SETTINGS_INPUT) else {
+        return true;
+    };
+    let Some(settings) = settings_json(value) else {
+        return true;
+    };
+    let tools = settings.get("tools");
+    let Some(core) = tools
+        .and_then(|tools| tools.get("core"))
+        .filter(|core| !core.is_null())
+    else {
+        return true;
+    };
+    let excluded: Vec<&str> = string_array(tools.and_then(|tools| tools.get("exclude")))
+        .map(str::trim)
+        .collect();
+    string_array(Some(core)).map(str::trim).any(|tool| {
+        GEMINI_EDIT_TOOLS.iter().any(|edit| {
+            pattern_of(tool, edit).is_some()
+                && !excluded.contains(edit)
+                && !excluded.contains(&tool)
+        })
+    })
+}
+
+fn settings_json(value: &str) -> Option<Value> {
+    serde_json::from_reader(CommentSettings::c_style().strip_comments(value.as_bytes())).ok()
 }
 
 #[cfg(test)]

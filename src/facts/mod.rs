@@ -3,6 +3,7 @@ mod output;
 mod secrets;
 mod tools;
 mod trigger;
+mod workspace;
 
 use std::ops::Range;
 
@@ -24,6 +25,7 @@ pub use trigger::{
     ExternalEvent, OpenTrigger, UpstreamOrigin, Upstreams, condition_origin, external_events,
     never_runs, open_trigger, outside_events,
 };
+pub use workspace::{AgentCode, agent_code_with_secrets};
 
 const EXPRESSION_START: &str = "${{";
 const EXPRESSION_END: &str = "}}";
