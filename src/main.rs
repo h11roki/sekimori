@@ -1,6 +1,6 @@
 use std::cell::LazyCell;
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -40,13 +40,13 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let sarif_file = given_path(&cli.sarif_file);
-    let summary_file = given_path(&cli.summary_file);
+    let sarif_file = given_path(cli.sarif_file.as_deref());
+    let summary_file = given_path(cli.summary_file.as_deref());
     let wants_sarif = matches!(cli.format, Format::Sarif) || sarif_file.is_some();
     let mut stdout = io::stdout().lock();
     let mut errors = Vec::new();
     let mut results = Vec::new();
-    let mut plain_text = String::new();
+    let mut summary_text = summary_file.as_ref().map(|_| String::new());
     let mut found = false;
     let mut workflows = Vec::new();
     let mut unreadable = Vec::new();
@@ -71,8 +71,9 @@ fn main() -> ExitCode {
                     }
                     Format::Plain | Format::Sarif => eprintln!("{line}"),
                 }
-                if summary_file.is_some() {
-                    plain_text.push_str(&format!("{line}\n"));
+                if let Some(text) = &mut summary_text {
+                    text.push_str(&line);
+                    text.push('\n');
                 }
                 errors.push(error.to_string());
             }
@@ -101,8 +102,9 @@ fn main() -> ExitCode {
                     }
                     Format::Sarif => {}
                 }
-                if summary_file.is_some() {
-                    plain_text.push_str(&format!("{line}\n"));
+                if let Some(text) = &mut summary_text {
+                    text.push_str(&line);
+                    text.push('\n');
                 }
             }
         }
@@ -112,22 +114,16 @@ fn main() -> ExitCode {
         }
         found = true;
         for finding in &findings {
-            let text = (matches!(cli.format, Format::Plain) || summary_file.is_some())
-                .then(|| plain(workflow, finding));
-            let written = match (cli.format, &text) {
-                (Format::Plain, Some(text)) => stdout.write_all(text.as_bytes()),
-                (Format::Github, _) => {
-                    stdout.write_all(github(workflow, &path, finding).as_bytes())
-                }
-                _ => Ok(()),
+            let written = match cli.format {
+                Format::Plain => stdout.write_all(plain(workflow, finding).as_bytes()),
+                Format::Github => stdout.write_all(github(workflow, &path, finding).as_bytes()),
+                Format::Sarif => Ok(()),
             };
             if let Err(error) = written {
                 return write_failure(&error);
             }
-            if summary_file.is_some()
-                && let Some(text) = text
-            {
-                plain_text.push_str(&text);
+            if let Some(text) = &mut summary_text {
+                text.push_str(&plain(workflow, finding));
             }
         }
         if wants_sarif {
@@ -152,7 +148,7 @@ fn main() -> ExitCode {
             failure = Some(file_failure(file, &error));
         }
     }
-    if let Some(file) = &summary_file {
+    if let (Some(file), Some(text)) = (&summary_file, &summary_text) {
         let appended = fs::metadata(file)
             .map(|metadata| metadata.len())
             .or_else(|error| match error.kind() {
@@ -161,7 +157,7 @@ fn main() -> ExitCode {
             })
             .and_then(|already_written| {
                 let already_written = usize::try_from(already_written).unwrap_or(usize::MAX);
-                match summary(&plain_text, already_written) {
+                match summary(text, already_written) {
                     Some(markdown) => OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -196,9 +192,6 @@ fn file_failure(file: &Path, error: &io::Error) -> ExitCode {
     ExitCode::from(EXIT_FAILURE)
 }
 
-fn given_path(value: &Option<OsString>) -> Option<PathBuf> {
-    value
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+fn given_path(value: Option<&OsStr>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }

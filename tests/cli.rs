@@ -310,3 +310,28 @@ fn an_empty_summary_file_path_is_skipped() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
 }
+
+#[test]
+fn an_unwritable_sarif_file_still_leaves_the_summary() {
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .arg("--sarif-file")
+        .arg(directory.path().join("missing/sekimori.sarif"))
+        .arg("--summary-file")
+        .arg(&summary)
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        std::fs::read_to_string(&summary)
+            .unwrap()
+            .starts_with("## sekimori\n")
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("sekimori.sarif")
+    );
+}

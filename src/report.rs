@@ -78,29 +78,33 @@ pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
 }
 
 pub fn summary(output: &str, already_written: usize) -> Option<String> {
-    let heading = format!("\n## {TOOL_NAME}\n\n");
+    let separator = if already_written > 0 { "\n" } else { "" };
+    let heading = format!("{separator}## {TOOL_NAME}\n\n");
     let cut_note = format!("\n{SUMMARY_CUT_NOTE}\n");
-    let room = SUMMARY_FILE_LIMIT.checked_sub(already_written + heading.len() + cut_note.len())?;
-    let mut body = String::new();
-    let mut cut = false;
-    let lines = output
+    let room = SUMMARY_FILE_LIMIT.checked_sub(already_written.saturating_add(heading.len()))?;
+    let lines: Vec<String> = output
         .strip_suffix('\n')
         .unwrap_or(output)
         .split('\n')
-        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'));
-    for line in lines {
-        let indented = format!("{SUMMARY_INDENT}{line}\n");
-        if body.len() + indented.len() > room {
-            cut = true;
-            break;
-        }
-        body.push_str(&indented);
-    }
-    if body.trim().is_empty() && !cut {
+        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
+        .map(|line| format!("{SUMMARY_INDENT}{line}\n"))
+        .collect();
+    let body: String = lines.concat();
+    if body.trim().is_empty() {
         return None;
     }
-    let note = if cut { cut_note } else { String::new() };
-    Some(format!("{heading}{body}{note}"))
+    if body.len() <= room {
+        return Some(format!("{heading}{body}"));
+    }
+    let room = room.checked_sub(cut_note.len())?;
+    let mut kept = String::new();
+    for line in &lines {
+        if kept.len() + line.len() > room {
+            break;
+        }
+        kept.push_str(line);
+    }
+    Some(format!("{heading}{kept}{cut_note}"))
 }
 
 fn annotation(
@@ -348,8 +352,9 @@ mod tests {
     fn the_summary_indents_every_line_and_turns_carriage_returns_into_lines() {
         assert_eq!(
             summary("a\r\nb\rc\n", 0).unwrap(),
-            "\n## sekimori\n\n    a\n    b\n    c\n"
+            "## sekimori\n\n    a\n    b\n    c\n"
         );
+        assert!(summary("a\n", 1).unwrap().starts_with("\n## sekimori\n"));
     }
 
     #[test]
@@ -367,7 +372,7 @@ mod tests {
         assert!(written.ends_with(&format!("\n{SUMMARY_CUT_NOTE}\n")));
         let body: Vec<_> = written
             .lines()
-            .skip(3)
+            .skip(2)
             .take_while(|text| !text.is_empty())
             .collect();
         assert!(
@@ -384,6 +389,19 @@ mod tests {
         assert!(SUMMARY_FILE_LIMIT - 1000 + written.len() <= SUMMARY_FILE_LIMIT);
         assert!(written.contains(SUMMARY_CUT_NOTE));
         assert_eq!(summary(&output, SUMMARY_FILE_LIMIT), None);
+    }
+
+    #[test]
+    fn a_summary_that_fills_the_room_exactly_is_not_cut() {
+        let output = "x\n".repeat(100);
+        let size = summary(&output, 1).unwrap().len();
+        let written = summary(&output, SUMMARY_FILE_LIMIT - size).unwrap();
+        assert!(!written.contains(SUMMARY_CUT_NOTE));
+        assert!(
+            summary(&output, SUMMARY_FILE_LIMIT - size + 1)
+                .unwrap()
+                .contains(SUMMARY_CUT_NOTE)
+        );
     }
 
     #[test]
