@@ -5,7 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use sekimori::facts::Upstreams;
-use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results, warning};
+use sekimori::report::{
+    annotation_file, artifact_uri, github, github_warning, plain, sarif_log, sarif_results, warning,
+};
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
@@ -16,6 +18,7 @@ const EXIT_FAILURE: u8 = 2;
 enum Format {
     Plain,
     Sarif,
+    Github,
 }
 
 #[derive(Parser)]
@@ -49,14 +52,27 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        if let Format::Plain = cli.format {
-            let mut warned = HashSet::new();
-            for assessment in &assessments {
-                for message in assessment.warnings() {
-                    let line = warning(workflow, &assessment.directive_route(), message);
-                    if warned.insert(line.clone()) {
-                        eprintln!("{line}");
+        let file = annotation_file(&repository_path(&workflow.path));
+        let mut warned = HashSet::new();
+        for assessment in &assessments {
+            for message in assessment.warnings() {
+                let route = assessment.directive_route();
+                match cli.format {
+                    Format::Plain => {
+                        let line = warning(workflow, &route, message);
+                        if warned.insert(line.clone()) {
+                            eprintln!("{line}");
+                        }
                     }
+                    Format::Github => {
+                        let line = github_warning(workflow, &file, &route, message);
+                        if warned.insert(line.clone())
+                            && let Err(error) = stdout.write_all(line.as_bytes())
+                        {
+                            return write_failure(&error);
+                        }
+                    }
+                    Format::Sarif => {}
                 }
             }
         }
@@ -69,6 +85,15 @@ fn main() -> ExitCode {
             Format::Plain => {
                 for finding in &findings {
                     if let Err(error) = stdout.write_all(plain(workflow, finding).as_bytes()) {
+                        return write_failure(&error);
+                    }
+                }
+            }
+            Format::Github => {
+                for finding in &findings {
+                    if let Err(error) =
+                        stdout.write_all(github(workflow, &file, finding).as_bytes())
+                    {
                         return write_failure(&error);
                     }
                 }

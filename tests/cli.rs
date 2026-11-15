@@ -177,3 +177,22 @@ fn an_unknown_rule_in_an_ignore_directive_is_warned_about_on_stderr() {
     assert!(stdout.contains("[broad-tools]"));
     assert!(!stdout.contains("[unrestricted-trigger]"));
 }
+
+#[test]
+fn the_github_format_prints_annotations_with_escaped_messages() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sekimori"))
+        .args(["--format", "github"])
+        .arg(Path::new(FIXTURES).join("ignored/typo.yml"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("::warning file="));
+    assert!(lines[0].ends_with("title=sekimori::`broad-tool` is not a sekimori rule"));
+    assert!(lines[1].starts_with("::error file="));
+    assert!(lines[1].contains(",line=10,col=11,title=sekimori broad-tools::"));
+    assert!(lines[1].contains("can run unrestricted tools%0A  who can trigger"));
+    assert!(output.stderr.is_empty());
+}

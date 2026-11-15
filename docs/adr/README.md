@@ -71,6 +71,6 @@
 | [0030](0030-exclusive-step-conditions.md) | エージェントのステップと両立しない `if:` を持つ後のステップは、同じ実行では動かないとみなす | 承認 |
 | [0031](0031-ignore-comments.md) | 指摘は、エージェントのステップの `uses:` の行の `# sekimori: ignore[規則]` のコメントで抑える | 承認 |
 | [0032](0032-claude-code-base-action.md) | Claude Code の base action も、4 つ目のエージェントとして検査する | 承認 |
-| [0033](0033-ignore-warnings.md) | 読めない抑える指示と知らない規則の ID は、標準エラー出力に警告する | 承認 |
+| [0033](0033-ignore-warnings.md) | 読めない抑える指示と知らない規則の ID は、標準エラー出力に警告する | 承認(`--format github` での出し方は 0035 で足した) |
 | [0034](0034-default-branch-upstream-checkout.md) | workflow_run で、上流が同じリポジトリの既定の枝で動いたと確かめていれば、その commit の取り出しは PR の head としない | 承認 |
 | [0035](0035-github-annotations.md) | `--format github` で GitHub の注釈を出し、Action は注釈とジョブの要約に指摘を出す | 承認 |

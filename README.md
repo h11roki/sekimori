@@ -53,7 +53,7 @@ jobs:
           category: sekimori
 ```
 
-The sekimori step fails when it finds something, so the upload step runs with `!cancelled()`. Pull requests from forks cannot get `security-events: write`, so the upload is skipped for them; the findings are still printed in the log.
+The sekimori step fails when it finds something, so the upload step runs with `!cancelled()`. Findings also appear as annotations on the workflow files, including in a pull request's changed files, and in the job summary. Pull requests from forks cannot get `security-events: write`, so the upload is skipped for them; the findings are still printed in the log.
 
 The action downloads the release binary that matches its own version and checks its [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) before running it. It works on GitHub-hosted Linux (x64, ARM64), macOS (ARM64) and Windows (x64) runners, and needs the GitHub CLI (`gh`) on self-hosted runners.
 
@@ -91,6 +91,7 @@ Then run it in your repository:
 sekimori                         # checks .github/workflows
 sekimori path/to/workflow.yml    # files or directories
 sekimori --format sarif > sekimori.sarif
+sekimori --format github         # GitHub Actions annotations
 ```
 
 For this workflow, which lets anyone start Gemini CLI with a comment:

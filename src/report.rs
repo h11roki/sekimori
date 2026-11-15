@@ -6,6 +6,7 @@ use yamlpath::Route;
 use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
 use crate::workflow::{RepositoryPath, Workflow};
 
+const TOOL_NAME: &str = "sekimori";
 const LABEL_WIDTH: usize = 21;
 const VALUE_WIDTH: usize = 5;
 const SARIF_VERSION: &str = "2.1.0";
@@ -34,14 +35,57 @@ pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
         finding.level,
         finding.hit.rule.id(),
         headline(finding),
-        axis_rows(finding)
-            .into_iter()
-            .map(|(label, value, reason)| match reason {
-                Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
-                None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
-            })
-            .collect::<String>(),
+        breakdown(finding),
     )
+}
+
+pub fn github(workflow: &Workflow, file: &str, finding: &Finding) -> String {
+    let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));
+    let message = format!("{}\n{}", headline(finding), breakdown(finding));
+    format!(
+        "::{} file={},line={line},col={column},title={}::{}\n",
+        finding.level,
+        escape_property(file),
+        escape_property(&format!("{TOOL_NAME} {}", finding.hit.rule.id())),
+        escape_data(message.trim_end()),
+    )
+}
+
+pub fn github_warning(workflow: &Workflow, file: &str, route: &Route, message: &str) -> String {
+    let (line, column) = workflow.position(route).unwrap_or((1, 1));
+    format!(
+        "::warning file={},line={line},col={column},title={TOOL_NAME}::{}\n",
+        escape_property(file),
+        escape_data(message),
+    )
+}
+
+pub fn annotation_file(path: &RepositoryPath) -> String {
+    match path {
+        RepositoryPath::Relative(path) | RepositoryPath::Absolute(path) => {
+            path.display().to_string()
+        }
+    }
+}
+
+fn breakdown(finding: &Finding) -> String {
+    axis_rows(finding)
+        .into_iter()
+        .map(|(label, value, reason)| match reason {
+            Some(reason) => format!("  {label:<LABEL_WIDTH$}{value:<VALUE_WIDTH$}{reason}\n"),
+            None => format!("  {label:<LABEL_WIDTH$}{value}\n"),
+        })
+        .collect()
+}
+
+fn escape_data(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn escape_property(text: &str) -> String {
+    escape_data(text).replace(':', "%3A").replace(',', "%2C")
 }
 
 struct SamePlace<'f, 'a, 'w> {
@@ -233,6 +277,12 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn annotation_values_are_escaped_like_the_actions_toolkit() {
+        assert_eq!(escape_data("100% done\r\nnext"), "100%25 done%0D%0Anext");
+        assert_eq!(escape_property("a:b,c%"), "a%3Ab%2Cc%25");
+    }
     use crate::facts::Upstreams;
     use crate::rules::{Assessment, assess};
 
