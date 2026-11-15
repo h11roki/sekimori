@@ -6,12 +6,12 @@ use github_actions_expressions::{Expr, SpannedExpr};
 use github_actions_models::common::expr::LoE;
 use yamlpath::{Component, Route};
 
-use super::secrets::shell_secret;
+use super::secrets::shell_secrets;
 use super::{
-    ENV_CONTEXT, Input, constant_false, expression_spans, flowing_contexts, input, lookup_in,
-    nearest_env, parse_condition, parse_expression,
+    ENV_CONTEXT, Input, expression_spans, flowing_contexts, input, lookup_in, nearest_env,
+    parse_expression, running_later_steps,
 };
-use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
+use crate::agent::{Agent, AgentStep, JobStep, is_root_action};
 use crate::workflow::Workflow;
 
 const SCRIPT_ACTION: &str = "actions/github-script";
@@ -55,10 +55,9 @@ pub fn output_injection<'w>(
     } else {
         Vec::new()
     };
-    let mut expansions = job_steps(step.job_id, step.job)
+    let mut expansions = running_later_steps(step)
         .into_iter()
-        .filter(|(index, ..)| *index > step.index)
-        .filter_map(|(_, route, later)| {
+        .filter_map(|(route, later)| {
             let (shared, key, code, code_route, script_inputs) = match later {
                 JobStep::Run(run) => (
                     &run.shared,
@@ -83,14 +82,6 @@ pub fn output_injection<'w>(
                 }
                 JobStep::Uses(_) => return None,
             };
-            let never_runs = shared
-                .r#if
-                .as_ref()
-                .and_then(parse_condition)
-                .is_some_and(|condition| constant_false(&condition));
-            if never_runs {
-                return None;
-            }
             let env = nearest_env(workflow, step.job_id, step.job, &shared.env, &route);
             let mut sources = text_outputs.clone();
             sources.extend(
@@ -113,7 +104,7 @@ pub fn output_injection<'w>(
             };
             Some(OutputInjection {
                 setting: format!("a later step expands `{output}` into its `{key}`"),
-                secret: shell_secret(env, &secret_source),
+                secret: shell_secrets(env, &secret_source).into_iter().next(),
                 route: code_route,
             })
         });

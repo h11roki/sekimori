@@ -3,8 +3,7 @@ use yamlpath::{Component, Route};
 
 use super::{
     ENV_CONTEXT, EXPRESSION_START, ExternalEvent, Input, NearestEnv, SETTINGS_INPUT, agent_env,
-    before_comment, ends_word, expression_spans, lookup, lookup_in, nearest_env, program_name,
-    references_variable,
+    ends_word, lookup, lookup_in, nearest_env, program_name, references_variable, shell_programs,
 };
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
@@ -29,8 +28,6 @@ const BASE_WORKSPACE_EVENTS: [ExternalEvent; 4] = [
     ExternalEvent::Discussion,
     ExternalEvent::DiscussionComment,
 ];
-const LINE_CONTINUATION: &str = "\\\n";
-const SHELL_COMMAND_FLAG: &str = "-c";
 const WILDCARD: &str = "*";
 const HEAD_COMMITS: [&str; 3] = [
     "github.event.pull_request.head.sha",
@@ -60,8 +57,6 @@ const GIT_WORKTREE_COMMANDS: [&str; 8] = [
     "restore",
 ];
 const GH_PR_CHECKOUT: [&str; 3] = ["gh", "pr", "checkout"];
-const COMMAND_SEPARATORS: &str = ";&|()`";
-const WORD_SEPARATORS: &str = "\"'";
 const GEMINI_TRUST_VARIABLE: &str = "GEMINI_CLI_TRUST_WORKSPACE";
 
 #[derive(Debug)]
@@ -232,72 +227,28 @@ fn head_variables<'w>(env: &NearestEnv<'w>) -> Vec<&'w str> {
 }
 
 fn checks_out_head(step: &RunStep, head_variables: &[&str]) -> bool {
-    let script = flatten_expressions(&step.run.replace(LINE_CONTINUATION, " "));
     let mut fetched_head = false;
-    let commands = script
-        .lines()
-        .map(before_comment)
-        .flat_map(|line| line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
-    for command in commands {
-        let words: Vec<&str> = command
-            .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(c))
-            .filter(|word| !word.is_empty())
-            .collect();
-        for position in program_positions(&words) {
-            let program = &words[position..];
-            if program.len() >= GH_PR_CHECKOUT.len()
-                && program_name(program[0]) == GH_PR_CHECKOUT[0]
-                && program[1..GH_PR_CHECKOUT.len()] == GH_PR_CHECKOUT[1..]
-            {
-                return true;
-            }
-            let Some((subcommand, arguments)) = git_subcommand(program) else {
-                continue;
-            };
-            let names_head = names_head_commit(&normalized(&arguments.concat()))
-                || arguments
-                    .iter()
-                    .any(|argument| refers_to_head_variable(argument, head_variables));
-            if GIT_WORKTREE_COMMANDS.contains(&subcommand) && (names_head || fetched_head) {
-                return true;
-            }
-            fetched_head |= subcommand == GIT_FETCH && names_head;
+    for words in shell_programs(&step.run) {
+        let program: Vec<&str> = words.iter().map(String::as_str).collect();
+        if program.len() >= GH_PR_CHECKOUT.len()
+            && program_name(program[0]) == GH_PR_CHECKOUT[0]
+            && program[1..GH_PR_CHECKOUT.len()] == GH_PR_CHECKOUT[1..]
+        {
+            return true;
         }
+        let Some((subcommand, arguments)) = git_subcommand(&program) else {
+            continue;
+        };
+        let names_head = names_head_commit(&normalized(&arguments.concat()))
+            || arguments
+                .iter()
+                .any(|argument| refers_to_head_variable(argument, head_variables));
+        if GIT_WORKTREE_COMMANDS.contains(&subcommand) && (names_head || fetched_head) {
+            return true;
+        }
+        fetched_head |= subcommand == GIT_FETCH && names_head;
     }
     false
-}
-
-fn flatten_expressions(text: &str) -> String {
-    let mut flattened = String::new();
-    let mut last = 0;
-    for span in expression_spans(text) {
-        flattened.push_str(&text[last..span.start]);
-        flattened.extend(text[span.clone()].chars().filter(|c| {
-            !c.is_whitespace() && !COMMAND_SEPARATORS.contains(*c) && !WORD_SEPARATORS.contains(*c)
-        }));
-        last = span.end;
-    }
-    flattened.push_str(&text[last..]);
-    flattened
-}
-
-fn program_positions(words: &[&str]) -> Vec<usize> {
-    let first = words.iter().position(|word| !is_assignment(word));
-    let after_shell_flag = words
-        .iter()
-        .enumerate()
-        .filter(|(_, word)| **word == SHELL_COMMAND_FLAG)
-        .map(|(index, _)| index + 1)
-        .filter(|index| *index < words.len());
-    first.into_iter().chain(after_shell_flag).collect()
-}
-
-fn is_assignment(word: &str) -> bool {
-    word.split_once('=').is_some_and(|(name, _)| {
-        !name.is_empty()
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
 }
 
 fn git_subcommand<'a>(words: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {

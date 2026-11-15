@@ -142,6 +142,7 @@ Each rule that matched is printed with the step's breakdown. [Fixing findings](#
 | `agent-output-injection` | allowed tools | A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's `structured_output`, Codex's `final-message`, or Gemini CLI's `summary` or `error` in a `run` script or an `actions/github-script` `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. |
 | `long-lived-token` | permissions/secrets | The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of `GITHUB_TOKEN` or a short-lived app token. |
 | `other-secrets` | permissions/secrets | A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. |
+| `agent-code-with-secrets` | permissions/secrets | The agent can edit the workspace, and a later step in the job runs project code with a secret other than `GITHUB_TOKEN`: a `./` script or a relative path to a script file, a script file given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. |
 
 ## Severity
 
@@ -213,6 +214,7 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 
 - `long-lived-token`: give the agent `${{ github.token }}` or a short-lived token from [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token), not a personal access token stored as a secret.
 - `other-secrets`: use other secrets in separate steps instead of the agent's inputs or `env`.
+- `agent-code-with-secrets`: run build and test steps that need secrets in a separate job that checks out the repository again, or before the agent step, so they never run files the agent edited.
 - Set `permissions:` on the job, and give write access to `contents`, `actions`, `packages`, `deployments` or `id-token` only when the agent needs it. Without `permissions:`, `GITHUB_TOKEN` gets the repository default.
 
 ## Limitations
@@ -221,6 +223,7 @@ For `pr-head-checkout`, do not check out the pull request head before the agent 
 - It only knows the settings of the three actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
 - `if:` conditions on earlier jobs in `needs:` count when the agent job waits for them to succeed, directly or through other jobs: a waiting job's `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. `needs:` names must match job IDs exactly, including case. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
 - `agent-output-injection` reads only steps later in the agent's job: `run` scripts and `actions/github-script` `script`, directly or through `${{ env.NAME }}`. It does not follow job `outputs` into other jobs, wildcards such as `steps.*.outputs.summary`, other actions that take code, or `shell:` and `working-directory:`.
+- `agent-code-with-secrets` knows only the commands listed above. It does not read other build tools, actions that run workspace code, or later jobs that receive the workspace through artifacts or caches.
 
 ## Survey
 

@@ -21,6 +21,8 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("safety-strategy", "unsafe"),
 ];
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
+const GEMINI_FILE_EDIT_TOOLS: [[&str; 2]; 2] =
+    [["write_file", "WriteFileTool"], ["replace", "EditTool"]];
 const INTERPRETERS: [&str; 24] = [
     "bash",
     "sh",
@@ -47,7 +49,7 @@ const INTERPRETERS: [&str; 24] = [
     "eval",
     "exec",
 ];
-const WRAPPERS: [&str; 10] = [
+pub(super) const WRAPPERS: [&str; 10] = [
     "env", "sudo", "doas", "xargs", "nohup", "timeout", "nice", "command", "busybox", "time",
 ];
 
@@ -293,9 +295,7 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
             });
         }
     };
-    let settings: Value =
-        serde_json::from_reader(CommentSettings::c_style().strip_comments(value.as_bytes()))
-            .ok()?;
+    let settings = settings_json(value)?;
     let route = input_route(step, key);
     let Some(core) = settings
         .get("tools")
@@ -323,6 +323,39 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
         setting: format!("{key} allows `{tool}` in tools.core"),
         route,
     })
+}
+
+pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
+    let settings = match lookup(step, SETTINGS_INPUT) {
+        Input::Text { value, .. } => settings_json(value),
+        Input::Missing | Input::Unreadable => None,
+    };
+    let tools = settings.as_ref().and_then(|settings| settings.get("tools"));
+    let core: Option<Vec<&str>> = tools
+        .and_then(|tools| tools.get("core"))
+        .filter(|core| !core.is_null())
+        .map(|core| string_array(Some(core)).map(str::trim).collect());
+    let excluded: Vec<&str> = string_array(tools.and_then(|tools| tools.get("exclude")))
+        .map(str::trim)
+        .collect();
+    let usable = |names: &[&str], opens: fn(&str) -> bool| {
+        let allowed = core.as_ref().is_none_or(|core| {
+            core.iter().any(|tool| {
+                names
+                    .iter()
+                    .any(|name| pattern_of(tool, name).is_some_and(opens))
+            })
+        });
+        allowed && !names.iter().any(|name| excluded.contains(name))
+    };
+    GEMINI_FILE_EDIT_TOOLS
+        .iter()
+        .any(|names| usable(names, |_| true))
+        || usable(&GEMINI_SHELL_TOOLS, opens_any_command)
+}
+
+fn settings_json(value: &str) -> Option<Value> {
+    serde_json::from_reader(CommentSettings::c_style().strip_comments(value.as_bytes())).ok()
 }
 
 #[cfg(test)]

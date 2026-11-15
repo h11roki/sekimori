@@ -66,3 +66,4 @@
 | [0025](0025-gemini-without-prompt.md) | `prompt` を渡さない run-gemini-cli は、作業場所が既定のブランチのままと言えるときだけ、起動できる人の軸を数えない | 承認 |
 | [0026](0026-needs-gate.md) | エージェントのジョブが `needs:` で待つ前のジョブの `if:` も、エージェントのステップの条件として読む | 承認 |
 | [0027](0027-agent-output-injection.md) | エージェントの出力を後のステップがコードとして展開する形を、道具の軸の規則 `agent-output-injection` として数える | 承認 |
+| [0028](0028-agent-code-with-secrets.md) | エージェントが書き換えられるコードを、後のステップが秘密情報を持って動かす形を、権限と秘密情報の軸の規則 `agent-code-with-secrets` として数える | 承認 |

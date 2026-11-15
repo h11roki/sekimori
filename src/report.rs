@@ -394,7 +394,8 @@ total: 2 of 3"
                 "long-lived-token",
                 "pr-head-checkout",
                 "other-secrets",
-                "agent-output-injection"
+                "agent-output-injection",
+                "agent-code-with-secrets"
             ]
         );
         assert_eq!(run["invocations"][0]["executionSuccessful"], false);

@@ -6,10 +6,10 @@ use yamlpath::Route;
 
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
-    BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
-    UpstreamOrigin, Upstreams, broad_tool, condition_origin, external_events, head_checkout,
-    long_lived_token, never_runs, open_trigger, other_secret, output_injection, outside_events,
-    outside_text_cannot_reach, secret_env,
+    AgentCode, BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
+    UpstreamOrigin, Upstreams, agent_code_with_secrets, agent_secrets, broad_tool,
+    condition_origin, external_events, head_checkout, long_lived_token, never_runs, open_trigger,
+    other_secret, output_injection, outside_events, outside_text_cannot_reach, secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -29,16 +29,18 @@ pub enum Rule {
     AgentOutputInjection,
     LongLivedToken,
     OtherSecrets,
+    AgentCodeWithSecrets,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 6] = [
+    pub const ALL: [Rule; 7] = [
         Rule::UnrestrictedTrigger,
         Rule::BroadTools,
         Rule::LongLivedToken,
         Rule::PrHeadCheckout,
         Rule::OtherSecrets,
         Rule::AgentOutputInjection,
+        Rule::AgentCodeWithSecrets,
     ];
 
     pub fn id(self) -> &'static str {
@@ -47,6 +49,7 @@ impl Rule {
             Rule::BroadTools => "broad-tools",
             Rule::PrHeadCheckout => "pr-head-checkout",
             Rule::AgentOutputInjection => "agent-output-injection",
+            Rule::AgentCodeWithSecrets => "agent-code-with-secrets",
             Rule::LongLivedToken => "long-lived-token",
             Rule::OtherSecrets => "other-secrets",
         }
@@ -58,6 +61,7 @@ impl Rule {
             Rule::BroadTools => "can run unrestricted tools",
             Rule::PrHeadCheckout => "loads settings from a checked-out PR head",
             Rule::AgentOutputInjection => "has its output run as code by a later step",
+            Rule::AgentCodeWithSecrets => "can edit code that a later step runs with secrets",
             Rule::LongLivedToken => "gets a long-lived GitHub token",
             Rule::OtherSecrets => "can read other secrets",
         }
@@ -79,6 +83,9 @@ impl Rule {
             }
             Rule::AgentOutputInjection => {
                 "A later step in the job expands text the model wrote into code with `${{ }}`: Claude Code's structured_output, Codex's final-message, or Gemini CLI's summary or error in a `run` script or an actions/github-script `script`. Whoever steers the agent can then run commands in that step, and secrets that reach that step count on the permissions/secrets axis. Fills the allowed-tools axis."
+            }
+            Rule::AgentCodeWithSecrets => {
+                "The agent can edit files in the workspace, and a later step in the job runs project code with a secret other than GITHUB_TOKEN: a `./` script or a relative path to a script file, a script given to a shell or interpreter, or a known build or test command such as `npm test`, `make` or `pytest`. Whoever steers the agent can change that code and read the secret. Fills the permissions/secrets axis."
             }
             Rule::OtherSecrets => {
                 "A secret other than the agent's own credentials and the GitHub token reaches the agent through its inputs or environment. Fills the permissions/secrets axis."
@@ -269,6 +276,15 @@ fn assess_step<'w>(
             hits.push(Hit { rule, route });
             secret_reasons.push(setting);
         }
+    }
+    if let Some(AgentCode { setting, route }) =
+        agent_code_with_secrets(workflow, &step, &agent_secrets(&step, &env))
+    {
+        hits.push(Hit {
+            rule: Rule::AgentCodeWithSecrets,
+            route,
+        });
+        secret_reasons.push(setting);
     }
     if let Some(secret) = injection.and_then(|injection| injection.secret) {
         secret_reasons.push(format!(
@@ -761,6 +777,139 @@ jobs:
                 "secrets.DEPLOY_KEY reaches a later step that runs the agent's output"
             )
         );
+    }
+
+    #[test]
+    fn project_code_run_with_secrets_after_the_agent_fills_the_permissions_axis() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          allowed_non_write_users: '*'
+          github_token: ${{ github.token }}
+      - run: npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let assessment = &assessments[0];
+        let rules: Vec<_> = assessment
+            .findings()
+            .iter()
+            .map(|finding| (finding.level, finding.hit.rule))
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                (Level::Warning, Rule::UnrestrictedTrigger),
+                (Level::Warning, Rule::AgentCodeWithSecrets)
+            ]
+        );
+        assert_eq!(
+            assessment.permissions_and_secrets,
+            score(
+                Weight::Full,
+                "`npm test` in a later step runs files the agent can edit, with secrets.NPM_TOKEN"
+            )
+        );
+    }
+
+    #[test]
+    fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&workflow, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
+        let another_secret = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+      - run: ./deploy.sh --key ${{ secrets.DEPLOY_KEY }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&another_secret, &Upstreams::default());
+        assert!(
+            assessments[0]
+                .permissions_and_secrets
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("`./deploy.sh` in a later step runs files the agent can edit, with secrets.DEPLOY_KEY")
+        );
+        let every_secret = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        env:
+          ALL: ${{ toJSON(secrets) }}
+      - run: npm test
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&every_secret, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
+        let two_secrets = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      A: ${{ secrets.A }}
+      B: ${{ secrets.B }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&two_secrets, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
     }
 
     #[test]

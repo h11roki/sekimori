@@ -11,10 +11,11 @@ use crate::workflow::Workflow;
 
 const SECRETS_CONTEXT: &str = "secrets";
 const SHORT_LIVED_SECRET: &str = "GITHUB_TOKEN";
-const EVERY_SECRET: &str = "every secret";
+pub(super) const EVERY_SECRET: &str = "every secret";
 const CLAUDE_TOKEN_INPUT: &str = "github_token";
 const TOKEN_VARIABLES: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
 const CLAUDE_AGENT_INPUTS: [&str; 3] = ["prompt", "settings", "claude_args"];
+const CLAUDE_INPUTS_WITH_TOKEN: [&str; 4] = ["prompt", "settings", "claude_args", "github_token"];
 const CODEX_AGENT_INPUTS: [&str; 2] = ["prompt", "codex-args"];
 const GEMINI_AGENT_INPUTS: [&str; 2] = ["prompt", "settings"];
 const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
@@ -52,12 +53,54 @@ pub fn secret_env<'w>(workflow: &'w Workflow, step: &AgentStep<'w>) -> SecretEnv
     resolved_secrets(agent_env(workflow, step))
 }
 
-pub(super) fn shell_secret<'w>(env: NearestEnv<'w>, code: &str) -> Option<String> {
+pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> {
     let env = resolved_secrets(env);
-    env.variables()
-        .find_map(|(_, secret)| secret.cloned())
-        .or_else(|| first_secret(env.env.expression.as_ref()?.0, None))
-        .or_else(|| first_secret(code, Some(&env)))
+    let mut secrets: Vec<String> = env
+        .variables()
+        .filter_map(|(_, secret)| secret.cloned())
+        .collect();
+    secrets.extend(
+        env.env
+            .expression
+            .as_ref()
+            .and_then(|(text, _)| first_secret(text, None)),
+    );
+    secrets.extend(all_secrets(code, Some(&env)));
+    secrets
+}
+
+pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<String> {
+    let agent_inputs: &[&str] = match step.agent {
+        Agent::ClaudeCode => &CLAUDE_INPUTS_WITH_TOKEN,
+        Agent::Codex => &CODEX_AGENT_INPUTS,
+        Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
+    };
+    let gemini_settings = match lookup(step, SETTINGS_INPUT) {
+        Input::Text { value, .. } => value,
+        Input::Missing | Input::Unreadable => "",
+    };
+    let mut secrets: Vec<String> = agent_inputs
+        .iter()
+        .filter_map(|name| input(step, name))
+        .flat_map(|(_, value)| all_secrets(value, Some(env)))
+        .collect();
+    secrets.extend(
+        env.variables()
+            .filter(|(variable, _)| {
+                reaches_agent(step.agent, variable.name, gemini_settings)
+                    || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
+            })
+            .filter_map(|(_, secret)| secret.cloned()),
+    );
+    if step.agent != Agent::GeminiCli {
+        secrets.extend(
+            env.env
+                .expression
+                .as_ref()
+                .and_then(|(text, _)| first_secret(text, None)),
+        );
+    }
+    secrets
 }
 
 fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
@@ -115,11 +158,9 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     };
     let from_input = agent_inputs.iter().find_map(|name| {
         let (key, value) = input(step, name)?;
+        let secret = first_secret(value, Some(env))?;
         Some(SecretUse {
-            setting: format!(
-                "{key} passes {} to the agent",
-                first_secret(value, Some(env))?
-            ),
+            setting: format!("{key} passes {secret} to the agent"),
             route: input_route(step, key),
         })
     });
@@ -131,8 +172,9 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
         env.variables()
             .filter(|(variable, _)| reaches_agent(step.agent, variable.name, gemini_settings))
             .find_map(|(variable, secret)| {
+                let secret = secret?.clone();
                 Some(SecretUse {
-                    setting: format!("env {} passes {} to the agent", variable.name, secret?),
+                    setting: format!("env {} passes {secret} to the agent", variable.name),
                     route: variable.route.clone(),
                 })
             })
@@ -142,8 +184,9 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             return None;
         }
         let (text, route) = env.env.expression.as_ref()?;
+        let secret = first_secret(text, None)?;
         Some(SecretUse {
-            setting: format!("env passes {} to the agent", first_secret(text, None)?),
+            setting: format!("env passes {secret} to the agent"),
             route: route.clone(),
         })
     };
@@ -167,6 +210,13 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                 && references_variable(gemini_settings, name)
         }
     }
+}
+
+fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
+    expression_spans(text)
+        .into_iter()
+        .filter_map(|span| secret_in(&parse_expression(&text[span])?, env))
+        .collect()
 }
 
 fn first_secret(text: &str, env: Option<&SecretEnv>) -> Option<String> {
