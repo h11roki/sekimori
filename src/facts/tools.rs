@@ -55,7 +55,7 @@ const INTERPRETERS: [&str; 24] = [
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
-const RUN_SUBCOMMANDS: [(&str, &[&str]); 13] = [
+const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
         &["exec", "x", "init", "create", "install", "i", "add"],
@@ -66,6 +66,7 @@ const RUN_SUBCOMMANDS: [(&str, &[&str]); 13] = [
     ("pip", &["install"]),
     ("pipx", &["run", "install"]),
     ("deno", &["run", "eval"]),
+    ("git", &["submodule", "rebase", "bisect"]),
     ("uv", &["run"]),
     ("poetry", &["run"]),
     ("go", &["run"]),
@@ -130,10 +131,11 @@ const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
             &["revert"],
             &["worktree"],
             &["submodule"],
+            &["config"],
         ],
     ),
-    ("npm", &[&["pkg"]]),
-    ("pnpm", &[&["pkg"]]),
+    ("npm", &[&["pkg"], &["config"]]),
+    ("pnpm", &[&["pkg"], &["config"]]),
     ("yarn", &[&["config"]]),
     (
         "gh",
@@ -145,13 +147,20 @@ const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
         ],
     ),
 ];
-const OPTION_VALUE_FLAGS: [&str; 6] = [
+const OPTION_VALUE_FLAGS: [&str; 13] = [
     "-C",
     "-c",
     "--git-dir",
     "--work-tree",
     "--namespace",
     "--exec-path",
+    "-R",
+    "--repo",
+    "--prefix",
+    "-w",
+    "--workspace",
+    "--cwd",
+    "--filter",
 ];
 const CLAUDE_EDIT_TOOLS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 const CLAUDE_EDIT_RULE: &str = "Edit";
@@ -279,7 +288,7 @@ impl<'w> ClaudePermissions<'w> {
                 .map(|((tool, setting), editing)| {
                     let through = match editing {
                         Editing::Tools => String::new(),
-                        Editing::Shell(writer) => format!(" through `{writer}`"),
+                        Editing::Shell(writer) => format!(" with `{writer}`"),
                     };
                     (
                         tool,
@@ -478,11 +487,30 @@ fn shell_denied(denied: &[String], tool: &str) -> bool {
             || command(deny)
                 .zip(allowed.as_ref())
                 .is_some_and(|((deny, any_after), (allow, _))| {
-                    any_after
-                        && allow
-                            .strip_prefix(&deny)
-                            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                    any_after && starts_with_words(allow, &deny)
                 })
+    })
+}
+
+fn starts_with_words(command: &str, prefix: &str) -> bool {
+    command
+        .trim()
+        .strip_prefix(prefix.trim())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+}
+
+fn gemini_excluded(excluded: &[&str], tool: &str) -> bool {
+    excluded.iter().any(|exclusion| {
+        GEMINI_SHELL_TOOLS.contains(exclusion)
+            || *exclusion == tool.trim()
+            || GEMINI_SHELL_TOOLS.iter().any(|shell| {
+                pattern_of(exclusion, shell).is_some_and(|exclusion| {
+                    GEMINI_SHELL_TOOLS.iter().any(|name| {
+                        pattern_of(tool, name)
+                            .is_some_and(|command| starts_with_words(command, exclusion))
+                    })
+                })
+            })
     })
 }
 
@@ -618,10 +646,7 @@ fn gemini_settings<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
     let shell_tool = |reaches: fn(&str) -> bool| {
         string_array(Some(core)).find(|tool| {
             GEMINI_SHELL_TOOLS.iter().any(|shell| {
-                pattern_of(tool, shell).is_some_and(reaches)
-                    && !excluded
-                        .iter()
-                        .any(|exclusion| exclusion == shell || exclusion == &tool.trim())
+                pattern_of(tool, shell).is_some_and(reaches) && !gemini_excluded(&excluded, tool)
             })
         })
     };
@@ -675,19 +700,10 @@ pub(super) fn gemini_may_edit(step: &AgentStep) -> bool {
     let usable = |names: &[&str], opens: fn(&str) -> bool| {
         let allowed = core.as_ref().is_none_or(|core| {
             core.iter().any(|tool| {
-                !excluded.iter().any(|exclusion| {
-                    names.iter().any(|name| {
-                        pattern_of(exclusion, name)
-                            .zip(pattern_of(tool, name))
-                            .is_some_and(|(exclusion, tool)| {
-                                tool.trim()
-                                    .strip_prefix(exclusion.trim())
-                                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-                            })
-                    })
-                }) && names
-                    .iter()
-                    .any(|name| pattern_of(tool, name).is_some_and(opens))
+                !gemini_excluded(&excluded, tool)
+                    && names
+                        .iter()
+                        .any(|name| pattern_of(tool, name).is_some_and(opens))
             })
         });
         allowed && !names.iter().any(|name| excluded.contains(name))
@@ -1081,6 +1097,8 @@ jobs:
             "Bash(git clone:*)",
             "Bash(git --work-tree . apply:*)",
             "Bash(npm pkg:*)",
+            "Bash(npm config:*)",
+            "Bash(gh -R owner/repo pr checkout:*)",
         ] {
             let with = format!(
                 "        with:\n          claude_args: --allowedTools \"{writer},Bash(npm test:*)\"\n"
@@ -1117,7 +1135,7 @@ jobs:
         );
         assert_eq!(
             base("        with:\n          claude_args: --allowedTools \"Bash(git apply:*),Bash(npm test:*)\"\n").as_deref(),
-            Some("8: claude_args allows `Bash(npm test:*)` through --allowedTools, and the agent can edit the files that command runs through `Bash(git apply:*)`")
+            Some("8: claude_args allows `Bash(npm test:*)` through --allowedTools, and the agent can edit the files that command runs with `Bash(git apply:*)`")
         );
         assert_eq!(
             base(
@@ -1143,6 +1161,8 @@ jobs:
             "Bash(go run:*)",
             "Bash(npm exec:*)",
             "Bash(npm:*)",
+            "Bash(git:*)",
+            "Bash(git submodule:*)",
             "Bash(npm init:*)",
             "Bash(bun x:*)",
             "Bash(deno run:*)",
