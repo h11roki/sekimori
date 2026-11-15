@@ -19,6 +19,13 @@ It checks the official agent actions:
 
 sekimori only reads YAML. It does not run your workflows, call an LLM, or send your code anywhere.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png">
+  <img alt="How sekimori fits in: it reads the workflows in your repository that use Claude Code, Codex or Gemini CLI, runs as a GitHub Action or from your terminal, and reports findings as pull request annotations, a job summary and SARIF for code scanning. The Action downloads an attested binary from GitHub Releases; the CLI installs from crates.io." src="docs/images/architecture.png">
+</picture>
+
+The diagram is drawn with [stack-diagram](https://github.com/caru-ini/stack-diagram); its source is [`docs/images/architecture.html`](docs/images/architecture.html).
+
 ## Use it as a GitHub Action
 
 ```yaml
