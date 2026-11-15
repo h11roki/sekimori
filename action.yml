@@ -20,6 +20,9 @@ outputs:
   sarif-file:
     description: Path to the findings in SARIF format.
     value: ${{ steps.check.outputs.sarif-file }}
+  exit-code:
+    description: Exit code of sekimori; 0 for no findings, 1 for findings, 2 when a file could not be read.
+    value: ${{ steps.check.outputs.exit-code }}
 
 runs:
   using: composite
@@ -64,10 +67,20 @@ runs:
         SEKIMORI_PATHS: ${{ inputs.paths }}
       run: |
         read -r -d '' -a paths <<< "$SEKIMORI_PATHS" || true
-        sarif="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")/sekimori.sarif"
+        output="$(mktemp -d "$RUNNER_TEMP/sekimori-XXXXXX")"
         status=0
-        "$SEKIMORI" -- "${paths[@]}" || status=$?
+        "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
+        "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$output/plain.txt" ]; then
+          {
+            echo "## sekimori"
+            echo
+            tr '\r' '\n' < "$output/plain.txt" | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
         sarif_status=0
-        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$sarif" || sarif_status=$?
-        echo "sarif-file=$sarif" >> "$GITHUB_OUTPUT"
-        exit $(( status > sarif_status ? status : sarif_status ))
+        "$SEKIMORI" --format sarif -- "${paths[@]}" > "$output/sekimori.sarif" || sarif_status=$?
+        echo "sarif-file=$output/sekimori.sarif" >> "$GITHUB_OUTPUT"
+        code=$(( status > sarif_status ? status : sarif_status ))
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit "$code"
