@@ -21,7 +21,7 @@ outputs:
     description: Path to the findings in SARIF format.
     value: ${{ steps.check.outputs.sarif-file }}
   exit-code:
-    description: Exit code of sekimori; 0 for no findings, 1 for findings, 2 when a file could not be read.
+    description: Exit code of sekimori: 0 for no findings, 1 for findings, 2 when sekimori could not check every file or could not run.
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
@@ -71,11 +71,16 @@ runs:
         status=0
         "$SEKIMORI" --format github -- "${paths[@]}" || status=$?
         "$SEKIMORI" -- "${paths[@]}" > "$output/plain.txt" 2>&1 || true
+        summary_limit=500000
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$output/plain.txt" ]; then
           {
             echo "## sekimori"
             echo
-            tr '\r' '\n' < "$output/plain.txt" | sed 's/^/    /'
+            head -c "$summary_limit" "$output/plain.txt" | tr '\r' '\n' | sed 's/^/    /'
+            if [ "$(wc -c < "$output/plain.txt")" -gt "$summary_limit" ]; then
+              echo
+              echo "The output was cut to fit the job summary. See the log for every finding."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
         fi
         sarif_status=0

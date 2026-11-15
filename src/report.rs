@@ -67,7 +67,8 @@ pub fn github_error(path: Option<&RepositoryPath>, message: &str) -> String {
         Some(RepositoryPath::Absolute(_)) | None => String::new(),
     };
     format!(
-        "::error {location}title={TOOL_NAME}::{}\n",
+        "::error {location}title={}::{}\n",
+        escape_property(TOOL_NAME),
         escape_data(message)
     )
 }
