@@ -1,6 +1,6 @@
 use yamlpath::Route;
 
-use super::secrets::{already_reached, shell_secrets};
+use super::secrets::{EVERY_SECRET, shell_secrets};
 use super::tools::{WRAPPERS, gemini_may_edit};
 use super::{input, is_assignment, nearest_env, program_name, running_later_steps, shell_programs};
 use crate::agent::{Agent, AgentStep, JobStep};
@@ -23,7 +23,25 @@ const WORKSPACE_PATHS: [&str; 6] = [
 const LOOKUP_WRAPPER: &str = "command";
 const LOOKUP_FLAGS: [&str; 2] = ["-v", "-V"];
 const DURATION_WRAPPER: &str = "timeout";
-const SUBCOMMAND_VALUE_FLAGS: [&str; 4] = ["--prefix", "-C", "--workspace", "-w"];
+const WRAPPER_VALUE_FLAGS: [(&str, &[&str]); 6] = [
+    ("sudo", &["-u", "-g", "-h", "-p", "-C", "-D", "-T", "-U"]),
+    ("doas", &["-u", "-C"]),
+    ("env", &["-u", "-C", "-S"]),
+    ("nice", &["-n"]),
+    ("timeout", &["-k", "-s"]),
+    ("xargs", &["-n", "-I", "-L", "-P", "-d", "-E", "-s", "-a"]),
+];
+const SUBCOMMAND_VALUE_FLAGS: [&str; 9] = [
+    "--prefix",
+    "-C",
+    "--workspace",
+    "-w",
+    "--manifest-path",
+    "--project",
+    "--directory",
+    "--cwd",
+    "--filter",
+];
 const TOOLCHAIN_PREFIX: char = '+';
 const OUTSIDE_PATH_STARTS: [char; 3] = ['/', '$', '~'];
 const STDIN_REDIRECT: &str = "<";
@@ -126,9 +144,11 @@ pub fn agent_code_with_secrets<'w>(
                 .iter()
                 .find_map(|program| project_command(program))?;
             let env = nearest_env(workflow, step.job_id, step.job, &run.shared.env, &route);
-            let secret = shell_secrets(env, &run.run)
-                .into_iter()
-                .find(|secret| !already_reached(reached_agent, secret))?;
+            let secret = shell_secrets(env, &run.run).into_iter().find(|secret| {
+                !reached_agent
+                    .iter()
+                    .any(|known| known == EVERY_SECRET || known.eq_ignore_ascii_case(secret))
+            })?;
             Some(AgentCode {
                 setting: format!(
                     "`{command}` in a later step runs files the agent can edit, with {secret}"
@@ -163,15 +183,24 @@ fn project_command(program: &[String]) -> Option<String> {
         {
             return None;
         }
-        let mut wrapped: Vec<String> = arguments
+        let value_flags = WRAPPER_VALUE_FLAGS
             .iter()
-            .skip_while(|word| word.starts_with('-') || is_assignment(word))
-            .cloned()
-            .collect();
-        if name == DURATION_WRAPPER && !wrapped.is_empty() {
-            wrapped.remove(0);
+            .find(|(wrapper, _)| *wrapper == name)
+            .map_or(&[][..], |(_, flags)| *flags);
+        let mut rest = arguments.iter().enumerate();
+        let mut start = arguments.len();
+        while let Some((index, word)) = rest.next() {
+            if value_flags.contains(&word.as_str()) {
+                rest.next();
+            } else if !word.starts_with('-') && !is_assignment(word) {
+                start = index;
+                break;
+            }
         }
-        return project_command(&wrapped);
+        if name == DURATION_WRAPPER {
+            start += 1;
+        }
+        return project_command(arguments.get(start..)?);
     }
     if let Some((_, inline_letters, value_flags)) = SCRIPT_INTERPRETERS
         .iter()
@@ -183,7 +212,10 @@ fn project_command(program: &[String]) -> Option<String> {
                 let script = words.next()?;
                 return in_workspace(script).then(|| format!("{name} < {script}"));
             }
-            if INLINE_CODE_LONG_FLAGS.contains(&word.as_str()) {
+            if INLINE_CODE_LONG_FLAGS
+                .iter()
+                .any(|flag| word.starts_with(flag))
+            {
                 return None;
             }
             if name == MODULE_INTERPRETER && word == MODULE_FLAG {
@@ -194,6 +226,14 @@ fn project_command(program: &[String]) -> Option<String> {
                 continue;
             }
             if let Some(letters) = word.strip_prefix('-') {
+                let attached_value = letters.len() > 1
+                    && letters
+                        .chars()
+                        .next()
+                        .is_some_and(|first| value_flags.contains(&format!("-{first}").as_str()));
+                if attached_value {
+                    continue;
+                }
                 let short_cluster =
                     !letters.starts_with('-') && letters.chars().all(|c| c.is_ascii_alphanumeric());
                 if short_cluster && letters.contains(*inline_letters) {
@@ -347,6 +387,17 @@ jobs:
                 "./scripts/deploy.sh",
             ),
             ("for d in a b; do make -C $d; done", "make"),
+            (
+                "ruby -Itest test/models/user_test.rb",
+                "ruby test/models/user_test.rb",
+            ),
+            ("sudo -u runner ./scripts/deploy.sh", "./scripts/deploy.sh"),
+            ("nice -n 10 make", "make"),
+            ("timeout -k 5 10m npm test", "npm test"),
+            (
+                "cargo --manifest-path crates/x/Cargo.toml test",
+                "cargo test",
+            ),
         ] {
             let command = shell_programs(run)
                 .iter()
@@ -367,6 +418,8 @@ jobs:
             "command -v pnpm",
             "sudo cp build/out.js /usr/local/",
             "bash -euo pipefail -c \"curl https://example.com\"",
+            "node --eval=\"console.log(1)\"",
+            "cat > body.md <<EOF\nnpm test passed\nEOF\ngh pr comment --body-file body.md",
         ] {
             let command = shell_programs(run)
                 .iter()

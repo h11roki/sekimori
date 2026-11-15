@@ -19,7 +19,9 @@ use crate::workflow::Workflow;
 
 pub use checkout::{HeadCheckout, head_checkout, outside_text_cannot_reach};
 pub use output::{OutputInjection, output_injection};
-pub use secrets::{SecretEnv, SecretUse, long_lived_token, other_secret, secret_env};
+pub use secrets::{
+    SecretEnv, SecretUse, agent_secrets, long_lived_token, other_secret, secret_env,
+};
 pub use tools::{BroadTool, broad_tool};
 pub use trigger::{
     ExternalEvent, OpenTrigger, UpstreamOrigin, Upstreams, condition_origin, external_events,
@@ -35,6 +37,8 @@ const LINE_CONTINUATION: &str = "\\\n";
 const SHELL_COMMAND_FLAG: &str = "-c";
 const COMMAND_SEPARATORS: &str = ";&|()`";
 const WORD_SEPARATORS: &str = "\"'";
+const HEREDOC: &str = "<<";
+const HERE_STRING: &str = "<<<";
 const SHELL_KEYWORDS: [&str; 9] = [
     "if", "then", "else", "elif", "do", "while", "until", "!", "{",
 ];
@@ -120,10 +124,30 @@ fn running_later_steps<'w>(step: &AgentStep<'w>) -> Vec<(Route<'w>, JobStep<'w>)
 fn shell_programs(run: &str) -> Vec<Vec<String>> {
     let script = flatten_expressions(&run.replace(LINE_CONTINUATION, " "));
     let mut programs = Vec::new();
-    let commands = script
-        .lines()
-        .map(before_comment)
-        .flat_map(|line| line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
+    let mut heredoc_end: Option<String> = None;
+    let mut commands = Vec::new();
+    for line in script.lines() {
+        if let Some(end) = &heredoc_end {
+            if line.trim() == end {
+                heredoc_end = None;
+            }
+            continue;
+        }
+        let line = before_comment(line);
+        if let Some(start) = line.find(HEREDOC)
+            && !line[start..].starts_with(HERE_STRING)
+        {
+            let marker: String = line[start + HEREDOC.len()..]
+                .trim_start_matches('-')
+                .trim_start()
+                .trim_start_matches(['\'', '"', '\\'])
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            heredoc_end = (!marker.is_empty()).then_some(marker);
+        }
+        commands.extend(line.split(|c: char| COMMAND_SEPARATORS.contains(c)));
+    }
     for command in commands {
         let words: Vec<&str> = command
             .split(|c: char| c.is_whitespace() || WORD_SEPARATORS.contains(c))

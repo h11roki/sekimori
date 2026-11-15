@@ -7,9 +7,9 @@ use yamlpath::Route;
 use crate::agent::{AgentStep, agent_steps};
 use crate::facts::{
     AgentCode, BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
-    UpstreamOrigin, Upstreams, agent_code_with_secrets, broad_tool, condition_origin,
-    external_events, head_checkout, long_lived_token, never_runs, open_trigger, other_secret,
-    output_injection, outside_events, outside_text_cannot_reach, secret_env,
+    UpstreamOrigin, Upstreams, agent_code_with_secrets, agent_secrets, broad_tool,
+    condition_origin, external_events, head_checkout, long_lived_token, never_runs, open_trigger,
+    other_secret, output_injection, outside_events, outside_text_cannot_reach, secret_env,
 };
 use crate::workflow::Workflow;
 
@@ -268,24 +268,17 @@ fn assess_step<'w>(
     });
     let env = secret_env(workflow, &step);
     let mut secret_reasons = Vec::new();
-    let mut reached_agent = Vec::new();
     for (rule, found) in [
         (Rule::LongLivedToken, long_lived_token(&step, &env)),
         (Rule::OtherSecrets, other_secret(&step, &env)),
     ] {
-        if let Some(SecretUse {
-            setting,
-            route,
-            secret,
-        }) = found
-        {
+        if let Some(SecretUse { setting, route }) = found {
             hits.push(Hit { rule, route });
             secret_reasons.push(setting);
-            reached_agent.push(secret);
         }
     }
     if let Some(AgentCode { setting, route }) =
-        agent_code_with_secrets(workflow, &step, &reached_agent)
+        agent_code_with_secrets(workflow, &step, &agent_secrets(&step, &env))
     {
         hits.push(Hit {
             rule: Rule::AgentCodeWithSecrets,
@@ -896,6 +889,25 @@ jobs:
         )
         .unwrap();
         let assessments = assess(&every_secret, &Upstreams::default());
+        let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
+        let two_secrets = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      A: ${{ secrets.A }}
+      B: ${{ secrets.B }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessments = assess(&two_secrets, &Upstreams::default());
         let rules: Vec<_> = assessments[0].hits.iter().map(|hit| hit.rule).collect();
         assert_eq!(rules, [Rule::OtherSecrets]);
     }

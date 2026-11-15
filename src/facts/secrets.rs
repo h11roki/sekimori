@@ -11,10 +11,11 @@ use crate::workflow::Workflow;
 
 const SECRETS_CONTEXT: &str = "secrets";
 const SHORT_LIVED_SECRET: &str = "GITHUB_TOKEN";
-const EVERY_SECRET: &str = "every secret";
+pub(super) const EVERY_SECRET: &str = "every secret";
 const CLAUDE_TOKEN_INPUT: &str = "github_token";
 const TOKEN_VARIABLES: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
 const CLAUDE_AGENT_INPUTS: [&str; 3] = ["prompt", "settings", "claude_args"];
+const CLAUDE_INPUTS_WITH_TOKEN: [&str; 4] = ["prompt", "settings", "claude_args", "github_token"];
 const CODEX_AGENT_INPUTS: [&str; 2] = ["prompt", "codex-args"];
 const GEMINI_AGENT_INPUTS: [&str; 2] = ["prompt", "settings"];
 const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
@@ -32,7 +33,6 @@ const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app toke
 pub struct SecretUse<'w> {
     pub setting: String,
     pub route: Route<'w>,
-    pub secret: String,
 }
 
 pub struct SecretEnv<'w> {
@@ -65,18 +65,42 @@ pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> 
             .as_ref()
             .and_then(|(text, _)| first_secret(text, None)),
     );
-    secrets.extend(
-        expression_spans(code)
-            .into_iter()
-            .filter_map(|span| secret_in(&parse_expression(&code[span])?, Some(&env))),
-    );
+    secrets.extend(all_secrets(code, Some(&env)));
     secrets
 }
 
-pub(super) fn already_reached(reached: &[String], secret: &str) -> bool {
-    reached
+pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<String> {
+    let agent_inputs: &[&str] = match step.agent {
+        Agent::ClaudeCode => &CLAUDE_INPUTS_WITH_TOKEN,
+        Agent::Codex => &CODEX_AGENT_INPUTS,
+        Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
+    };
+    let gemini_settings = match lookup(step, SETTINGS_INPUT) {
+        Input::Text { value, .. } => value,
+        Input::Missing | Input::Unreadable => "",
+    };
+    let mut secrets: Vec<String> = agent_inputs
         .iter()
-        .any(|known| known == EVERY_SECRET || known.eq_ignore_ascii_case(secret))
+        .filter_map(|name| input(step, name))
+        .flat_map(|(_, value)| all_secrets(value, Some(env)))
+        .collect();
+    secrets.extend(
+        env.variables()
+            .filter(|(variable, _)| {
+                reaches_agent(step.agent, variable.name, gemini_settings)
+                    || (step.agent != Agent::ClaudeCode && TOKEN_VARIABLES.contains(&variable.name))
+            })
+            .filter_map(|(_, secret)| secret.cloned()),
+    );
+    if step.agent != Agent::GeminiCli {
+        secrets.extend(
+            env.env
+                .expression
+                .as_ref()
+                .and_then(|(text, _)| first_secret(text, None)),
+        );
+    }
+    secrets
 }
 
 fn resolved_secrets(env: NearestEnv<'_>) -> SecretEnv<'_> {
@@ -123,7 +147,6 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
     Some(SecretUse {
         setting: format!("{setting} uses {secret}, {LONG_LIVED}"),
         route,
-        secret,
     })
 }
 
@@ -139,7 +162,6 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
         Some(SecretUse {
             setting: format!("{key} passes {secret} to the agent"),
             route: input_route(step, key),
-            secret,
         })
     });
     let gemini_settings = match lookup(step, SETTINGS_INPUT) {
@@ -154,7 +176,6 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
                 Some(SecretUse {
                     setting: format!("env {} passes {secret} to the agent", variable.name),
                     route: variable.route.clone(),
-                    secret,
                 })
             })
     };
@@ -167,7 +188,6 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
         Some(SecretUse {
             setting: format!("env passes {secret} to the agent"),
             route: route.clone(),
-            secret,
         })
     };
     from_input.or_else(from_variable).or_else(from_expression)
@@ -190,6 +210,13 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
                 && references_variable(gemini_settings, name)
         }
     }
+}
+
+fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
+    expression_spans(text)
+        .into_iter()
+        .filter_map(|span| secret_in(&parse_expression(&text[span])?, env))
+        .collect()
 }
 
 fn first_secret(text: &str, env: Option<&SecretEnv>) -> Option<String> {
