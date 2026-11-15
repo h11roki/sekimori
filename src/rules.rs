@@ -303,10 +303,20 @@ fn assess_step<'w>(
     let ignored = if hits.is_empty() {
         Vec::new()
     } else {
-        let comments = workflow.comments(&step.route.with_key(USES_KEY));
+        let directives: Vec<Option<Vec<&str>>> = workflow
+            .comments(&step.route.with_key(USES_KEY))
+            .into_iter()
+            .flat_map(ignore_directives)
+            .collect();
         Rule::ALL
             .into_iter()
-            .filter(|rule| comments.iter().any(|comment| ignores(comment, *rule)))
+            .filter(|rule| {
+                directives.iter().any(|directive| {
+                    directive
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&rule.id()))
+                })
+            })
             .collect()
     };
     Assessment {
@@ -319,18 +329,20 @@ fn assess_step<'w>(
     }
 }
 
-fn ignores(comment: &str, rule: Rule) -> bool {
-    comment.split('#').any(|part| {
-        let Some(directive) = part.trim().strip_prefix(IGNORE_DIRECTIVE) else {
-            return false;
-        };
-        match directive.strip_prefix('[') {
-            Some(list) => list
-                .split_once(']')
-                .is_some_and(|(ids, _)| ids.split(',').any(|id| id.trim() == rule.id())),
-            None => directive.is_empty(),
-        }
-    })
+fn ignore_directives(comment: &str) -> Vec<Option<Vec<&str>>> {
+    comment
+        .split('#')
+        .filter_map(|part| {
+            let directive = part.trim().strip_prefix(IGNORE_DIRECTIVE)?;
+            match directive.strip_prefix('[') {
+                Some(list) => {
+                    let (ids, _) = list.split_once(']')?;
+                    Some(Some(ids.split(',').map(str::trim).collect()))
+                }
+                None => directive.is_empty().then_some(None),
+            }
+        })
+        .collect()
 }
 
 fn event_names(events: &[ExternalEvent]) -> String {
