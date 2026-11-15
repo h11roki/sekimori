@@ -19,7 +19,7 @@ pub const MAX_TOTAL: u8 = 3;
 const WARNING_TOTAL: u8 = 2;
 const DIRECTIVE_PREFIX: &str = "sekimori:";
 const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
-const USES_KEY: &str = "uses";
+pub(crate) const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
@@ -45,6 +45,10 @@ impl Rule {
         Rule::AgentOutputInjection,
         Rule::AgentCodeWithSecrets,
     ];
+
+    pub fn from_id(id: &str) -> Option<Rule> {
+        Rule::ALL.into_iter().find(|rule| rule.id() == id)
+    }
 
     pub fn id(self) -> &'static str {
         match self {
@@ -154,7 +158,7 @@ pub struct Assessment<'w> {
     pub permissions_and_secrets: Option<AxisScore>,
     pub hits: Vec<Hit<'w>>,
     pub ignored: Vec<Rule>,
-    pub warnings: Vec<String>,
+    warnings: Vec<String>,
 }
 
 impl<'w> Assessment<'w> {
@@ -176,6 +180,13 @@ impl<'w> Assessment<'w> {
             WARNING_HALVES.. => Some(Level::Warning),
             _ => None,
         }
+    }
+
+    pub fn warnings(&self) -> &[String] {
+        if self.findings().is_empty() {
+            return &[];
+        }
+        &self.warnings
     }
 
     pub fn findings(&self) -> Vec<Finding<'_, 'w>> {
@@ -302,46 +313,39 @@ fn assess_step<'w>(
         weight: Weight::Full,
         reason: secret_reasons.join("; "),
     });
-    let mut ignored = Vec::new();
-    let mut warnings = Vec::new();
-    if !hits.is_empty() {
-        let uses = step.route.with_key(USES_KEY);
-        let directives: Vec<Result<Option<Vec<&str>>, &str>> = workflow
-            .comments(&uses)
+    let directives: Vec<Directive> = if hits.is_empty() {
+        Vec::new()
+    } else {
+        workflow
+            .comments(&step.route.with_key(USES_KEY))
             .into_iter()
             .flat_map(ignore_directives)
-            .collect();
-        ignored = Rule::ALL
-            .into_iter()
-            .filter(|rule| {
-                directives.iter().any(|directive| {
-                    directive
-                        .as_ref()
-                        .is_ok_and(|ids| ids.as_ref().is_none_or(|ids| ids.contains(&rule.id())))
-                })
+            .collect()
+    };
+    let ignored: Vec<Rule> = Rule::ALL
+        .into_iter()
+        .filter(|rule| {
+            directives.iter().any(|directive| match directive {
+                Directive::All => true,
+                Directive::Rules(ids) => ids.contains(&rule.id()),
+                Directive::Unreadable(_) => false,
             })
-            .collect();
-        let problems = directives.iter().flat_map(|directive| match directive {
-            Err(text) => vec![format!(
-                "`{text}` is not an ignore directive; write `{IGNORE_DIRECTIVE}[rule-id, ...]`"
-            )],
-            Ok(ids) => ids
+        })
+        .collect();
+    let warnings = directives
+        .iter()
+        .flat_map(|directive| match directive {
+            Directive::All => Vec::new(),
+            Directive::Rules(ids) => ids
                 .iter()
-                .flatten()
-                .filter(|id| !Rule::ALL.iter().any(|rule| rule.id() == **id))
+                .filter(|id| Rule::from_id(id).is_none())
                 .map(|id| format!("`{id}` is not a sekimori rule"))
                 .collect(),
-        });
-        let (line, column) = workflow.position(&uses).unwrap_or((0, 0));
-        warnings = problems
-            .map(|problem| {
-                format!(
-                    "{}:{line}:{column}: warning: {problem}",
-                    workflow.path.display()
-                )
-            })
-            .collect();
-    }
+            Directive::Unreadable(text) => vec![format!(
+                "`{text}` is not an ignore directive; write `{IGNORE_DIRECTIVE}[rule-id, ...]`"
+            )],
+        })
+        .collect();
     Assessment {
         step,
         who_can_trigger,
@@ -353,23 +357,33 @@ fn assess_step<'w>(
     }
 }
 
-fn ignore_directives(comment: &str) -> Vec<Result<Option<Vec<&str>>, &str>> {
+enum Directive<'c> {
+    All,
+    Rules(Vec<&'c str>),
+    Unreadable(&'c str),
+}
+
+fn ignore_directives(comment: &str) -> Vec<Directive<'_>> {
     comment
         .split('#')
         .map(str::trim)
         .filter(|part| part.starts_with(DIRECTIVE_PREFIX))
         .map(|part| {
             let Some(directive) = part.strip_prefix(IGNORE_DIRECTIVE) else {
-                return Err(part);
+                return Directive::Unreadable(part);
             };
             match directive.strip_prefix('[') {
-                Some(list) => list
-                    .split_once(']')
-                    .filter(|(_, rest)| rest.is_empty() || rest.starts_with(char::is_whitespace))
-                    .map(|(ids, _)| Some(ids.split(',').map(str::trim).collect()))
-                    .ok_or(part),
-                None if directive.is_empty() => Ok(None),
-                None => Err(part),
+                Some(list) => match list.split_once(']') {
+                    Some((ids, _)) => Directive::Rules(
+                        ids.split(',')
+                            .map(str::trim)
+                            .filter(|id| !id.is_empty())
+                            .collect(),
+                    ),
+                    None => Directive::Unreadable(part),
+                },
+                None if directive.is_empty() => Directive::All,
+                None => Directive::Unreadable(part),
             }
         })
         .collect()
@@ -1025,6 +1039,10 @@ jobs:
         );
         assert_eq!(rules_with("", "# sekimori: ignore[broad-tools]"), both);
         assert_eq!(
+            rules_with("# sekimori: ignore[broad-tools]: accepted", ""),
+            [(Level::Error, Rule::UnrestrictedTrigger)]
+        );
+        assert_eq!(
             rules_with("# v1.0.5 # sekimori: ignore[broad-tools]", ""),
             [(Level::Error, Rule::UnrestrictedTrigger)]
         );
@@ -1317,9 +1335,11 @@ jobs:
         };
         assert!(warnings_of("# sekimori: ignore[broad-tools]").is_empty());
         assert!(warnings_of("# v1 # unrelated note").is_empty());
+        assert!(warnings_of("# sekimori: ignore[unrestricted-trigger,]").is_empty());
+        assert!(warnings_of("# sekimori: ignore[broad-tools]: accepted").is_empty());
         assert_eq!(
             warnings_of("# sekimori: ignore[broad-tool, pr-head-checkout]"),
-            ["test.yml:6:9: warning: `broad-tool` is not a sekimori rule"]
+            ["`broad-tool` is not a sekimori rule"]
         );
         for comment in [
             "# sekimori: ignore [broad-tools]",
@@ -1334,6 +1354,29 @@ jobs:
                 "{comment}"
             );
         }
+    }
+
+    #[test]
+    fn no_warning_is_given_when_the_step_has_no_finding() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: push
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@beta # sekimori: ignore[broad-tool]
+        with:
+          allowed_tools: Bash
+"
+            .to_string(),
+        )
+        .unwrap();
+        let assessment = assess(&workflow, &Upstreams::default()).remove(0);
+        assert!(!assessment.hits.is_empty());
+        assert!(assessment.warnings().is_empty());
     }
 
     #[test]

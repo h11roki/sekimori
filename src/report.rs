@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 
 use serde_json::{Value, json};
 
-use crate::rules::{Finding, HALVES_PER_POINT, MAX_TOTAL, Rule};
+use crate::rules::{Assessment, Finding, HALVES_PER_POINT, MAX_TOTAL, Rule, USES_KEY};
 use crate::workflow::{RepositoryPath, Workflow};
 
 const LABEL_WIDTH: usize = 21;
@@ -16,6 +16,16 @@ const UNC_URI_PREFIX: &str = "//";
 const DRIVE_SEPARATOR: &str = ":";
 const COLUMN_KIND: &str = "utf16CodeUnits";
 const URI_UNRESERVED: &str = "-._~/";
+
+pub fn warning(workflow: &Workflow, assessment: &Assessment, message: &str) -> String {
+    let (line, column) = workflow
+        .position(&assessment.step.route.with_key(USES_KEY))
+        .unwrap_or((1, 1));
+    format!(
+        "{}:{line}:{column}: warning: {message}",
+        workflow.path.display()
+    )
+}
 
 pub fn plain(workflow: &Workflow, finding: &Finding) -> String {
     let (line, column) = workflow.position(&finding.hit.route).unwrap_or((1, 1));

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use sekimori::facts::Upstreams;
-use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results};
+use sekimori::report::{artifact_uri, plain, sarif_log, sarif_results, warning};
 use sekimori::rules::{Assessment, assess};
 use sekimori::workflow::{Workflow, repository_path, workflow_paths};
 
@@ -48,11 +48,15 @@ fn main() -> ExitCode {
     let upstreams = Upstreams::new(&workflows, unreadable.iter().map(PathBuf::as_path));
     for workflow in &workflows {
         let assessments = assess(workflow, &upstreams);
-        for warning in assessments
-            .iter()
-            .flat_map(|assessment| &assessment.warnings)
-        {
-            eprintln!("{warning}");
+        let mut warnings: Vec<String> = Vec::new();
+        for assessment in &assessments {
+            for message in assessment.warnings() {
+                let line = warning(workflow, assessment, message);
+                if !warnings.contains(&line) {
+                    eprintln!("{line}");
+                    warnings.push(line);
+                }
+            }
         }
         let findings: Vec<_> = assessments.iter().flat_map(Assessment::findings).collect();
         if findings.is_empty() {
