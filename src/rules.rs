@@ -1044,6 +1044,79 @@ jobs:
     }
 
     #[test]
+    fn the_base_action_checks_no_actor_passes_env_tokens_and_loads_the_checked_out_settings() {
+        let rules_of = |source: &str| {
+            let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+            let assessments = assess(&workflow, &Upstreams::default());
+            assessments[0]
+                .findings()
+                .iter()
+                .map(|finding| (finding.level, finding.hit.rule))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rules_of(
+                "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          prompt: ${{ github.event.comment.body }}
+          claude_args: --allowedTools Bash
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PAT }}
+"
+            ),
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::BroadTools),
+                (Level::Error, Rule::LongLivedToken),
+            ]
+        );
+        assert_eq!(
+            rules_of(
+                "on: issue_comment
+jobs:
+  claude:
+    if: github.event.comment.author_association == 'OWNER'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action/base-action@v1
+        with:
+          prompt: ${{ github.event.comment.body }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+"
+            ),
+            []
+        );
+        assert_eq!(
+            rules_of(
+                "on: pull_request_target
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-base-action@v1
+        with:
+          prompt: Review this pull request.
+"
+            ),
+            [
+                (Level::Error, Rule::UnrestrictedTrigger),
+                (Level::Error, Rule::PrHeadCheckout),
+            ]
+        );
+    }
+
+    #[test]
     fn tokens_secrets_and_write_access_share_the_permissions_axis() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

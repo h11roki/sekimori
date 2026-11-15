@@ -1,7 +1,7 @@
 use yamlpath::Route;
 
 use super::secrets::{EVERY_SECRET, shell_secrets};
-use super::tools::{WRAPPERS, gemini_may_edit};
+use super::tools::{WRAPPERS, broad_tool, gemini_may_edit};
 use super::{input, is_assignment, nearest_env, program_name, running_later_steps, shell_programs};
 use crate::agent::{Agent, AgentStep, JobStep};
 use crate::workflow::Workflow;
@@ -130,6 +130,7 @@ pub fn agent_code_with_secrets<'w>(
             input(step, name).is_some_and(|(_, value)| value.trim() == *read_only)
         }),
         Agent::GeminiCli => gemini_may_edit(step),
+        Agent::ClaudeBase => broad_tool(step).is_some(),
     };
     if !edits_workspace {
         return None;

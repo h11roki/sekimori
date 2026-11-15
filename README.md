@@ -13,6 +13,7 @@ Any one of these alone depends on how you use it. When all three overlap, text w
 It checks the official agent actions:
 
 - [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)
+- [`anthropics/claude-code-base-action`](https://github.com/anthropics/claude-code-base-action), also used as `anthropics/claude-code-action/base-action`. It does not check who triggered the run, passes its whole environment, including `GITHUB_TOKEN` and `GH_TOKEN`, to Claude, and loads the workspace's `.claude/` settings
 - [`openai/codex-action`](https://github.com/openai/codex-action)
 - [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli)
 
@@ -165,7 +166,7 @@ Removing any one axis takes a step below `error`; removing two leaves nothing to
 Let only people with write access start the agent.
 
 - `claude-code-action` and `openai/codex-action`: list user names in `allowed_non_write_users`, `allowed_bots` or `allow-users` instead of `'*'`.
-- `run-gemini-cli`: check who triggered the run in the job's or step's `if:`.
+- `run-gemini-cli` and the Claude Code base action: check who triggered the run in the job's or step's `if:`.
 
 ```yaml
 on:
@@ -230,7 +231,7 @@ List several rule IDs with commas, or write `# sekimori: ignore` with nothing af
 ## Limitations
 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
-- It only knows the settings of the three actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
+- It only knows the settings of the four actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
 - `if:` conditions on earlier jobs in `needs:` count when the agent job waits for them to succeed, directly or through other jobs: a waiting job's `if:` has no status function, or has `success()` or `needs.<id>.result == 'success'` joined with `&&`. `needs:` names must match job IDs exactly, including case. Checks done in an earlier job's steps, such as a script that sets an output the agent job compares, are not read.
 - `agent-output-injection` reads only steps later in the agent's job: `run` scripts and `actions/github-script` `script`, directly or through `${{ env.NAME }}`. It does not follow job `outputs` into other jobs, wildcards such as `steps.*.outputs.summary`, other actions that take code, or `shell:` and `working-directory:`.
 - Later steps are skipped as unable to run with the agent only when their `if:`, alone or together with the agent step's `if:`, can never be true from terms joined with `&&` that compare the same value with constants: `==`, `!=`, `contains(fromJSON('[...]'), value)` and its negation. The value must be in `inputs`, `vars`, `needs`, `matrix`, or `github.event`, `github.ref`, `github.repository` and similar values that stay the same within a job, with no index; the constants must be ASCII and start with a letter or `_`.
@@ -238,7 +239,7 @@ List several rule IDs with commas, or write `# sekimori: ignore` with nothing af
 
 ## Survey
 
-In November 2026 sekimori was run on 2,044 public workflows found by GitHub code search (up to 1,000 per action). Checking each file alone, 375 of them (18.3%) had at least one finding and 55 (2.7%) were `error`. With v0.8.0, checking each repository's files together so that `workflow_run` upstreams could be found, no longer counting Gemini CLI steps that get no `prompt`, reading `if:` on earlier jobs in `needs:`, adding `agent-output-injection` and `agent-code-with-secrets`, and skipping later steps that cannot run with the agent, 368 (18.0%) had a finding and 43 (2.1%) were `error`. Almost all `error` findings were `run-gemini-cli` workflows that start on issues or comments without checking who triggered them.
+In November 2026 sekimori was run on 2,044 public workflows found by GitHub code search (up to 1,000 per action, collected before the Claude Code base action was supported). Checking each file alone, 375 of them (18.3%) had at least one finding and 55 (2.7%) were `error`. With v0.8.0, checking each repository's files together so that `workflow_run` upstreams could be found, no longer counting Gemini CLI steps that get no `prompt`, reading `if:` on earlier jobs in `needs:`, adding `agent-output-injection` and `agent-code-with-secrets`, and skipping later steps that cannot run with the agent, 368 (18.0%) had a finding and 43 (2.1%) were `error`. Almost all `error` findings were `run-gemini-cli` workflows that start on issues or comments without checking who triggered them.
 
 In random samples checked by reading the workflows, the early samples found no false positives for `broad-tools` or the permissions/secrets axis, and about half of the sampled `error` findings depended on something outside the workflow file, such as an upstream workflow, an earlier job in `needs:`, or an agent that gets no outside text. A later check of v0.7.0 found 18 of 20 random findings correct (one false positive, one undecidable), and 9 of 10 correct for each of the two newest rules. The remaining errors came from checks sekimori cannot read statically: an earlier job's script that sets an output the agent job compares, and step conditions that can never be true in the same run. The counts and the method are in [docs/survey/2026-11.md](docs/survey/2026-11.md) (in Japanese); repository names are not published.
 

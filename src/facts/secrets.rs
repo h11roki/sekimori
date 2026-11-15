@@ -72,6 +72,7 @@ pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> 
 pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<String> {
     let agent_inputs: &[&str] = match step.agent {
         Agent::ClaudeCode => &CLAUDE_INPUTS_WITH_TOKEN,
+        Agent::ClaudeBase => &CLAUDE_AGENT_INPUTS,
         Agent::Codex => &CODEX_AGENT_INPUTS,
         Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
     };
@@ -133,7 +134,7 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
             let secret = first_secret(value, Some(env))?;
             (key.to_string(), secret, input_route(step, key))
         }
-        Agent::Codex | Agent::GeminiCli => env
+        Agent::ClaudeBase | Agent::Codex | Agent::GeminiCli => env
             .variables()
             .filter(|(variable, _)| TOKEN_VARIABLES.contains(&variable.name))
             .find_map(|(variable, secret)| {
@@ -152,7 +153,7 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
 
 pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<SecretUse<'w>> {
     let agent_inputs: &[&str] = match step.agent {
-        Agent::ClaudeCode => &CLAUDE_AGENT_INPUTS,
+        Agent::ClaudeCode | Agent::ClaudeBase => &CLAUDE_AGENT_INPUTS,
         Agent::Codex => &CODEX_AGENT_INPUTS,
         Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
     };
@@ -198,7 +199,7 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
         return false;
     }
     match agent {
-        Agent::ClaudeCode => {
+        Agent::ClaudeCode | Agent::ClaudeBase => {
             !CLAUDE_CREDENTIAL_VARIABLES.contains(&name)
                 && !CLAUDE_CREDENTIAL_PREFIXES
                     .iter()

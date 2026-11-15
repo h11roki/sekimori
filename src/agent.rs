@@ -8,18 +8,30 @@ use crate::workflow::Workflow;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
     ClaudeCode,
+    ClaudeBase,
     Codex,
     GeminiCli,
 }
 
-const AGENT_ACTIONS: [(&str, Agent); 3] = [
-    ("anthropics/claude-code-action", Agent::ClaudeCode),
+const CLAUDE_ACTION: &str = "anthropics/claude-code-action";
+const CLAUDE_BASE_SUBPATH: &str = "base-action";
+const AGENT_ACTIONS: [(&str, Agent); 4] = [
+    (CLAUDE_ACTION, Agent::ClaudeCode),
+    ("anthropics/claude-code-base-action", Agent::ClaudeBase),
     ("openai/codex-action", Agent::Codex),
     ("google-github-actions/run-gemini-cli", Agent::GeminiCli),
 ];
 
 impl Agent {
     fn of(uses: &Uses) -> Option<Agent> {
+        if let Uses::Repository(repository) = uses
+            && repository.slug().eq_ignore_ascii_case(CLAUDE_ACTION)
+            && repository
+                .subpath()
+                .is_some_and(|subpath| subpath.trim_matches('/') == CLAUDE_BASE_SUBPATH)
+        {
+            return Some(Agent::ClaudeBase);
+        }
         AGENT_ACTIONS
             .iter()
             .find(|(action, _)| is_root_action(uses, action))
@@ -200,14 +212,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: anthropics/claude-code-action/base-action@v1
-      - uses: anthropics/claude-code-base-action@v1
+      - uses: anthropics/claude-code-action/other-action@v1
       - uses: ./.github/actions/claude-code-action
       - uses: docker://openai/codex-action:latest
       - run: npx @google/gemini-cli
 ",
         );
         assert!(agent_steps(&workflow).is_empty());
+    }
+
+    #[test]
+    fn the_base_action_is_found_under_both_names() {
+        let workflow = workflow(
+            "on: issues
+jobs:
+  base:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action/base-action@v1
+      - uses: Anthropics/Claude-Code-Base-Action@v1
+",
+        );
+        let agents: Vec<Agent> = agent_steps(&workflow)
+            .iter()
+            .map(|step| step.agent)
+            .collect();
+        assert_eq!(agents, [Agent::ClaudeBase, Agent::ClaudeBase]);
     }
 
     #[test]

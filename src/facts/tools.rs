@@ -61,7 +61,7 @@ pub struct BroadTool<'w> {
 
 pub fn broad_tool<'w>(step: &AgentStep<'w>) -> Option<BroadTool<'w>> {
     match step.agent {
-        Agent::ClaudeCode => ClaudePermissions::of(step).broad_tool(),
+        Agent::ClaudeCode | Agent::ClaudeBase => ClaudePermissions::of(step).broad_tool(),
         Agent::Codex => CODEX_BROAD_INPUTS.into_iter().find_map(|(name, broad)| {
             let (key, value) = input(step, name)?;
             (value.trim() == broad).then(|| BroadTool {
