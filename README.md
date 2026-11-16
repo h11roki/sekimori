@@ -49,7 +49,7 @@ jobs:
         with:
           persist-credentials: false
       - id: sekimori
-        uses: h11roki/sekimori@81ce03249210149a5833f19e4c879634853d86c3 # v0.15.0
+        uses: h11roki/sekimori@aebcc19a2eebf8db563bc6bbef6e1e9c5cb8168e # v0.16.0
       - if: >-
           !cancelled()
           && steps.sekimori.outputs.sarif-file != ''
@@ -79,11 +79,11 @@ The action downloads the release binary that matches its own version and checks 
 Download a binary from [Releases](https://github.com/h11roki/sekimori/releases) and verify it:
 
 ```sh
-gh release download v0.15.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
+gh release download v0.16.0 --repo h11roki/sekimori --pattern sekimori-aarch64-apple-darwin
 gh attestation verify sekimori-aarch64-apple-darwin \
   --repo h11roki/sekimori \
   --signer-workflow h11roki/sekimori/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.15.0
+  --source-ref refs/tags/v0.16.0
 chmod +x sekimori-aarch64-apple-darwin
 ```
 
