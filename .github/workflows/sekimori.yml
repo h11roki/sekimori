@@ -34,6 +34,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      checks: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,7 +60,7 @@ jobs:
       - id: findings
         if: steps.release.outputs.released == 'true'
         continue-on-error: true
-        uses: $/
+        uses: ./
         with:
           paths: |
             tests/fixtures/findings/open-claude.yml
@@ -73,3 +75,10 @@ jobs:
           test "$EXIT_CODE" = 1
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
+      - if: steps.release.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | [.id, .name, .status, .check_run_url] | @tsv'
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "action") | .id')
+          gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations" --jq '.[] | [.path, .start_line, .annotation_level, .title, (.message | .[0:80])] | @tsv'
