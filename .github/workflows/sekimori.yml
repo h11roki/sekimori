@@ -105,17 +105,17 @@ jobs:
           actual=""
           for delay in 0 5 5 5 5 5; do
             sleep "$delay"
-            if actual=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID/annotations?per_page=100" --jq '[.[] | select((.title // "") | test("^sekimori( |$)")) | [.path, .start_line, .start_column, .annotation_level, .title, .message]] | sort') && [ "$actual" != "[]" ]; then
-              break
+            if response=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID/annotations?per_page=100" --jq '[.[] | select((.title // "") | test("^sekimori( |$)")) | [.path, .start_line, .start_column, .annotation_level, .title, .message]] | sort'); then
+              actual=$response
+              if jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
+                exit 0
+              fi
             fi
           done
-          if [ -z "$actual" ] || [ "$actual" = "[]" ]; then
-            echo "::error::could not read any sekimori annotation of the action job"
+          if [ -z "$actual" ]; then
+            echo "::error::could not read the annotations of the action job"
             exit 1
           fi
-          if ! jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
-            echo "::error::the annotations of the action job do not match its SARIF results"
-            echo "expected: $EXPECTED"
-            echo "actual: $actual"
-            exit 1
-          fi
+          echo "::error::the annotations of the action job do not match its SARIF results"
+          diff <(jq -c '.[]' <<< "$EXPECTED") <(jq -c '.[]' <<< "$actual") || true
+          exit 1
