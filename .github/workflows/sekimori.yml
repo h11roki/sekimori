@@ -34,6 +34,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      check-run-id: ${{ job.check_run_id }}
+      annotations: ${{ steps.verify.outputs.annotations }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,7 +67,8 @@ jobs:
           paths: |
             tests/fixtures/findings/open-claude.yml
             tests/fixtures/findings/open-codex.yml
-      - if: steps.release.outputs.released == 'true'
+      - id: verify
+        if: steps.release.outputs.released == 'true'
         env:
           OUTCOME: ${{ steps.findings.outcome }}
           EXIT_CODE: ${{ steps.findings.outputs.exit-code }}
@@ -73,3 +78,44 @@ jobs:
           test "$EXIT_CODE" = 1
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
+          annotations=$(jq -c '[.runs[0].results[] | .locations[0].physicalLocation as $location | [$location.artifactLocation.uri, $location.region.startLine, $location.region.startColumn, (if .level == "error" then "failure" else .level end), "sekimori " + .ruleId, .message.text]] | sort' "$SARIF")
+          if ! jq -e -n --argjson annotations "$annotations" '[$annotations | group_by(.[3])[] | length] | all(. <= 10)' > /dev/null; then
+            echo "::error::the fixtures give more than 10 annotations of one level, and GitHub keeps only 10 per step"
+            exit 1
+          fi
+          echo "annotations=$annotations" >> "$GITHUB_OUTPUT"
+
+  action-annotations:
+    needs: action
+    if: needs.action.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RUN_ID: ${{ needs.action.outputs.check-run-id }}
+          EXPECTED: ${{ needs.action.outputs.annotations }}
+        run: |
+          if [ -z "$CHECK_RUN_ID" ]; then
+            echo "::error::the action job did not give its check run ID"
+            exit 1
+          fi
+          actual=""
+          for delay in 0 5 5 5 5 5; do
+            sleep "$delay"
+            if response=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID/annotations?per_page=100" --jq '[.[] | select((.title // "") | test("^sekimori( |$)")) | [.path, .start_line, .start_column, .annotation_level, .title, .message]] | sort'); then
+              actual=$response
+              if jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
+                exit 0
+              fi
+            fi
+          done
+          if [ -z "$actual" ]; then
+            echo "::error::could not read the annotations of the action job"
+            exit 1
+          fi
+          echo "::error::the annotations of the action job do not match its SARIF results"
+          diff <(jq -c '.[]' <<< "$EXPECTED") <(jq -c '.[]' <<< "$actual") || true
+          exit 1

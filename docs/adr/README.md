@@ -57,7 +57,7 @@
 | [0016](0016-sarif-output.md) | SARIF は `--format sarif` で 1 つの run として出し、重さは結果の level で表す | 承認(結果のまとめ方と message の形と重複の見込みは 0018、送るステップの条件は 0019 で置き換え) |
 | [0017](0017-action-distribution.md) | Action は、Releases に置いたビルド済みのバイナリを、来歴の証明を確かめてから取ってくる composite Action にする | 承認(利用者のワークフローの例は 0019 で、crates.io に出さないことは 0045 で置き換え) |
 | [0018](0018-sarif-merge-same-place.md) | SARIF では、同じ規則と位置の結果を 1 つにまとめ、重い方の level と全ての内訳を書く | 承認 |
-| [0019](0019-self-check.md) | このリポジトリのワークフローを、リリースした sekimori の Action で検査し、結果をコードスキャンに送る | 承認 |
+| [0019](0019-self-check.md) | このリポジトリのワークフローを、リリースした sekimori の Action で検査し、結果をコードスキャンに送る | 承認(Action を試すジョブの注釈の確かめは 0046 で足した) |
 | [0020](0020-readme.md) | 利用者向けの使い方は、リポジトリの根の README に英語で書き、設計の理由は ADR に任せる | 承認 |
 | [0021](0021-public-workflow-survey.md) | 公開リポジトリのエージェントのワークフローに sekimori を当て、集計だけを公開する | 承認 |
 | [0022](0022-workflow-run-origin.md) | workflow_run は、上流の実行のイベントと head のリポジトリを `if:` で絞っていれば、書き込める人だけが起動できるとみなす | 承認(上流のイベントの段の分け方は 0024 で置き換え) |
@@ -74,7 +74,7 @@
 | [0033](0033-ignore-warnings.md) | 読めない抑える指示と知らない規則の ID は、標準エラー出力に警告する | 承認(`--format github` での出し方は 0035 で足した) |
 | [0034](0034-default-branch-upstream-checkout.md) | workflow_run で、上流が同じリポジトリの既定の枝で動いたと確かめていれば、その commit の取り出しは PR の head としない | 承認 |
 | [0035](0035-github-annotations.md) | `--format github` で GitHub の注釈を出し、Action は注釈とジョブの要約に指摘を出す | 承認(Action の実行の回数と要約の書き方は 0037 で置き換え) |
-| [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え) |
+| [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え。試すジョブの注釈の確かめは 0046 で足した) |
 | [0037](0037-output-files.md) | CLI は `--sarif-file` と `--summary-file` で SARIF とジョブの要約もファイルに書き、Action は sekimori を 1 回だけ動かす | 承認(書きかけの SARIF と、書けなかったことの出し方は 0038 で置き換え) |
 | [0038](0038-output-file-failures.md) | 書きかけの SARIF のファイルは消し、書けなかったことは `--format github` で注釈にする | 承認 |
 | [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認(`AWS_` の接頭辞、後のステップの指摘での扱いと、その理由は 0040 で置き換え) |
@@ -84,3 +84,4 @@
 | [0043](0043-shell-file-writers.md) | ファイルを書き換えるシェルのコマンドを許すことも、書き換えとして数える | 承認 |
 | [0044](0044-auto-mode.md) | claude-code-action の auto モードは、それだけでは広い道具として数えない | 承認 |
 | [0045](0045-crates-io-trusted-publishing.md) | crates.io には、リリースのワークフローから Trusted Publishing で出す | 承認 |
+| [0046](0046-action-test-annotations.md) | Action を試すジョブの後に、そのジョブの注釈を API で読み、SARIF と突き合わせる | 承認 |
