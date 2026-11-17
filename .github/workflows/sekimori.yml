@@ -77,7 +77,11 @@ jobs:
           test "$EXIT_CODE" = 1
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
-          annotations=$(jq -c '[.runs[0].results[] | [.locations[0].physicalLocation.artifactLocation.uri, .locations[0].physicalLocation.region.startLine, (if .level == "error" then "failure" else .level end), "sekimori " + .ruleId]] | sort' "$SARIF")
+          annotations=$(jq -c '[.runs[0].results[] | .locations[0].physicalLocation as $location | [$location.artifactLocation.uri, $location.region.startLine, $location.region.startColumn, ({"error": "failure", "note": "notice"}[.level] // .level), "sekimori " + .ruleId, .message.text]] | unique' "$SARIF")
+          if ! jq -e -n --argjson annotations "$annotations" '[$annotations | group_by(.[3])[] | length] | all(. <= 10)' > /dev/null; then
+            echo "::error::the fixtures give more than 10 annotations of one level, and GitHub keeps only 10 per step"
+            exit 1
+          fi
           echo "annotations=$annotations" >> "$GITHUB_OUTPUT"
 
   action-annotations:
@@ -93,8 +97,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED: ${{ needs.action.outputs.annotations }}
         run: |
-          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" --jq '.jobs[] | select(.name == "action") | .id')
-          actual=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations?per_page=100" --jq '[.[] | select((.title // "") | startswith("sekimori ")) | [.path, .start_line, .annotation_level, .title]] | sort')
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" --jq '[.jobs[] | select(.name == "action") | .id] | if length == 1 then .[0] else empty end')
+          if [ -z "$job" ]; then
+            echo "::error::could not find exactly one job named action in this run"
+            exit 1
+          fi
+          for _ in 1 2 3 4 5 6; do
+            actual=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations?per_page=100" --jq '[.[] | select((.title // "") | test("^sekimori( |$)")) | [.path, .start_line, .start_column, .annotation_level, .title, .message]] | unique')
+            if [ "$actual" != "[]" ]; then
+              break
+            fi
+            sleep 5
+          done
           if ! jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
             echo "::error::the annotations of the action job do not match its SARIF results"
             echo "expected: $EXPECTED"

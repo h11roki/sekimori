@@ -74,7 +74,7 @@
 | [0033](0033-ignore-warnings.md) | 読めない抑える指示と知らない規則の ID は、標準エラー出力に警告する | 承認(`--format github` での出し方は 0035 で足した) |
 | [0034](0034-default-branch-upstream-checkout.md) | workflow_run で、上流が同じリポジトリの既定の枝で動いたと確かめていれば、その commit の取り出しは PR の head としない | 承認 |
 | [0035](0035-github-annotations.md) | `--format github` で GitHub の注釈を出し、Action は注釈とジョブの要約に指摘を出す | 承認(Action の実行の回数と要約の書き方は 0037 で置き換え) |
-| [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え) |
+| [0036](0036-action-exit-code.md) | Action は sekimori の終了コードを `exit-code` の出力に出し、Action を試すジョブはそれが 1 であることを確かめる | 承認(`exit-code` は 1 回の実行の終了コードになり、要約が書けないときの扱いと `sarif-file` を出す条件は 0037 で置き換え。試すジョブの注釈の確かめは 0046 で足した) |
 | [0037](0037-output-files.md) | CLI は `--sarif-file` と `--summary-file` で SARIF とジョブの要約もファイルに書き、Action は sekimori を 1 回だけ動かす | 承認(書きかけの SARIF と、書けなかったことの出し方は 0038 で置き換え) |
 | [0038](0038-output-file-failures.md) | 書きかけの SARIF のファイルは消し、書けなかったことは `--format github` で注釈にする | 承認 |
 | [0039](0039-codex-bedrock-credentials.md) | Codex でも `AWS_` で始まる `env` を、エージェント自身の資格情報として数えない | 承認(`AWS_` の接頭辞、後のステップの指摘での扱いと、その理由は 0040 で置き換え) |
