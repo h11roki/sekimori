@@ -34,8 +34,9 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      checks: read
-      actions: read
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      annotations: ${{ steps.verify.outputs.annotations }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,12 +61,13 @@ jobs:
       - id: findings
         if: steps.release.outputs.released == 'true'
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           paths: |
             tests/fixtures/findings/open-claude.yml
             tests/fixtures/findings/open-codex.yml
-      - if: steps.release.outputs.released == 'true'
+      - id: verify
+        if: steps.release.outputs.released == 'true'
         env:
           OUTCOME: ${{ steps.findings.outcome }}
           EXIT_CODE: ${{ steps.findings.outputs.exit-code }}
@@ -75,10 +77,27 @@ jobs:
           test "$EXIT_CODE" = 1
           jq -e '.runs[0].invocations[0].executionSuccessful' "$SARIF"
           jq -e '[.runs[0].results[].locations[0].physicalLocation.artifactLocation.uri] | unique == ["tests/fixtures/findings/open-claude.yml", "tests/fixtures/findings/open-codex.yml"]' "$SARIF"
-      - if: steps.release.outputs.released == 'true'
-        env:
+          annotations=$(jq -c '[.runs[0].results[] | [.locations[0].physicalLocation.artifactLocation.uri, .locations[0].physicalLocation.region.startLine, (if .level == "error" then "failure" else .level end), "sekimori " + .ruleId]] | sort' "$SARIF")
+          echo "annotations=$annotations" >> "$GITHUB_OUTPUT"
+
+  action-annotations:
+    needs: action
+    if: needs.action.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+    steps:
+      - env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED: ${{ needs.action.outputs.annotations }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | [.id, .name, .status, .check_run_url] | @tsv'
           job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "action") | .id')
-          gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations" --jq '.[] | [.path, .start_line, .annotation_level, .title, (.message | .[0:80])] | @tsv'
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations?per_page=100" --jq '[.[] | select((.title // "") | startswith("sekimori ")) | [.path, .start_line, .annotation_level, .title]] | sort')
+          if ! jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
+            echo "::error::the annotations of the action job do not match its SARIF results"
+            echo "expected: $EXPECTED"
+            echo "actual: $actual"
+            exit 1
+          fi
