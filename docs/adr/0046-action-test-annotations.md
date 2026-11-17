@@ -22,7 +22,7 @@
 高橋さんが判断を任せ(2026-11-17 に「進めて」)、Claude が 1 を選んだ。
 
 - `action` のジョブは、SARIF の結果ごとの `[path, line, level, title]` を並べた JSON をジョブの出力に出す。`level` は注釈の `annotation_level` に合わせ、`error` を `failure` にする。`title` は `sekimori <規則の ID>`
-- 新しいジョブ `action-annotations` は、`checks: read` と `actions: read` で、同じ run の同じ試行の `action` のジョブを探し、その注釈のうち `title` が `sekimori ` で始まるものを同じ形に並べて、期待値と一致することを確かめる
+- 新しいジョブ `action-annotations` は、`checks: read` と `actions: read` で、同じ run の最新の試行の `action` のジョブを探し(失敗したジョブだけをやり直したときも見つかるよう `filter=latest`)、その注釈のうち `title` が `sekimori ` で始まるものを同じ形に並べて、期待値と一致することを確かめる
 - Action を動かさなかったとき(版がまだリリースされていないとき)は、新しいジョブも飛ばす
 
 ## 理由

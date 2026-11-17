@@ -93,7 +93,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED: ${{ needs.action.outputs.annotations }}
         run: |
-          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "action") | .id')
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest" --jq '.jobs[] | select(.name == "action") | .id')
           actual=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$job/annotations?per_page=100" --jq '[.[] | select((.title // "") | startswith("sekimori ")) | [.path, .start_line, .annotation_level, .title]] | sort')
           if ! jq -e -n --argjson expected "$EXPECTED" --argjson actual "$actual" '$expected == $actual' > /dev/null; then
             echo "::error::the annotations of the action job do not match its SARIF results"
