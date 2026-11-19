@@ -204,7 +204,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     };
     let from_input = agent_inputs.iter().find_map(|name| {
         let (key, value) = input(step, name)?;
-        let secret = all_secrets(value, Some(env)).into_iter().find(is_other)?;
+        let secret = every_secret(value, Some(env)).into_iter().find(is_other)?;
         Some(SecretUse {
             setting: format!("{key} passes {secret} to the agent"),
             route: input_route(step, key),
@@ -230,7 +230,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             return None;
         }
         let (text, route) = env.inherited_expression()?;
-        let secret = all_secrets(text, None).into_iter().find(is_other)?;
+        let secret = every_secret(text, None).into_iter().find(is_other)?;
         Some(SecretUse {
             setting: format!("env passes {secret} to the agent"),
             route: route.clone(),
@@ -267,16 +267,18 @@ fn credential_secrets(step: &AgentStep, env: &SecretEnv) -> Vec<String> {
     credential_inputs
         .iter()
         .filter_map(|name| input(step, name))
-        .flat_map(|(_, value)| {
-            expression_spans(value)
+        .flat_map(|(_, value)| every_secret(value, Some(env)))
+        .collect()
+}
+
+fn every_secret(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
+    expression_spans(text)
+        .into_iter()
+        .filter_map(|span| parse_expression(&text[span]))
+        .flat_map(|expression| {
+            flowing_contexts(&expression)
                 .into_iter()
-                .filter_map(|span| parse_expression(&value[span]))
-                .flat_map(|expression| {
-                    flowing_contexts(&expression)
-                        .into_iter()
-                        .filter_map(|context| secret_of(context, Some(env)))
-                        .collect::<Vec<_>>()
-                })
+                .filter_map(|context| secret_of(context, env))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -554,7 +556,7 @@ mod tests {
             "anthropics/claude-code-action@v1",
             "        with:
           anthropic_api_key: ${{ secrets.FALLBACK || env.KEY }}
-          prompt: ${{ secrets.FALLBACK }} ${{ secrets.SENTRY }}
+          prompt: ${{ secrets.FALLBACK || secrets.SENTRY }}
 ",
         );
         assert_eq!(
