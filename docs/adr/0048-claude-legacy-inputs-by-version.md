@@ -1,0 +1,49 @@
+# 0048. claude-code-action の v1 以降では、`allowed_tools` と `disallowed_tools` の入力を読まない
+
+- ステータス: 承認
+- 日付: 2026-11-19
+
+## 文脈
+
+- ADR 0013 は、claude-code-action の `@beta` と `@v0` の入力 `allowed_tools` と `disallowed_tools` を読むと決め、`@v1` で使われない `allowed_tools` を残すと効かない設定を指摘することをトレードオフとして受け入れた
+- 2026-11-19 に確かめた claude-code-action の `action.yml`
+  - `beta` と `v0.0.63` には `allowed_tools` と `disallowed_tools` の入力がある
+  - `v1.0.0` と `v1` には無い。道具の許可は `claude_args` で渡す。composite の Action は宣言していない入力を受け取らず、GitHub は警告を出すだけで先に進む
+- 2026-11-19 に、v0.16.0 の公開ワークフローの指摘から 30 ファイルを選んで正誤を確かめたところ、誤検知 5 件のうち 1 件がこの形だった。`@v1` のステップに `allowed_tools: "Bash(npm:*),..."` を残していた
+- 公開ワークフロー 2,044 件のうち、claude-code-action で `allowed_tools` を書いたステップの参照は、`@beta` が 8、`@v1` が 4、SHA で固定して `# v1` のコメントを付けたものが 5 だった(ステップの近くの行で数えた目安)
+
+## 検討した選択肢
+
+1. 参照の版か、SHA の後ろの版のコメントが v1 以降なら、`allowed_tools` と `disallowed_tools` を読まない。版が分からないときは今のとおり読む
+2. 参照が `@beta` か `@v0` で始まるときだけ読み、それ以外は読まない
+3. 今のまま読む
+
+## 決定
+
+高橋さんが判断を任せ(2026-11-19 に「改善して」)、Claude が 1 を選んだ。
+
+- 対象は `anthropics/claude-code-action`(ルートの Action)だけ。`anthropics/claude-code-base-action` は今も `allowed_tools` を受け取るので、これまでどおり読む
+- 版は次の順で決める
+  - 参照が `v` と数字を `.` でつないだタグ(`v1`、`v1.0`、`v1.0.5`、`refs/tags/v1.0.5`)なら、その最初の数字
+  - 参照が 40 文字か 64 文字の commit の SHA なら、`uses:` の行のコメントを `#` で区切った部分のうち、全体が同じ形の版であるものの最初の数字。版の前に、空白を含まない前置きを `@` か `=` で区切って付けてもよい(ratchet の `ratchet:owner/repo@v1`、`pin@v1.0.5`、`tag=v1.0.5`)。`v` は大文字でもよい。空白を含む部分(`TODO: bump to @v1`)は、版に触れているだけの文なので読まない。`# v1.0.5 # sekimori: ignore[...]` のような並びも読む。`# v1 migration TODO` のように他の言葉が続くものは読まない
+  - それ以外(`beta` や `main` のような版の形でない参照、版のコメントの無い SHA)は、版は分からない。版のコメントは SHA の参照のときだけ読む。`@beta # v1` のコメントは、参照が指す中身を表さないので読まない。claude-code-action の `beta` は v1 より前のタグなので、`allowed_tools` を読むのが正しい
+- 版が 1 以上なら、`allowed_tools` と `disallowed_tools` を読まない。`claude_args` と `settings` はこれまでどおり読む
+
+## 理由
+
+- 効かない設定を根拠にした指摘は、利用者が直しても危険が変わらない誤検知になる
+- 公開ワークフローでも、SHA で固定して版のコメントを付ける書き方が、タグの参照と同じくらいある。コメントを読まないと半分を取りこぼす
+- 2 は、版の分からない SHA の参照(古い版を固定したものもありうる)を全て読まなくなり、効いている許可を見逃す
+
+## 受け入れたトレードオフ
+
+- 版のコメントは利用者が書く文字で、SHA の版と食い違っていても確かめない
+- 版が分からない SHA の参照と、`main` のような枝の参照では、今のとおり `allowed_tools` を読む。`main` の参照は今の版では効かないので、誤検知になりうる
+- `# v1-rc.2` のような書き方の版のコメントと、`uses:` の上の行に書いた版のコメントは読まない
+- 版が v1 より前と分かっていても、v1 で入った `claude_args` や `prompt` はこれまでどおり読む。v0 の入力の組(`direct_prompt`、`mode` など)をまるごと扱う判断は、この ADR では行わない
+- `disallowed_tools` も読まないので、v1 で `disallowed_tools` だけに頼って道具を禁じたつもりのワークフローでは、`claude_args` の許可がそのまま広い道具として指摘される。v1 ではその禁止も効いていないので、正しい
+
+## 再検討する条件
+
+- v0 や `beta` の claude-code-action で、v1 にしか無い入力(`claude_args` など)を根拠にした誤検知が見つかったとき
+- claude-code-action が、さらに入力を版で外したとき

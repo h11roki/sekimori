@@ -4,7 +4,7 @@ use github_actions_models::common::{BasePermission, Permission, Permissions};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
-use crate::agent::{AgentStep, agent_steps};
+use crate::agent::{AgentStep, USES_KEY, agent_steps};
 use crate::facts::{
     AgentCode, BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
     UpstreamOrigin, Upstreams, agent_code_with_secrets, agent_secrets, broad_tool,
@@ -20,7 +20,6 @@ const WARNING_TOTAL: u8 = 2;
 const DIRECTIVE_PREFIX: &str = "sekimori:";
 const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
 const IGNORE_WORD: &str = "ignore";
-const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;
@@ -319,9 +318,9 @@ fn assess_step<'w>(
         Vec::new()
     } else {
         workflow
-            .comments(&step.route.with_key(USES_KEY))
+            .comment_parts(&step.route.with_key(USES_KEY))
             .into_iter()
-            .flat_map(ignore_directives)
+            .filter_map(ignore_directive)
             .collect()
     };
     let mut ignored = Vec::new();
@@ -363,37 +362,31 @@ enum Directive<'c> {
     Unreadable(&'c str),
 }
 
-fn ignore_directives(comment: &str) -> Vec<Directive<'_>> {
-    comment
-        .split('#')
-        .map(str::trim)
-        .filter_map(|part| {
-            let directive = part
-                .strip_prefix(DIRECTIVE_PREFIX)?
-                .trim_start()
-                .strip_prefix(IGNORE_WORD)?;
-            Some(match directive.strip_prefix('[') {
-                Some(list) => {
-                    let ids: Vec<&str> = list
-                        .split_once(']')
-                        .map(|(ids, _)| {
-                            ids.split(',')
-                                .map(str::trim)
-                                .filter(|id| !id.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if ids.is_empty() {
-                        Directive::Unreadable(part)
-                    } else {
-                        Directive::Rules(ids)
-                    }
-                }
-                None if directive.is_empty() => Directive::All,
-                None => Directive::Unreadable(part),
-            })
-        })
-        .collect()
+fn ignore_directive(part: &str) -> Option<Directive<'_>> {
+    let directive = part
+        .strip_prefix(DIRECTIVE_PREFIX)?
+        .trim_start()
+        .strip_prefix(IGNORE_WORD)?;
+    Some(match directive.strip_prefix('[') {
+        Some(list) => {
+            let ids: Vec<&str> = list
+                .split_once(']')
+                .map(|(ids, _)| {
+                    ids.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                Directive::Unreadable(part)
+            } else {
+                Directive::Rules(ids)
+            }
+        }
+        None if directive.is_empty() => Directive::All,
+        None => Directive::Unreadable(part),
+    })
 }
 
 fn event_names(events: &[ExternalEvent]) -> String {

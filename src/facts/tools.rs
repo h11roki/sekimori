@@ -20,6 +20,7 @@ const CLAUDE_SHELL_TOOL: &str = "Bash";
 const CLAUDE_ARGS_INPUT: &str = "claude_args";
 const CLAUDE_LEGACY_ALLOWED_INPUT: &str = "allowed_tools";
 const CLAUDE_LEGACY_DISALLOWED_INPUT: &str = "disallowed_tools";
+const CLAUDE_LEGACY_INPUTS_REMOVED_IN: u64 = 1;
 const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
     ("sandbox", "danger-full-access"),
     ("permission-profile", ":danger-full-access"),
@@ -225,7 +226,11 @@ impl<'w> ClaudePermissions<'w> {
         if let Some((key, value)) = input(step, SETTINGS_INPUT) {
             permissions.read_settings(key, value, &input_route(step, key));
         }
-        if step.agent == Agent::ClaudeBase {
+        let legacy_inputs_removed = step.agent == Agent::ClaudeCode
+            && step
+                .major_version
+                .is_some_and(|major| major >= CLAUDE_LEGACY_INPUTS_REMOVED_IN);
+        if step.agent == Agent::ClaudeBase || legacy_inputs_removed {
             return permissions;
         }
         if let Some((key, value)) = input(step, CLAUDE_LEGACY_ALLOWED_INPUT) {
@@ -921,10 +926,50 @@ jobs:
     }
 
     #[test]
-    fn claude_legacy_allowed_tools_input_is_read() {
+    fn claude_legacy_inputs_are_read_only_before_v1() {
+        let with = "        with:\n          allowed_tools: \"Read,Bash\"\n";
+        for uses in [
+            "anthropics/claude-code-action@beta",
+            "anthropics/claude-code-action@v0.0.63",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v0.0.63",
+            "anthropics/claude-code-base-action@v1",
+            "anthropics/claude-code-action@beta # v1",
+            "anthropics/claude-code-action@main # v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1 migration TODO",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # vendored",
+            "anthropics/claude-code-action@v+1",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # TODO: bump to @v1",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # renovate: depName=v2",
+        ] {
+            assert_eq!(
+                broad_setting(uses, with).as_deref(),
+                Some("8: allowed_tools allows `Bash`"),
+                "{uses}"
+            );
+        }
+        for uses in [
+            "anthropics/claude-code-action@v1",
+            "anthropics/claude-code-action@v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v2 # sekimori: ignore[pr-head-checkout]",
+            "anthropics/claude-code-action@refs/tags/v1.0.5",
+            "anthropics/claude-code-action@V1",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef # v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # ratchet:anthropics/claude-code-action@v1",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # pin@v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # tag=v1.0.5",
+            "anthropics/claude-code-action@v10",
+        ] {
+            assert_eq!(broad_setting(uses, with), None, "{uses}");
+        }
         assert_eq!(
-            claude("        with:\n          allowed_tools: \"Read,Bash\"\n").as_deref(),
-            Some("8: allowed_tools allows `Bash`")
+            broad_setting(
+                "anthropics/claude-code-action@v1",
+                "        with:\n          claude_args: --allowedTools Bash\n          disallowed_tools: Bash\n"
+            )
+            .as_deref(),
+            Some("8: claude_args allows `Bash` through --allowedTools")
         );
     }
 
@@ -933,10 +978,16 @@ jobs:
         for with in [
             "        with:\n          claude_args: --allowedTools Bash --disallowedTools Bash\n",
             "        with:\n          settings: '{\"permissions\": {\"allow\": [\"Bash\"], \"deny\": [\"Bash\"]}}'\n",
-            "        with:\n          claude_args: --allowedTools Bash\n          disallowed_tools: Bash\n",
         ] {
             assert_eq!(claude(with), None, "{with}");
         }
+        assert_eq!(
+            broad_setting(
+                "anthropics/claude-code-action@beta",
+                "        with:\n          claude_args: --allowedTools Bash\n          disallowed_tools: Bash\n"
+            ),
+            None
+        );
         assert_eq!(
             claude("        with:\n          claude_args: --allowedTools Bash --disallowedTools \"Bash(rm:*)\"\n")
                 .as_deref(),
