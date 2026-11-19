@@ -81,6 +81,15 @@ impl Workflow {
             .collect()
     }
 
+    pub fn comment_parts(&self, route: &Route) -> Vec<&str> {
+        self.comments(route)
+            .into_iter()
+            .flat_map(|comment| comment.split('#'))
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
+
     pub fn position(&self, route: &Route) -> Option<(usize, usize)> {
         let feature = self.document.query_pretty(route).ok()?;
         let (row, byte_column) = feature.location.point_span.0;

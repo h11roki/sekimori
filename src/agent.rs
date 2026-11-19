@@ -15,6 +15,8 @@ pub enum Agent {
 }
 
 pub(crate) const USES_KEY: &str = "uses";
+const TAG_REF_PREFIX: &str = "refs/tags/";
+const COMMIT_SHA_LENGTH: usize = 40;
 
 const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
     ("anthropics/claude-code-action", "", Agent::ClaudeCode),
@@ -95,25 +97,28 @@ fn major_version(workflow: &Workflow, uses: &Uses, route: &Route) -> Option<u64>
     let Uses::Repository(repository) = uses else {
         return None;
     };
-    version_number(repository.git_ref()).or_else(|| {
-        workflow
-            .comments(&route.with_key(USES_KEY))
-            .into_iter()
-            .flat_map(|comment| comment.split('#'))
-            .find_map(|part| version_number(part.trim()))
-    })
+    let git_ref = repository.git_ref();
+    let tag = git_ref.strip_prefix(TAG_REF_PREFIX).unwrap_or(git_ref);
+    if let Some(major) = version_number(tag) {
+        return Some(major);
+    }
+    let pinned =
+        git_ref.len() == COMMIT_SHA_LENGTH && git_ref.chars().all(|c| c.is_ascii_hexdigit());
+    if !pinned {
+        return None;
+    }
+    workflow
+        .comment_parts(&route.with_key(USES_KEY))
+        .into_iter()
+        .find_map(version_number)
 }
 
 fn version_number(text: &str) -> Option<u64> {
-    let digits = text.strip_prefix('v')?;
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    let rest = &digits[end..];
-    if end == 0 || !(rest.is_empty() || rest.starts_with('.') || rest.starts_with(' ')) {
-        return None;
-    }
-    digits[..end].parse().ok()
+    let mut parts = text.strip_prefix('v')?.split('.');
+    let major = parts.next()?.parse().ok()?;
+    parts
+        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        .then_some(major)
 }
 
 pub(crate) enum JobStep<'w> {

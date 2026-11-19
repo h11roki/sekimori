@@ -244,7 +244,7 @@ List several rule IDs with commas, or write `# sekimori: ignore` with nothing af
 ## Limitations
 
 - It is a static check. It cannot see what the agent reads at run time; if the agent may run `gh`, it can read issues no matter what triggered it.
-- `claude-code-action` v1 and later have no `allowed_tools` or `disallowed_tools` input, so sekimori ignores them when the ref is a `v1` or later tag, or a SHA followed by a version comment such as `# v1.0.5`. With other SHAs and with branch refs it still reads them.
+- `claude-code-action` v1 and later have no `allowed_tools` or `disallowed_tools` input, so sekimori ignores them when the ref is a `v1` or later tag, or a SHA followed by a version comment such as `# v1.0.5`. With a SHA that has no version comment, and with a branch ref such as `@beta` or `@main`, it still reads them.
 - It only knows the settings of the four actions above, as read from their source. New inputs or changed defaults need new releases of sekimori.
 - `claude-code-action` runs in auto mode by default, where a safety review can let Claude run commands that no allow rule covers. sekimori counts only the allow rules, so it does not report auto mode by itself: almost every `claude-code-action` step uses it, and the action already turns it off when outside contributors can start the run without a write-access check (`allowed_non_write_users`, `allowed_bots`). Use `--permission-mode acceptEdits` or `default` in `claude_args` for a strict allow list.
 - Build and test commands, and shell commands that write files, are matched by name from fixed lists. Redirections such as `echo x > file` are not read. Other build tools, and repository scripts that do not start with `./` or `../`, are not counted.

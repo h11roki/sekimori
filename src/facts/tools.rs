@@ -934,6 +934,10 @@ jobs:
             "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567",
             "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v0.0.63",
             "anthropics/claude-code-base-action@v1",
+            "anthropics/claude-code-action@beta # v1",
+            "anthropics/claude-code-action@main # v1.0.5",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1 migration TODO",
+            "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # vendored",
         ] {
             assert_eq!(
                 broad_setting(uses, with).as_deref(),
@@ -946,6 +950,8 @@ jobs:
             "anthropics/claude-code-action@v1.0.5",
             "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1.0.5",
             "anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v2 # sekimori: ignore[pr-head-checkout]",
+            "anthropics/claude-code-action@refs/tags/v1.0.5",
+            "anthropics/claude-code-action@v10",
         ] {
             assert_eq!(broad_setting(uses, with), None, "{uses}");
         }
