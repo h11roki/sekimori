@@ -1057,6 +1057,36 @@ jobs:
     }
 
     #[test]
+    fn the_agents_credential_written_elsewhere_still_counts_for_later_code() {
+        let workflow = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.K }}
+          settings: '{\"env\": {\"KEY\": \"${{ secrets.K }}\"}}'
+      - run: npm test
+        env:
+          TOKEN: ${{ secrets.K }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let rules: Vec<_> = assess(&workflow, &Upstreams::default())[0]
+            .hits
+            .iter()
+            .map(|hit| hit.rule)
+            .collect();
+        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+    }
+
+    #[test]
     fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),

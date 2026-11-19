@@ -32,6 +32,8 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
     "GOOGLE_APPLICATION_CREDENTIALS",
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
+const CLAUDE_CREDENTIAL_INPUT_VARIABLES: [&str; 2] =
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 2] = ["OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"];
 const CODEX_SAFETY_STRATEGY: &str = "safety-strategy";
@@ -131,6 +133,12 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
     {
         secrets.extend(all_secrets(text, None));
     }
+    let credentials = credential_secrets(step, env);
+    secrets.retain(|secret| {
+        !credentials
+            .iter()
+            .any(|credential| credential.eq_ignore_ascii_case(secret))
+    });
     secrets
 }
 
@@ -159,7 +167,7 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
     let (setting, secret, route) = match step.agent {
         Agent::ClaudeCode => {
             let (key, value) = input(step, CLAUDE_TOKEN_INPUT)?;
-            let secret = first_secret(value, Some(env))?;
+            let secret = all_secrets(value, Some(env)).into_iter().next()?;
             (key.to_string(), secret, input_route(step, key))
         }
         Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::Codex | Agent::GeminiCli => env
@@ -247,9 +255,13 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
 }
 
 fn credential_secrets(step: &AgentStep, env: &SecretEnv) -> Vec<String> {
-    let credential_inputs: &[&str] = match step.agent {
-        Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta => &CLAUDE_CREDENTIAL_INPUTS,
-        Agent::GeminiCli => &GEMINI_CREDENTIAL_INPUTS,
+    let (credential_inputs, is_credential_variable): (&[&str], fn(&str) -> bool) = match step.agent
+    {
+        Agent::ClaudeCode => (&CLAUDE_CREDENTIAL_INPUTS, is_claude_credential),
+        Agent::ClaudeBase | Agent::ClaudeBaseBeta => (&CLAUDE_CREDENTIAL_INPUTS, |name| {
+            is_claude_credential(name) && !CLAUDE_CREDENTIAL_INPUT_VARIABLES.contains(&name)
+        }),
+        Agent::GeminiCli => (&GEMINI_CREDENTIAL_INPUTS, |_| false),
         Agent::Codex => return Vec::new(),
     };
     let from_inputs = credential_inputs
@@ -258,9 +270,7 @@ fn credential_secrets(step: &AgentStep, env: &SecretEnv) -> Vec<String> {
         .flat_map(|(_, value)| all_secrets(value, Some(env)));
     let from_variables = env
         .inherited_variables()
-        .filter(|(variable, _)| {
-            step.agent != Agent::GeminiCli && is_claude_credential(variable.name)
-        })
+        .filter(|(variable, _)| is_credential_variable(variable.name))
         .flat_map(|(_, secrets)| secrets.iter().cloned());
     from_inputs
         .chain(from_variables)
@@ -286,10 +296,6 @@ fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .collect()
-}
-
-fn first_secret(text: &str, env: Option<&SecretEnv>) -> Option<String> {
-    all_secrets(text, env).into_iter().next()
 }
 
 fn secrets_of(context: &Context, env: Option<&SecretEnv>) -> Vec<String> {
@@ -627,14 +633,21 @@ mod tests {
 
     #[test]
     fn a_credential_given_through_its_env_name_is_the_agents_own() {
-        let source = workflow(
-            "env:\n  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_KEY }}\n",
-            "anthropics/claude-code-action/base-action@v1",
-            "        with:
+        let settings = "        with:
           settings: '{\"env\": {\"KEY\": \"${{ secrets.CLAUDE_KEY }}\"}}'
-",
+";
+        let env = "env:\n  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_KEY }}\n";
+        let action = workflow(env, "anthropics/claude-code-action@v1", settings);
+        assert_eq!(found(other_secret, &action), None);
+        let base = workflow(
+            env,
+            "anthropics/claude-code-action/base-action@v1",
+            settings,
         );
-        assert_eq!(found(other_secret, &source), None);
+        assert_eq!(
+            found(other_secret, &base),
+            Some("10: settings passes secrets.CLAUDE_KEY to the agent".to_string())
+        );
     }
 
     #[test]
