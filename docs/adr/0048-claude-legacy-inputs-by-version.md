@@ -25,8 +25,8 @@
 - 対象は `anthropics/claude-code-action`(ルートの Action)だけ。`anthropics/claude-code-base-action` は今も `allowed_tools` を受け取るので、これまでどおり読む
 - 版は次の順で決める
   - 参照が `v` と数字を `.` でつないだタグ(`v1`、`v1.0`、`v1.0.5`、`refs/tags/v1.0.5`)なら、その最初の数字
-  - 参照が 40 文字の commit の SHA なら、`uses:` の行のコメントを `#` で区切った部分のうち、全体が同じ形の版(`# v1.0.5`)であるものの最初の数字。`# v1.0.5 # sekimori: ignore[...]` のような並びも読む。`# v1 migration TODO` のように他の言葉が続くものは読まない
-  - それ以外(枝の参照、版のコメントの無い SHA)は、版は分からない。`@beta # v1` のように枝の参照に版のコメントを付けても、枝の中身は変わるので読まない
+  - 参照が 40 文字の commit の SHA なら、`uses:` の行のコメントを `#` で区切った部分のうち、全体が同じ形の版であるものの最初の数字。版の前に `@` か `=` で区切った前置き(ratchet の `ratchet:owner/repo@v1`、`pin@v1.0.5`、`tag=v1.0.5`)があってもよい。`# v1.0.5 # sekimori: ignore[...]` のような並びも読む。`# v1 migration TODO` のように他の言葉が続くものは読まない
+  - それ以外(`beta` や `main` のような版の形でない参照、版のコメントの無い SHA)は、版は分からない。版のコメントは SHA の参照のときだけ読む。`@beta # v1` のコメントは、参照が指す中身を表さないので読まない。claude-code-action の `beta` は v1 より前のタグなので、`allowed_tools` を読むのが正しい
 - 版が 1 以上なら、`allowed_tools` と `disallowed_tools` を読まない。`claude_args` と `settings` はこれまでどおり読む
 
 ## 理由
@@ -39,5 +39,11 @@
 
 - 版のコメントは利用者が書く文字で、SHA の版と食い違っていても確かめない
 - 版が分からない SHA の参照と、`main` のような枝の参照では、今のとおり `allowed_tools` を読む。`main` の参照は今の版では効かないので、誤検知になりうる
-- `# v1-rc.2` や `# tag=v1.0.5` のような書き方の版のコメントは読まない
+- `# v1-rc.2` のような書き方の版のコメントは読まない
+- 版が v1 より前と分かっていても、v1 で入った `claude_args` や `prompt` はこれまでどおり読む。v0 の入力の組(`direct_prompt`、`mode` など)をまるごと扱う判断は、この ADR では行わない
 - `disallowed_tools` も読まないので、v1 で `disallowed_tools` だけに頼って道具を禁じたつもりのワークフローでは、`claude_args` の許可がそのまま広い道具として指摘される。v1 ではその禁止も効いていないので、正しい
+
+## 再検討する条件
+
+- v0 や `beta` の claude-code-action で、v1 にしか無い入力(`claude_args` など)を根拠にした誤検知が見つかったとき
+- claude-code-action が、さらに入力を版で外したとき

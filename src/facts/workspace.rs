@@ -438,6 +438,22 @@ jobs:
     }
 
     #[test]
+    fn a_legacy_edit_deny_counts_only_before_claude_code_action_v1() {
+        let later = "        with:
+          disallowed_tools: Edit,MultiEdit,Write
+      - run: npm test
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}";
+        assert_eq!(found("anthropics/claude-code-action@beta", later), None);
+        assert_eq!(
+            found("anthropics/claude-code-action@v1", later).as_deref(),
+            Some(
+                "9: `npm test` in a later step runs files the agent can edit, with secrets.NPM_TOKEN"
+            )
+        );
+    }
+
+    #[test]
     fn steps_without_project_code_secrets_or_an_editing_agent_are_not_found() {
         for (agent, later) in [
             (

@@ -114,11 +114,11 @@ fn major_version(workflow: &Workflow, uses: &Uses, route: &Route) -> Option<u64>
 }
 
 fn version_number(text: &str) -> Option<u64> {
-    let mut parts = text.strip_prefix('v')?.split('.');
-    let major = parts.next()?.parse().ok()?;
-    parts
-        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-        .then_some(major)
+    let tag = text.rsplit(['@', '=']).next().unwrap_or(text);
+    let mut parts = tag.strip_prefix('v')?.split('.');
+    let major = parts.next()?;
+    let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    (digits(major) && parts.all(digits)).then(|| major.parse().ok())?
 }
 
 pub(crate) enum JobStep<'w> {
