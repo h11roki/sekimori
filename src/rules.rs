@@ -83,7 +83,7 @@ impl Rule {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. This includes a command that fetches and runs any package or script (npx, uvx, uv run, npm exec, go run), git with any arguments, a prefix rule for a tool that runs commands through an option (find -exec, rg --pre, sed's e command, git grep -O), and a build or test command that runs the repository's own code (npm test, make, cargo, ./gradlew, pytest, python with arguments, ./script.sh) when the agent can also edit files. Fills the allowed-tools axis."
             }
             Rule::LongLivedToken => {
-                "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. Fills the permissions/secrets axis."
+                "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. This includes a stored token or SSH key that an earlier actions/checkout in the job keeps in the git config without persist-credentials: false. Fills the permissions/secrets axis."
             }
             Rule::PrHeadCheckout => {
                 "A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. Fills the allowed-tools axis."

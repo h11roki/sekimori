@@ -90,17 +90,25 @@ fn lookup_in<'w>(with: &'w LoE<Env>, name: &str) -> Input<'w> {
 }
 
 fn enabled(step: &AgentStep, name: &str) -> bool {
-    let LoE::Literal(with) = &step.step.with else {
-        return false;
+    flag_in(&step.step.with, name) == Some(true)
+}
+
+fn flag_in(with: &LoE<Env>, name: &str) -> Option<bool> {
+    let LoE::Literal(with) = with else {
+        return None;
     };
-    with.iter().any(|(key, value)| {
-        key.eq_ignore_ascii_case(name)
-            && match value {
-                EnvValue::Boolean(enabled) => *enabled,
-                EnvValue::String(text) => text.trim() == "true",
-                EnvValue::Number(_) => false,
-            }
-    })
+    let (_, value) = with
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))?;
+    match value {
+        EnvValue::Boolean(flag) => Some(*flag),
+        EnvValue::String(text) => match text.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        EnvValue::Number(_) => None,
+    }
 }
 
 fn input<'w>(step: &AgentStep<'w>, name: &str) -> Option<(&'w str, &'w str)> {

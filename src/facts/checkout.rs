@@ -9,7 +9,7 @@ use super::{
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
-const CHECKOUT_ACTION: &str = "actions/checkout";
+pub(super) const CHECKOUT_ACTION: &str = "actions/checkout";
 const WORKSPACE_EXPRESSION: &str = "${{github.workspace}}";
 const BASE_REPOSITORY_EXPRESSION: &str = "${{github.repository}}";
 const BASE_REFERENCES: [&str; 8] = [

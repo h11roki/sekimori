@@ -89,3 +89,4 @@
 | [0048](0048-claude-legacy-inputs-by-version.md) | claude-code-action の v1 以降では、`allowed_tools` と `disallowed_tools` の入力を読まない | 承認 |
 | [0049](0049-evaluation-samples.md) | 正誤の確かめは、調整用と報告用の標本を分け、見逃しも測り、判定は軸ごとに根拠の行を付けて行う | 承認 |
 | [0050](0050-option-exec-commands.md) | オプションで任意のコマンドを動かせる道具は、前方一致で許すと広い道具とする | 承認 |
+| [0051](0051-persisted-checkout-credentials.md) | 前のステップの actions/checkout に残した保存済みのトークンと鍵も、エージェントに届く期限の無いトークンとして数える | 承認 |
