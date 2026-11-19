@@ -53,7 +53,7 @@
 | [0012](0012-trigger-gate-details.md) | 起動の制限の判定を各社の実装に合わせ、`if:` は式のパーサーで読む | 承認(`needs:` の前のジョブを見ないことは 0026 で置き換え) |
 | [0013](0013-broad-tools.md) | 広い道具は、各社のソースで確かめた設定で決め、読めない設定は当てない | 承認 |
 | [0014](0014-pr-head-checkout.md) | PR の head の checkout は、エージェントが PR の設定を読み込むときだけ当てる | 承認 |
-| [0015](0015-tokens-and-secrets.md) | 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る | 承認(codex の資格情報の名前は 0039 で足した) |
+| [0015](0015-tokens-and-secrets.md) | 期限の無いトークンと他の秘密情報は、エージェントの手に届く値だけを見る | 承認(codex の資格情報の名前は 0039 で足した。資格情報の入力に渡した秘密情報を他の入力で数えないことは 0047 で足した) |
 | [0016](0016-sarif-output.md) | SARIF は `--format sarif` で 1 つの run として出し、重さは結果の level で表す | 承認(結果のまとめ方と message の形と重複の見込みは 0018、送るステップの条件は 0019 で置き換え) |
 | [0017](0017-action-distribution.md) | Action は、Releases に置いたビルド済みのバイナリを、来歴の証明を確かめてから取ってくる composite Action にする | 承認(利用者のワークフローの例は 0019 で、crates.io に出さないことは 0045 で置き換え) |
 | [0018](0018-sarif-merge-same-place.md) | SARIF では、同じ規則と位置の結果を 1 つにまとめ、重い方の level と全ての内訳を書く | 承認 |
@@ -85,3 +85,4 @@
 | [0044](0044-auto-mode.md) | claude-code-action の auto モードは、それだけでは広い道具として数えない | 承認 |
 | [0045](0045-crates-io-trusted-publishing.md) | crates.io には、リリースのワークフローから Trusted Publishing で出す | 承認 |
 | [0046](0046-action-test-annotations.md) | Action を試すジョブの後に、そのジョブの注釈を API で読み、SARIF と突き合わせる | 承認 |
+| [0047](0047-own-credential-in-other-inputs.md) | エージェントの資格情報の入力に渡した秘密情報は、他の入力や env にあっても他の秘密情報として数えない | 承認 |

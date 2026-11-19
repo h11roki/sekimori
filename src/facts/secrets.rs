@@ -1,5 +1,5 @@
+use github_actions_expressions::Expr;
 use github_actions_expressions::context::Context;
-use github_actions_expressions::{Expr, SpannedExpr};
 use yamlpath::Route;
 
 use super::{
@@ -32,6 +32,8 @@ const CLAUDE_CREDENTIAL_VARIABLES: [&str; 4] = [
     "GOOGLE_APPLICATION_CREDENTIALS",
     "ANTHROPIC_CUSTOM_HEADERS",
 ];
+const CLAUDE_CREDENTIAL_INPUT_VARIABLES: [&str; 2] =
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
 const CLAUDE_CREDENTIAL_PREFIXES: [&str; 2] = ["AWS_", "ANTHROPIC_FOUNDRY_"];
 const CODEX_CREDENTIAL_VARIABLES: [&str; 2] = ["OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"];
 const CODEX_SAFETY_STRATEGY: &str = "safety-strategy";
@@ -39,6 +41,8 @@ const CODEX_UNPRIVILEGED_USER: &str = "unprivileged-user";
 const CODEX_USER_INPUT: &str = "codex-user";
 const RUNNER_USER: &str = "runner";
 const GEMINI_CREDENTIAL_VARIABLES: [&str; 2] = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+const CLAUDE_CREDENTIAL_INPUTS: [&str; 2] = ["anthropic_api_key", "claude_code_oauth_token"];
+const GEMINI_CREDENTIAL_INPUTS: [&str; 2] = ["gemini_api_key", "google_api_key"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 
 #[derive(Debug)]
@@ -49,19 +53,19 @@ pub struct SecretUse<'w> {
 
 pub struct SecretEnv<'w> {
     env: NearestEnv<'w>,
-    secrets: Vec<Option<String>>,
+    secrets: Vec<Vec<String>>,
     inherited: bool,
 }
 
 impl<'w> SecretEnv<'w> {
-    fn variables(&self) -> impl Iterator<Item = (&EnvVariable<'w>, Option<&String>)> {
+    fn variables(&self) -> impl Iterator<Item = (&EnvVariable<'w>, &[String])> {
         self.env
             .variables
             .iter()
-            .zip(self.secrets.iter().map(Option::as_ref))
+            .zip(self.secrets.iter().map(Vec::as_slice))
     }
 
-    fn inherited_variables(&self) -> impl Iterator<Item = (&EnvVariable<'w>, Option<&String>)> {
+    fn inherited_variables(&self) -> impl Iterator<Item = (&EnvVariable<'w>, &[String])> {
         self.inherited
             .then(|| self.variables())
             .into_iter()
@@ -86,14 +90,11 @@ pub(super) fn shell_secrets<'w>(env: NearestEnv<'w>, code: &str) -> Vec<String> 
     let env = resolved_secrets(env, true);
     let mut secrets: Vec<String> = env
         .variables()
-        .filter_map(|(_, secret)| secret.cloned())
+        .flat_map(|(_, secrets)| secrets.iter().cloned())
         .collect();
-    secrets.extend(
-        env.env
-            .expression
-            .as_ref()
-            .and_then(|(text, _)| first_secret(text, None)),
-    );
+    if let Some((text, _)) = &env.env.expression {
+        secrets.extend(all_secrets(text, None));
+    }
     secrets.extend(all_secrets(code, Some(&env)));
     secrets
 }
@@ -125,14 +126,19 @@ pub fn agent_secrets<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Vec<Strin
                         || TOKEN_VARIABLES.contains(&variable.name)
                 }
             })
-            .filter_map(|(_, secret)| secret.cloned()),
+            .flat_map(|(_, secrets)| secrets.iter().cloned()),
     );
-    if step.agent != Agent::GeminiCli {
-        secrets.extend(
-            env.inherited_expression()
-                .and_then(|(text, _)| first_secret(text, None)),
-        );
+    if step.agent != Agent::GeminiCli
+        && let Some((text, _)) = env.inherited_expression()
+    {
+        secrets.extend(all_secrets(text, None));
     }
+    let credentials = credential_secrets(step, env);
+    secrets.retain(|secret| {
+        !credentials
+            .iter()
+            .any(|credential| credential.eq_ignore_ascii_case(secret))
+    });
     secrets
 }
 
@@ -141,18 +147,14 @@ fn resolved_secrets(env: NearestEnv<'_>, inherited: bool) -> SecretEnv<'_> {
         secrets: env
             .variables
             .iter()
-            .map(|variable| first_secret(&variable.value, None))
+            .map(|variable| all_secrets(&variable.value, None))
             .collect(),
         env,
         inherited,
     };
     let secrets = direct
         .variables()
-        .map(|(variable, secret)| {
-            secret
-                .cloned()
-                .or_else(|| first_secret(&variable.value, Some(&direct)))
-        })
+        .map(|(variable, _)| all_secrets(&variable.value, Some(&direct)))
         .collect();
     SecretEnv {
         env: direct.env,
@@ -165,16 +167,16 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
     let (setting, secret, route) = match step.agent {
         Agent::ClaudeCode => {
             let (key, value) = input(step, CLAUDE_TOKEN_INPUT)?;
-            let secret = first_secret(value, Some(env))?;
+            let secret = all_secrets(value, Some(env)).into_iter().next()?;
             (key.to_string(), secret, input_route(step, key))
         }
         Agent::ClaudeBase | Agent::ClaudeBaseBeta | Agent::Codex | Agent::GeminiCli => env
             .inherited_variables()
             .filter(|(variable, _)| TOKEN_VARIABLES.contains(&variable.name))
-            .find_map(|(variable, secret)| {
+            .find_map(|(variable, secrets)| {
                 Some((
                     format!("env {}", variable.name),
-                    secret?.clone(),
+                    secrets.first()?.clone(),
                     variable.route.clone(),
                 ))
             })?,
@@ -193,9 +195,15 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
         Agent::Codex => &CODEX_AGENT_INPUTS,
         Agent::GeminiCli => &GEMINI_AGENT_INPUTS,
     };
+    let credentials = credential_secrets(step, env);
+    let is_other = |secret: &String| {
+        !credentials
+            .iter()
+            .any(|credential| credential.eq_ignore_ascii_case(secret))
+    };
     let from_input = agent_inputs.iter().find_map(|name| {
         let (key, value) = input(step, name)?;
-        let secret = first_secret(value, Some(env))?;
+        let secret = all_secrets(value, Some(env)).into_iter().find(is_other)?;
         Some(SecretUse {
             setting: format!("{key} passes {secret} to the agent"),
             route: input_route(step, key),
@@ -208,8 +216,8 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
     let from_variable = || {
         env.inherited_variables()
             .filter(|(variable, _)| reaches_agent(step.agent, variable.name, gemini_settings))
-            .find_map(|(variable, secret)| {
-                let secret = secret?.clone();
+            .find_map(|(variable, secrets)| {
+                let secret = secrets.iter().find(|secret| is_other(secret))?.clone();
                 Some(SecretUse {
                     setting: format!("env {} passes {secret} to the agent", variable.name),
                     route: variable.route.clone(),
@@ -221,7 +229,7 @@ pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<Sec
             return None;
         }
         let (text, route) = env.inherited_expression()?;
-        let secret = first_secret(text, None)?;
+        let secret = all_secrets(text, None).into_iter().find(is_other)?;
         Some(SecretUse {
             setting: format!("env passes {secret} to the agent"),
             route: route.clone(),
@@ -236,10 +244,7 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
     }
     match agent {
         Agent::ClaudeCode | Agent::ClaudeBase | Agent::ClaudeBaseBeta => {
-            !CLAUDE_CREDENTIAL_VARIABLES.contains(&name)
-                && !CLAUDE_CREDENTIAL_PREFIXES
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
+            !is_claude_credential(name)
         }
         Agent::Codex => !CODEX_CREDENTIAL_VARIABLES.contains(&name),
         Agent::GeminiCli => {
@@ -249,49 +254,86 @@ fn reaches_agent(agent: Agent, name: &str, gemini_settings: &str) -> bool {
     }
 }
 
-fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
-    expression_spans(text)
-        .into_iter()
-        .filter_map(|span| secret_in(&parse_expression(&text[span])?, env))
+fn credential_secrets(step: &AgentStep, env: &SecretEnv) -> Vec<String> {
+    let (credential_inputs, is_credential_variable): (&[&str], fn(&str) -> bool) = match step.agent
+    {
+        Agent::ClaudeCode => (&CLAUDE_CREDENTIAL_INPUTS, is_claude_credential),
+        Agent::ClaudeBase | Agent::ClaudeBaseBeta => (&CLAUDE_CREDENTIAL_INPUTS, |name| {
+            is_claude_credential(name) && !CLAUDE_CREDENTIAL_INPUT_VARIABLES.contains(&name)
+        }),
+        Agent::GeminiCli => (&GEMINI_CREDENTIAL_INPUTS, |_| false),
+        Agent::Codex => return Vec::new(),
+    };
+    let from_inputs = credential_inputs
+        .iter()
+        .filter_map(|name| input(step, name))
+        .flat_map(|(_, value)| all_secrets(value, Some(env)));
+    let from_variables = env
+        .inherited_variables()
+        .filter(|(variable, _)| is_credential_variable(variable.name))
+        .flat_map(|(_, secrets)| secrets.iter().cloned());
+    from_inputs
+        .chain(from_variables)
+        .filter(|secret| secret != EVERY_SECRET)
         .collect()
 }
 
-fn first_secret(text: &str, env: Option<&SecretEnv>) -> Option<String> {
+fn is_claude_credential(name: &str) -> bool {
+    CLAUDE_CREDENTIAL_VARIABLES.contains(&name)
+        || CLAUDE_CREDENTIAL_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+fn all_secrets(text: &str, env: Option<&SecretEnv>) -> Vec<String> {
     expression_spans(text)
         .into_iter()
-        .find_map(|span| secret_in(&parse_expression(&text[span])?, env))
+        .filter_map(|span| parse_expression(&text[span]))
+        .flat_map(|expression| {
+            flowing_contexts(&expression)
+                .into_iter()
+                .flat_map(|context| secrets_of(context, env))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
-fn secret_in(expression: &SpannedExpr, env: Option<&SecretEnv>) -> Option<String> {
-    flowing_contexts(expression)
-        .into_iter()
-        .find_map(|context| secret_of(context, env))
-}
-
-fn secret_of(context: &Context, env: Option<&SecretEnv>) -> Option<String> {
+fn secrets_of(context: &Context, env: Option<&SecretEnv>) -> Vec<String> {
     let Some(Expr::Identifier(head)) = context.parts.first().map(|part| &part.inner) else {
-        return None;
+        return Vec::new();
     };
     let whole = context.parts.len() == 1 || matches!(context.parts[1].inner, Expr::Star);
     if head.as_str().eq_ignore_ascii_case(SECRETS_CONTEXT) {
         if whole {
-            return Some(EVERY_SECRET.to_string());
+            return vec![EVERY_SECRET.to_string()];
         }
-        let name = context.single_tail()?;
-        return (!name.eq_ignore_ascii_case(SHORT_LIVED_SECRET))
-            .then(|| format!("{SECRETS_CONTEXT}.{name}"));
+        return context
+            .single_tail()
+            .filter(|name| !name.eq_ignore_ascii_case(SHORT_LIVED_SECRET))
+            .map(|name| format!("{SECRETS_CONTEXT}.{name}"))
+            .into_iter()
+            .collect();
     }
     if head.as_str().eq_ignore_ascii_case(ENV_CONTEXT) {
-        let mut variables = env?.variables();
+        let Some(env) = env else {
+            return Vec::new();
+        };
         if whole {
-            return variables.find_map(|(_, secret)| secret.cloned());
+            return env
+                .variables()
+                .flat_map(|(_, secrets)| secrets.iter().cloned())
+                .collect();
         }
-        let name = context.single_tail()?;
-        return variables
+        let Some(name) = context.single_tail() else {
+            return Vec::new();
+        };
+        return env
+            .variables()
             .find(|(variable, _)| variable.name.eq_ignore_ascii_case(name))
-            .and_then(|(_, secret)| secret.cloned());
+            .map(|(_, secrets)| secrets.to_vec())
+            .unwrap_or_default();
     }
-    None
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -501,6 +543,141 @@ mod tests {
         assert_eq!(
             found(other_secret, &referenced),
             Some("3: env SENTRY_TOKEN passes secrets.SENTRY_TOKEN to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn the_agents_own_credential_in_another_input_or_env_is_not_another_secret() {
+        let gemini = workflow(
+            "env:\n  IMAGE_KEY: ${{ secrets.gemini_api_key }}\n",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          settings: |-
+            {\"mcpServers\": {\"image\": {\"env\": {\"GEMINI_API_KEY\": \"${{ secrets.GEMINI_API_KEY }}\", \"KEY\": \"$IMAGE_KEY\"}}}}
+",
+        );
+        assert_eq!(found(other_secret, &gemini), None);
+        let claude = workflow(
+            "env:\n  KEY: ${{ secrets.ANTHROPIC }}\n  SENTRY: ${{ secrets.SENTRY }}\n",
+            "anthropics/claude-code-action@v1",
+            "        with:
+          anthropic_api_key: ${{ secrets.FALLBACK || env.KEY }}
+          prompt: ${{ secrets.FALLBACK || secrets.SENTRY }}
+",
+        );
+        assert_eq!(
+            found(other_secret, &claude),
+            Some("12: prompt passes secrets.SENTRY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn another_secret_next_to_the_credential_in_an_env_variable_or_the_whole_env_counts() {
+        let variable = workflow(
+            "env:\n  KEY: ${{ secrets.GEMINI_API_KEY || secrets.SENTRY }}\n",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          settings: '{\"mcpServers\": {\"s\": {\"env\": {\"KEY\": \"$KEY\"}}}}'
+",
+        );
+        assert_eq!(
+            found(other_secret, &variable),
+            Some("3: env KEY passes secrets.SENTRY to the agent".to_string())
+        );
+        let whole = workflow(
+            "env:\n  A: ${{ secrets.GEMINI_API_KEY }}\n  B: ${{ secrets.SENTRY }}\n",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          settings: '{\"mcpServers\": {\"s\": {\"env\": ${{ toJSON(env) }}}}}'
+",
+        );
+        assert_eq!(
+            found(other_secret, &whole),
+            Some("12: settings passes secrets.SENTRY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn another_secret_behind_the_credential_in_a_referenced_env_variable_counts() {
+        let source = workflow(
+            "env:\n  KEY: ${{ secrets.GEMINI_API_KEY || secrets.SENTRY }}\n",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: ${{ env.KEY }}
+",
+        );
+        assert_eq!(
+            found(other_secret, &source),
+            Some("11: prompt passes secrets.SENTRY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn gemini_credentials_come_only_from_its_inputs_because_the_action_overrides_the_env() {
+        let source = workflow(
+            "env:\n  GEMINI_API_KEY: ${{ secrets.PROD_KEY }}\n",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          settings: '{\"mcpServers\": {\"s\": {\"env\": {\"K\": \"${{ secrets.PROD_KEY }}\"}}}}'
+",
+        );
+        assert_eq!(
+            found(other_secret, &source),
+            Some("10: settings passes secrets.PROD_KEY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn a_credential_given_through_its_env_name_is_the_agents_own() {
+        let settings = "        with:
+          settings: '{\"env\": {\"KEY\": \"${{ secrets.CLAUDE_KEY }}\"}}'
+";
+        let env = "env:\n  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_KEY }}\n";
+        let action = workflow(env, "anthropics/claude-code-action@v1", settings);
+        assert_eq!(found(other_secret, &action), None);
+        let base = workflow(
+            env,
+            "anthropics/claude-code-action/base-action@v1",
+            settings,
+        );
+        assert_eq!(
+            found(other_secret, &base),
+            Some("10: settings passes secrets.CLAUDE_KEY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_sees_its_api_key_only_when_it_is_written_outside_the_credential_input() {
+        let source = workflow(
+            "env:\n  MY_KEY: ${{ secrets.OPENAI_API_KEY }}\n",
+            "openai/codex-action@v1",
+            "        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+",
+        );
+        assert_eq!(
+            found(other_secret, &source),
+            Some("3: env MY_KEY passes secrets.OPENAI_API_KEY to the agent".to_string())
+        );
+    }
+
+    #[test]
+    fn a_secret_only_named_like_a_credential_still_counts_outside_the_credential_input() {
+        let source = workflow(
+            "",
+            "google-github-actions/run-gemini-cli@v0",
+            "        with:
+          gemini_api_key: ${{ secrets.AGENT_KEY }}
+          settings: '{\"mcpServers\": {\"image\": {\"env\": {\"GEMINI_API_KEY\": \"${{ secrets.GEMINI_API_KEY }}\"}}}}'
+",
+        );
+        assert_eq!(
+            found(other_secret, &source),
+            Some("9: settings passes secrets.GEMINI_API_KEY to the agent".to_string())
         );
     }
 
