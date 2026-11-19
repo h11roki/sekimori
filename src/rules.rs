@@ -1005,6 +1005,58 @@ jobs:
     }
 
     #[test]
+    fn every_secret_of_an_expression_counts_for_the_agent_and_for_later_code() {
+        let held = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets.A || secrets.B }}
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+        env:
+          TOKEN: ${{ secrets.B }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let rules: Vec<_> = assess(&held, &Upstreams::default())[0]
+            .hits
+            .iter()
+            .map(|hit| hit.rule)
+            .collect();
+        assert_eq!(rules, [Rule::OtherSecrets]);
+        let later = Workflow::parse(
+            Path::new("test.yml"),
+            "on: issue_comment
+permissions:
+  contents: read
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+      - run: npm test
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.DEPLOY_KEY }}
+"
+            .to_string(),
+        )
+        .unwrap();
+        let rules: Vec<_> = assess(&later, &Upstreams::default())[0]
+            .hits
+            .iter()
+            .map(|hit| hit.rule)
+            .collect();
+        assert_eq!(rules, [Rule::AgentCodeWithSecrets]);
+    }
+
+    #[test]
     fn a_secret_that_already_reaches_the_agent_is_not_reported_again_for_later_code() {
         let workflow = Workflow::parse(
             Path::new("test.yml"),
