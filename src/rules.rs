@@ -83,7 +83,7 @@ impl Rule {
                 "The agent may run any shell command or tool: an unscoped Bash allow rule, a bypassed permission prompt, a sandbox with full access, or Gemini CLI without a tools.core allow-list under --yolo. This includes a command that fetches and runs any package or script (npx, uvx, uv run, npm exec, go run), git with any arguments, a prefix rule for a tool that runs commands through an option (find -exec, rg --pre, sed's e command, git grep -O), and a build or test command that runs the repository's own code (npm test, make, cargo, ./gradlew, pytest, python with arguments, ./script.sh) when the agent can also edit files. Fills the allowed-tools axis."
             }
             Rule::LongLivedToken => {
-                "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. Fills the permissions/secrets axis."
+                "The GitHub token handed to the agent comes from a stored secret, such as a personal access token, instead of GITHUB_TOKEN or a short-lived app token. This includes a stored token or SSH key that an earlier actions/checkout in the job leaves for git without persist-credentials: false; claude-code-action removes the token of a checkout into the workspace root, so for it only a checkout into another path and an SSH key count. Fills the permissions/secrets axis."
             }
             Rule::PrHeadCheckout => {
                 "A step before the agent checks out the pull request head into the workspace on a privileged event, and the agent then loads that head's settings, hooks or MCP servers. Fills the allowed-tools axis."
@@ -287,7 +287,10 @@ fn assess_step<'w>(
     let env = secret_env(workflow, &step);
     let mut secret_reasons = Vec::new();
     for (rule, found) in [
-        (Rule::LongLivedToken, long_lived_token(&step, &env)),
+        (
+            Rule::LongLivedToken,
+            long_lived_token(workflow, &step, &env),
+        ),
         (Rule::OtherSecrets, other_secret(&step, &env)),
     ] {
         if let Some(SecretUse { setting, route }) = found {
