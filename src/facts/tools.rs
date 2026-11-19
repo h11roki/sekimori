@@ -29,7 +29,7 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
 const GEMINI_FILE_EDIT_TOOLS: [[&str; 2]; 2] =
     [["write_file", "WriteFileTool"], ["replace", "EditTool"]];
-const INTERPRETERS: [&str; 24] = [
+const INTERPRETERS: [&str; 27] = [
     "bash",
     "sh",
     "zsh",
@@ -51,27 +51,29 @@ const INTERPRETERS: [&str; 24] = [
     "php",
     "lua",
     "awk",
+    "gawk",
+    "mawk",
+    "nawk",
     "osascript",
     "eval",
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
-const OPTION_EXEC_COMMANDS: [&str; 15] = [
+const OPTION_EXEC_COMMANDS: [&str; 17] = [
     "find", "gfind", "fd", "fdfind", "rg", "sed", "gsed", "tar", "gtar", "bsdtar", "sort", "gsort",
-    "split", "gsplit", "rsync",
+    "split", "gsplit", "rsync", "zip", "ssh",
 ];
-const OPTION_EXEC_SUBCOMMANDS: [(&str, &[&str]); 1] = [(
-    "git",
-    &[
-        "grep",
-        "fetch",
-        "pull",
-        "clone",
-        "ls-remote",
-        "push",
-        "difftool",
-    ],
-)];
+const GIT: &str = "git";
+const GIT_OPTION_EXEC_SUBCOMMANDS: [&str; 8] = [
+    "grep",
+    "fetch",
+    "pull",
+    "clone",
+    "ls-remote",
+    "push",
+    "difftool",
+    "archive",
+];
 const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
@@ -126,8 +128,8 @@ const PROJECT_CODE_TOOLS: [&str; 32] = [
     "rspec",
 ];
 const RELATIVE_PATH_PREFIXES: [&str; 2] = ["./", "../"];
-const FILE_WRITERS: [&str; 11] = [
-    "tee", "cp", "mv", "install", "rsync", "patch", "dd", "truncate", "sed", "curl", "wget",
+const FILE_WRITERS: [&str; 9] = [
+    "tee", "cp", "mv", "install", "patch", "dd", "truncate", "curl", "wget",
 ];
 const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
     (
@@ -137,10 +139,8 @@ const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
             &["am"],
             &["checkout"],
             &["switch"],
-            &["pull"],
             &["merge"],
             &["cherry-pick"],
-            &["clone"],
             &["reset"],
             &["restore"],
             &["stash"],
@@ -558,11 +558,7 @@ fn command_reach(prefix: &str) -> Reach {
         return Reach::AnyCommand;
     }
     let name = command_name(program);
-    let arguments: Vec<&str> = rest
-        .iter()
-        .copied()
-        .filter(|word| !word.starts_with('-'))
-        .collect();
+    let arguments = command_words(rest.iter().copied());
     let runs_anything = |arguments: &[&str]| match arguments {
         [] => true,
         [only] => INTERPRETERS.contains(&command_name(only)),
@@ -570,22 +566,10 @@ fn command_reach(prefix: &str) -> Reach {
     };
     let takes_any_code = WRAPPERS.contains(&name)
         || OPTION_EXEC_COMMANDS.contains(&name)
-        || OPTION_EXEC_SUBCOMMANDS
-            .iter()
-            .find(|(tool, _)| *tool == name)
-            .is_some_and(|(_, subcommands)| {
-                let mut words = rest.iter();
-                let subcommand = loop {
-                    match words.next() {
-                        Some(word) if OPTION_VALUE_FLAGS.contains(word) => {
-                            words.next();
-                        }
-                        Some(word) if word.starts_with('-') => {}
-                        other => break other,
-                    }
-                };
-                subcommand.is_some_and(|subcommand| subcommands.contains(subcommand))
-            })
+        || (name == GIT
+            && arguments
+                .first()
+                .is_some_and(|subcommand| GIT_OPTION_EXEC_SUBCOMMANDS.contains(subcommand)))
         || (INTERPRETERS.contains(&name) && arguments.is_empty())
         || (PACKAGE_RUNNERS.contains(&name) && runs_anything(&arguments))
         || RUN_SUBCOMMANDS
@@ -604,6 +588,18 @@ fn command_reach(prefix: &str) -> Reach {
     }
 }
 
+fn command_words<'a>(mut words: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut found = Vec::new();
+    while let Some(word) = words.next() {
+        if OPTION_VALUE_FLAGS.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            found.push(word);
+        }
+    }
+    found
+}
+
 fn writes_files(prefix: &str) -> bool {
     let mut words = prefix
         .split_whitespace()
@@ -618,14 +614,7 @@ fn writes_files(prefix: &str) -> bool {
     else {
         return FILE_WRITERS.contains(&name);
     };
-    let mut subcommands = Vec::new();
-    while let Some(word) = words.next() {
-        if OPTION_VALUE_FLAGS.contains(&word) {
-            words.next();
-        } else if !word.starts_with('-') {
-            subcommands.push(word);
-        }
-    }
+    let subcommands = command_words(words);
     writers
         .iter()
         .any(|writer| writer.starts_with(&subcommands) || subcommands.starts_with(writer))
@@ -1108,6 +1097,9 @@ jobs:
             "Bash(git -C repo grep:*)",
             "Bash(git fetch:*)",
             "Bash(rsync:*)",
+            "Bash(git -C repo:*)",
+            "Bash(git archive:*)",
+            "Bash(gawk:*)",
             "Bash(find * -print)",
         ] {
             assert_eq!(
@@ -1129,6 +1121,21 @@ jobs:
             gemini("        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(find)\", \"read_file\"]}}'\n")
                 .as_deref(),
             Some("8: settings allows `run_shell_command(find)` in tools.core")
+        );
+    }
+
+    #[test]
+    fn a_deny_with_a_wildcard_in_the_middle_does_not_deny_the_whole_command() {
+        assert_eq!(
+            claude("        with:\n          claude_args: --allowedTools \"Bash(find:*)\" --disallowedTools \"Bash(find * -exec*)\"\n")
+                .as_deref(),
+            Some("8: claude_args allows `Bash(find:*)` through --allowedTools")
+        );
+        assert_eq!(
+            claude(
+                "        with:\n          claude_args: --allowedTools \"Bash(find:*)\" --disallowedTools \"Bash(find:*)\"\n"
+            ),
+            None
         );
     }
 

@@ -81,7 +81,7 @@
 | [0040](0040-codex-credentials-in-hand.md) | Codex の env は全てエージェントの手にあるとして後のステップの指摘から除き、資格情報の名前は Bedrock の鍵に絞る | 承認(`unprivileged-user` の扱いは 0042 で足した) |
 | [0041](0041-build-tool-commands.md) | ビルドとテストのコマンドは、書き換えと組むと広い道具として数え、パッケージを取って動かすコマンドは単独で数える | 承認(シェルのコマンドでの書き換えは 0043 で足した) |
 | [0042](0042-codex-separate-user.md) | `safety-strategy: unprivileged-user` の Codex には、ステップの env が届かないとみなす | 承認 |
-| [0043](0043-shell-file-writers.md) | ファイルを書き換えるシェルのコマンドを許すことも、書き換えとして数える | 承認 |
+| [0043](0043-shell-file-writers.md) | ファイルを書き換えるシェルのコマンドを許すことも、書き換えとして数える | 承認(`sed`、`rsync`、`git pull`、`git clone` は 0050 で広い道具にし、書き換えの一覧から外した) |
 | [0044](0044-auto-mode.md) | claude-code-action の auto モードは、それだけでは広い道具として数えない | 承認 |
 | [0045](0045-crates-io-trusted-publishing.md) | crates.io には、リリースのワークフローから Trusted Publishing で出す | 承認 |
 | [0046](0046-action-test-annotations.md) | Action を試すジョブの後に、そのジョブの注釈を API で読み、SARIF と突き合わせる | 承認 |
