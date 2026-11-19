@@ -4,7 +4,7 @@ use github_actions_models::common::{BasePermission, Permission, Permissions};
 use github_actions_models::workflow::job::NormalJob;
 use yamlpath::Route;
 
-use crate::agent::{AgentStep, agent_steps};
+use crate::agent::{AgentStep, USES_KEY, agent_steps};
 use crate::facts::{
     AgentCode, BroadTool, ExternalEvent, HeadCheckout, OpenTrigger, OutputInjection, SecretUse,
     UpstreamOrigin, Upstreams, agent_code_with_secrets, agent_secrets, broad_tool,
@@ -20,7 +20,6 @@ const WARNING_TOTAL: u8 = 2;
 const DIRECTIVE_PREFIX: &str = "sekimori:";
 const IGNORE_DIRECTIVE: &str = "sekimori: ignore";
 const IGNORE_WORD: &str = "ignore";
-const USES_KEY: &str = "uses";
 pub const HALVES_PER_POINT: u8 = 2;
 const ERROR_HALVES: u8 = MAX_TOTAL * HALVES_PER_POINT;
 const WARNING_HALVES: u8 = WARNING_TOTAL * HALVES_PER_POINT;

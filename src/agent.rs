@@ -14,6 +14,8 @@ pub enum Agent {
     GeminiCli,
 }
 
+pub(crate) const USES_KEY: &str = "uses";
+
 const AGENT_ACTIONS: [(&str, &str, Agent); 5] = [
     ("anthropics/claude-code-action", "", Agent::ClaudeCode),
     (
@@ -60,6 +62,7 @@ pub struct AgentStep<'w> {
     pub index: usize,
     pub step: &'w UsesStep,
     pub route: Route<'w>,
+    pub major_version: Option<u64>,
 }
 
 pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
@@ -79,12 +82,38 @@ pub fn agent_steps(workflow: &Workflow) -> Vec<AgentStep<'_>> {
                     job,
                     index,
                     step,
+                    major_version: major_version(workflow, &step.uses, &route),
                     route,
                 });
             }
         }
     }
     found
+}
+
+fn major_version(workflow: &Workflow, uses: &Uses, route: &Route) -> Option<u64> {
+    let Uses::Repository(repository) = uses else {
+        return None;
+    };
+    version_number(repository.git_ref()).or_else(|| {
+        workflow
+            .comments(&route.with_key(USES_KEY))
+            .into_iter()
+            .flat_map(|comment| comment.split('#'))
+            .find_map(|part| version_number(part.trim()))
+    })
+}
+
+fn version_number(text: &str) -> Option<u64> {
+    let digits = text.strip_prefix('v')?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    let rest = &digits[end..];
+    if end == 0 || !(rest.is_empty() || rest.starts_with('.') || rest.starts_with(' ')) {
+        return None;
+    }
+    digits[..end].parse().ok()
 }
 
 pub(crate) enum JobStep<'w> {
