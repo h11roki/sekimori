@@ -3,7 +3,7 @@ use serde_json::Value;
 use yamlpath::Route;
 
 use super::{
-    Input, SETTINGS_INPUT, before_comment, enabled, input, input_route, is_assignment, lookup,
+    Input, SETTINGS_INPUT, before_comment, flag_in, input, input_route, is_assignment, lookup,
     program_name,
 };
 use crate::agent::{Agent, AgentStep};
@@ -696,7 +696,7 @@ fn claude_code_edits_by_default(step: &AgentStep, permissions: &ClaudePermission
     }
     let agent_mode = input(step, CLAUDE_PROMPT_INPUT)
         .is_some_and(|(_, value)| !value.trim().is_empty())
-        && !enabled(step, CLAUDE_TRACK_PROGRESS_INPUT);
+        && flag_in(&step.step.with, CLAUDE_TRACK_PROGRESS_INPUT) != Some(true);
     !agent_mode
         || permissions.settings_mode.is_none()
             && !CLAUDE_NO_AUTO_MODE_INPUTS

@@ -89,10 +89,6 @@ fn lookup_in<'w>(with: &'w LoE<Env>, name: &str) -> Input<'w> {
     }
 }
 
-fn enabled(step: &AgentStep, name: &str) -> bool {
-    flag_in(&step.step.with, name) == Some(true)
-}
-
 fn flag_in(with: &LoE<Env>, name: &str) -> Option<bool> {
     let LoE::Literal(with) = with else {
         return None;
@@ -102,11 +98,9 @@ fn flag_in(with: &LoE<Env>, name: &str) -> Option<bool> {
         .find(|(key, _)| key.eq_ignore_ascii_case(name))?;
     match value {
         EnvValue::Boolean(flag) => Some(*flag),
-        EnvValue::String(text) => match text.trim() {
-            "true" => Some(true),
-            "false" => Some(false),
-            _ => None,
-        },
+        EnvValue::String(text) if text.trim().eq_ignore_ascii_case("true") => Some(true),
+        EnvValue::String(text) if text.trim().eq_ignore_ascii_case("false") => Some(false),
+        EnvValue::String(_) => None,
         EnvValue::Number(_) => None,
     }
 }

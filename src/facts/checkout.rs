@@ -223,7 +223,7 @@ fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
     }
 }
 
-fn is_workspace_root(path: &str) -> bool {
+pub(super) fn is_workspace_root(path: &str) -> bool {
     normalized(path)
         .replace(WORKSPACE_EXPRESSION, ".")
         .split('/')
