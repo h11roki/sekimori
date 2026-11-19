@@ -56,7 +56,11 @@ const INTERPRETERS: [&str; 24] = [
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
-const OPTION_EXEC_COMMANDS: [&str; 5] = ["find", "fd", "rg", "sed", "tar"];
+const OPTION_EXEC_COMMANDS: [&str; 14] = [
+    "find", "gfind", "fd", "fdfind", "rg", "sed", "gsed", "tar", "gtar", "bsdtar", "sort", "gsort",
+    "split", "gsplit",
+];
+const OPTION_EXEC_SUBCOMMANDS: [(&str, &str); 1] = [("git", "grep")];
 const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
@@ -400,8 +404,8 @@ impl<'w> ClaudePermissions<'w> {
             return;
         };
         let prefix = pattern
-            .strip_suffix('*')
-            .map(|prefix| prefix.trim_end_matches([':', ' ']));
+            .split_once('*')
+            .map(|(prefix, _)| prefix.trim_end_matches([':', ' ']));
         if prefix.is_some_and(writes_files) {
             self.file_writers.push(tool.to_string());
         }
@@ -555,6 +559,9 @@ fn command_reach(prefix: &str) -> Reach {
     };
     let takes_any_code = WRAPPERS.contains(&name)
         || OPTION_EXEC_COMMANDS.contains(&name)
+        || OPTION_EXEC_SUBCOMMANDS
+            .iter()
+            .any(|(tool, subcommand)| *tool == name && arguments.first() == Some(subcommand))
         || (INTERPRETERS.contains(&name) && arguments.is_empty())
         || (PACKAGE_RUNNERS.contains(&name) && runs_anything(&arguments))
         || RUN_SUBCOMMANDS
@@ -1070,6 +1077,11 @@ jobs:
             "Bash(rg:*)",
             "Bash(sed -n:*)",
             "Bash(tar xzf:*)",
+            "Bash(fdfind:*)",
+            "Bash(gsed -n:*)",
+            "Bash(sort:*)",
+            "Bash(git grep:*)",
+            "Bash(find * -print)",
         ] {
             assert_eq!(
                 claude(&format!(
@@ -1081,14 +1093,15 @@ jobs:
             );
         }
         assert_eq!(
-            base(
-                "        with:\n          claude_args: --allowedTools \"Bash(find . -name '*.rs')\"\n"
+            claude(
+                "        with:\n          claude_args: --allowedTools \"Bash(find . -name src)\"\n"
             ),
             None
         );
-        assert!(
+        assert_eq!(
             gemini("        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(find)\", \"read_file\"]}}'\n")
-                .is_some()
+                .as_deref(),
+            Some("8: settings allows `run_shell_command(find)` in tools.core")
         );
     }
 
