@@ -21,12 +21,12 @@
 
 高橋さんが判断を任せ(2026-11-19 に「改善すすめて」)、Claude が 1 を選んだ。
 
-- `actions/checkout` の `token` か `ssh-key` の値に流れ込む `secrets.*` を、ADR 0015 と同じ読み方で探す。`${{ env.NAME }}` で `env` の秘密情報を参照するものも数える。`secrets.GITHUB_TOKEN` と、`steps.*.outputs.*` の App のトークンは数えない
+- `actions/checkout` の `token` か `ssh-key` の値に流れ込む `secrets.*` を、ADR 0015 と同じ読み方で探す。`${{ env.NAME }}` で `env` の秘密情報を参照するものも、checkout のステップ自身から見える `env`(ステップ、ジョブ、ワークフローの順)で読む。`secrets.GITHUB_TOKEN` と、`steps.*.outputs.*` の App のトークンは数えない
 - 残すかどうかは checkout と同じく決める。`persist-credentials` が無いか、大文字と小文字を区別せずに `true` のとき残す(checkout の `src/input-helper.ts` は `toUpperCase() === 'TRUE'` で読む)。`'FALSE'` や空の文字列は残さない。式で決まるときは残すとみなす
-- 同じ場所(`path:` が同じ)に後の checkout があれば、前の checkout が残したものは置き換わったとみなす(checkout は認証を設定する前に前の認証を消す)
+- 同じ場所(`path:` が同じ)に後の checkout があれば、前の checkout が残したものは置き換わったとみなす(checkout は認証を設定する前に前の認証を消す)。`path:` は `./`、末尾の `/`、`${{ github.workspace }}` をそろえて比べ、数や真偽値で読めない `path:` は作業場所の直下ではないとみなす(pr-head-checkout と同じ関数で読む)
 - claude-code-action では、作業場所の直下に取り出した checkout の `token` は数えない。action が起動の前に消すため。`path:` で別の場所に取り出したものと `ssh-key` は数える
 - `path:` で別の場所に取り出しても、エージェントは作業場所の下を読めるので数える
-- 理由には、checkout のステップが残したことと秘密情報の名前を書き、指摘は checkout の `with` の鍵を指す。`ssh-key` は「保存済みの SSH の鍵」と書く
+- 理由には、checkout のステップが残したことと秘密情報の名前を書き、指摘は checkout の `with` の鍵を指す。`ssh-key` は「保存済みの SSH の鍵」と書く。鍵そのものは `$RUNNER_TEMP` のファイルに書かれ、git の設定にはそのパスを使う `core.sshCommand` が入るので、「git のために残す」と書く
 - エージェントの入力か `env` に GitHub のトークンを渡していれば、これまでどおりそちらを先に書く
 - codex-action を `safety-strategy: unprivileged-user` で別のユーザーとして動かすときも数える。actions/checkout(`src/git-auth-helper.ts`、2026-11-19 の main)は、`$RUNNER_TEMP` の資格情報のファイルをモードを指定せずに書くので、既定の umask では別のユーザーからも読める。`0600` で書くのは SSH の鍵のファイルだけで、`ssh-key` も git の設定からは鍵のパスが分かる
 

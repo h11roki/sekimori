@@ -2,11 +2,11 @@ use github_actions_expressions::Expr;
 use github_actions_expressions::context::Context;
 use yamlpath::{Component, Route};
 
-use super::checkout::{CHECKOUT_ACTION, is_workspace_root};
+use super::checkout::{CHECKOUT_ACTION, checkout_place};
 use super::{
     ENV_CONTEXT, EXPRESSION_START, EnvVariable, Input, NearestEnv, SETTINGS_INPUT, agent_env,
     expression_spans, flag_in, flowing_contexts, input, input_route, lookup, lookup_in,
-    parse_expression, references_variable,
+    nearest_env, parse_expression, references_variable,
 };
 use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
@@ -48,7 +48,6 @@ const GEMINI_CREDENTIAL_INPUTS: [&str; 2] = ["gemini_api_key", "google_api_key"]
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 const CHECKOUT_TOKEN_INPUT: &str = "token";
 const CHECKOUT_CREDENTIAL_INPUTS: [&str; 2] = [CHECKOUT_TOKEN_INPUT, "ssh-key"];
-const CHECKOUT_PATH_INPUT: &str = "path";
 const STORED_SSH_KEY: &str = "a stored SSH key";
 const PERSIST_CREDENTIALS_INPUT: &str = "persist-credentials";
 
@@ -170,7 +169,11 @@ fn resolved_secrets(env: NearestEnv<'_>, inherited: bool) -> SecretEnv<'_> {
     }
 }
 
-pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<SecretUse<'w>> {
+pub fn long_lived_token<'w>(
+    workflow: &'w Workflow,
+    step: &AgentStep<'w>,
+    env: &SecretEnv<'w>,
+) -> Option<SecretUse<'w>> {
     let handed = match step.agent {
         Agent::ClaudeCode => input(step, CLAUDE_TOKEN_INPUT).and_then(|(key, value)| {
             let secret = all_secrets(value, Some(env)).into_iter().next()?;
@@ -193,14 +196,14 @@ pub fn long_lived_token<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option
                 })
             }),
     };
-    handed.or_else(|| persisted_checkout_credential(step, env))
+    handed.or_else(|| persisted_checkout_credential(workflow, step))
 }
 
 fn persisted_checkout_credential<'w>(
+    workflow: &'w Workflow,
     step: &AgentStep<'w>,
-    env: &SecretEnv<'w>,
 ) -> Option<SecretUse<'w>> {
-    let mut kept: Vec<(Option<&str>, Option<SecretUse<'w>>)> = Vec::new();
+    let mut kept: Vec<(Option<String>, Option<SecretUse<'w>>)> = Vec::new();
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
             break;
@@ -211,10 +214,7 @@ fn persisted_checkout_credential<'w>(
         if !is_root_action(&checkout.uses, CHECKOUT_ACTION) {
             continue;
         }
-        let place = match lookup_in(&checkout.with, CHECKOUT_PATH_INPUT) {
-            Input::Text { value, .. } if !is_workspace_root(value) => Some(value),
-            Input::Missing | Input::Text { .. } | Input::Unreadable => None,
-        };
+        let place = checkout_place(checkout);
         let persisted = match lookup_in(&checkout.with, PERSIST_CREDENTIALS_INPUT) {
             Input::Missing => true,
             Input::Text { value, .. } => {
@@ -222,36 +222,44 @@ fn persisted_checkout_credential<'w>(
             }
             Input::Unreadable => flag_in(&checkout.with, PERSIST_CREDENTIALS_INPUT) == Some(true),
         };
-        let removed_by_agent = |name: &str| {
-            step.agent == Agent::ClaudeCode && place.is_none() && name == CHECKOUT_TOKEN_INPUT
-        };
-        let credential = persisted
-            .then(|| {
-                CHECKOUT_CREDENTIAL_INPUTS
-                    .iter()
-                    .filter(|name| !removed_by_agent(name))
-                    .find_map(|name| {
-                        let Input::Text { key, value } = lookup_in(&checkout.with, name) else {
-                            return None;
-                        };
-                        let secret = all_secrets(value, Some(env))
-                            .into_iter()
-                            .find(|secret| secret != EVERY_SECRET)?;
-                        let kind = if *name == CHECKOUT_TOKEN_INPUT {
-                            LONG_LIVED
-                        } else {
-                            STORED_SSH_KEY
-                        };
-                        Some(SecretUse {
-                            setting: format!(
-                                "{} keeps {key} {secret} in the git config, {kind}",
-                                checkout.uses.raw()
-                            ),
-                            route: route.with_keys([Component::from("with"), Component::from(key)]),
-                        })
-                    })
+        let checkout_env = resolved_secrets(
+            nearest_env(
+                workflow,
+                step.job_id,
+                step.job,
+                &checkout.shared.env,
+                &route,
+            ),
+            true,
+        );
+        let credential = CHECKOUT_CREDENTIAL_INPUTS
+            .iter()
+            .filter(|name| {
+                persisted
+                    && !(step.agent == Agent::ClaudeCode
+                        && place.is_none()
+                        && **name == CHECKOUT_TOKEN_INPUT)
             })
-            .flatten();
+            .find_map(|name| {
+                let Input::Text { key, value } = lookup_in(&checkout.with, name) else {
+                    return None;
+                };
+                let secret = all_secrets(value, Some(&checkout_env))
+                    .into_iter()
+                    .find(|secret| secret != EVERY_SECRET)?;
+                let kind = if *name == CHECKOUT_TOKEN_INPUT {
+                    LONG_LIVED
+                } else {
+                    STORED_SSH_KEY
+                };
+                Some(SecretUse {
+                    setting: format!(
+                        "{} leaves {key} {secret} for git in the workspace, {kind}",
+                        checkout.uses.raw()
+                    ),
+                    route: route.with_keys([Component::from("with"), Component::from(key)]),
+                })
+            });
         kept.retain(|(other, _)| *other != place);
         kept.push((place, credential));
     }
@@ -426,6 +434,16 @@ mod tests {
         })
     }
 
+    fn found_long_lived(source: &str) -> Option<String> {
+        let workflow = Workflow::parse(Path::new("test.yml"), source.to_string()).unwrap();
+        let steps = agent_steps(&workflow);
+        let env = secret_env(&workflow, &steps[0]);
+        long_lived_token(&workflow, &steps[0], &env).map(|found| {
+            let (line, _) = workflow.position(&found.route).unwrap();
+            format!("{line}: {}", found.setting)
+        })
+    }
+
     fn workflow(env: &str, uses: &str, step: &str) -> String {
         format!(
             "on: issues
@@ -457,8 +475,8 @@ jobs:
             |with: &str| format!("      - uses: actions/checkout@v6\n        with:\n{with}\n");
         let base = "anthropics/claude-code-action/base-action@v1";
         assert_eq!(
-            found(long_lived_token, &source(&checkout("          token: ${{ secrets.BOT_PAT }}"), base)),
-            Some("10: actions/checkout@v6 keeps token secrets.BOT_PAT in the git config, a stored token rather than GITHUB_TOKEN or an app token".to_string())
+            found_long_lived(&source(&checkout("          token: ${{ secrets.BOT_PAT }}"), base)),
+            Some("10: actions/checkout@v6 leaves token secrets.BOT_PAT for git in the workspace, a stored token rather than GITHUB_TOKEN or an app token".to_string())
         );
         for (with, agent) in [
             (
@@ -480,7 +498,7 @@ jobs:
             ),
         ] {
             assert!(
-                found(long_lived_token, &source(&checkout(with), agent)).is_some(),
+                found_long_lived(&source(&checkout(with), agent)).is_some(),
                 "{with} {agent}"
             );
         }
@@ -516,21 +534,40 @@ jobs:
             ),
         ] {
             assert_eq!(
-                found(long_lived_token, &source(&checkouts, agent)),
+                found_long_lived(&source(&checkouts, agent)),
                 None,
                 "{checkouts}"
             );
         }
         assert!(
-            found(
-                long_lived_token,
-                &source(
-                    &(checkout("          token: ${{ secrets.BOT_PAT }}\n          path: other")
-                        + &checkout("          fetch-depth: 0")),
-                    base
-                )
-            )
+            found_long_lived(&source(
+                &(checkout("          token: ${{ secrets.BOT_PAT }}\n          path: other")
+                    + &checkout("          fetch-depth: 0")),
+                base
+            ))
             .is_some()
+        );
+        let step_env = "on: issues
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        env:
+          PAT: ${{ secrets.STEP_PAT }}
+        with:
+          token: ${{ env.PAT }}
+          path: 2024
+      - uses: anthropics/claude-code-action@v1
+";
+        assert!(found_long_lived(step_env).is_some());
+        assert_eq!(
+            found_long_lived(&source(
+                &(checkout("          token: ${{ secrets.BOT_PAT }}\n          path: other")
+                    + &checkout("          path: ./other/\n          persist-credentials: false")),
+                base
+            )),
+            None
         );
         let after = "on: issues
 jobs:
@@ -542,7 +579,7 @@ jobs:
         with:
           token: ${{ secrets.BOT_PAT }}
 ";
-        assert_eq!(found(long_lived_token, after), None);
+        assert_eq!(found_long_lived(after), None);
     }
 
     #[test]
@@ -555,7 +592,7 @@ jobs:
 ",
         );
         assert_eq!(
-            found(long_lived_token, &source),
+            found_long_lived(&source),
             Some("8: github_token uses secrets.BOT_PAT, a stored token rather than GITHUB_TOKEN or an app token".to_string())
         );
     }
@@ -575,7 +612,7 @@ jobs:
                 "anthropics/claude-code-action@v1",
                 &format!("        with:\n          github_token: {value}\n"),
             );
-            assert_eq!(found(long_lived_token, &source), None, "{value}");
+            assert_eq!(found_long_lived(&source), None, "{value}");
         }
     }
 
@@ -587,7 +624,7 @@ jobs:
             "",
         );
         assert_eq!(
-            found(long_lived_token, &codex),
+            found_long_lived(&codex),
             Some("3: env GH_TOKEN uses secrets.ORG_PAT, a stored token rather than GITHUB_TOKEN or an app token".to_string())
         );
         let overridden = workflow(
@@ -595,7 +632,7 @@ jobs:
             "google-github-actions/run-gemini-cli@v0",
             "        env:\n          GITHUB_TOKEN: ${{ github.token }}\n",
         );
-        assert_eq!(found(long_lived_token, &overridden), None);
+        assert_eq!(found_long_lived(&overridden), None);
     }
 
     #[test]
@@ -605,7 +642,7 @@ jobs:
             "anthropics/claude-code-action@v1",
             "        env:\n          GH_TOKEN: ${{ secrets.ORG_PAT }}\n",
         );
-        assert_eq!(found(long_lived_token, &source), None);
+        assert_eq!(found_long_lived(&source), None);
         assert_eq!(found(other_secret, &source), None);
     }
 
@@ -638,21 +675,18 @@ jobs:
             found(other_secret, &separate),
             Some("11: prompt passes secrets.PROMPT to the agent".to_string())
         );
-        assert_eq!(found(long_lived_token, &separate), None);
+        assert_eq!(found_long_lived(&separate), None);
         let workflow = Workflow::parse(Path::new("test.yml"), separate).unwrap();
         let steps = agent_steps(&workflow);
         assert_eq!(
             agent_secrets(&steps[0], &secret_env(&workflow, &steps[0])),
             ["secrets.PROMPT"]
         );
-        assert!(found(long_lived_token, &source("")).is_some());
+        assert!(found_long_lived(&source("")).is_some());
         assert!(
-            found(
-                long_lived_token,
-                &source(
-                    "          safety-strategy: unprivileged-user\n          codex-user: runner\n"
-                )
-            )
+            found_long_lived(&source(
+                "          safety-strategy: unprivileged-user\n          codex-user: runner\n"
+            ))
             .is_some()
         );
         let through_env =
@@ -884,7 +918,7 @@ jobs:
                     "        with:\n          github_token: {value}\n          prompt: {value}\n"
                 ),
             );
-            assert_eq!(found(long_lived_token, &source), None, "{value}");
+            assert_eq!(found_long_lived(&source), None, "{value}");
             assert_eq!(found(other_secret, &source), None, "{value}");
         }
     }
@@ -915,7 +949,7 @@ jobs:
             found(other_secret, &source),
             Some("9: env passes secrets.AGENT_ENV to the agent".to_string())
         );
-        assert_eq!(found(long_lived_token, &source), None);
+        assert_eq!(found_long_lived(&source), None);
     }
     #[test]
     fn nearer_variables_survive_an_outer_env_expression() {
@@ -931,7 +965,7 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_PAT }}
 ";
         assert!(found(other_secret, source).is_some());
-        assert!(found(long_lived_token, source).is_some());
+        assert!(found_long_lived(source).is_some());
     }
 
     #[test]
@@ -941,14 +975,14 @@ jobs:
             "openai/codex-action@v1",
             "        env:\n          GITHUB_TOKEN: ${{ github.token }}\n",
         );
-        assert!(found(long_lived_token, &both).is_some());
+        assert!(found_long_lived(&both).is_some());
         let through_env = workflow(
             "env:\n  BOT: ${{ secrets.BOT_PAT }}\n",
             "anthropics/claude-code-action@v1",
             "        with:\n          github_token: ${{ env.bot }}\n",
         );
         assert_eq!(
-            found(long_lived_token, &through_env),
+            found_long_lived(&through_env),
             Some("10: github_token uses secrets.BOT_PAT, a stored token rather than GITHUB_TOKEN or an app token".to_string())
         );
     }
@@ -984,7 +1018,7 @@ jobs:
             "        env:\n          GH_TOKEN: ${{ env.ORG_PAT }}\n",
         );
         assert_eq!(
-            found(long_lived_token, &source),
+            found_long_lived(&source),
             Some("10: env GH_TOKEN uses secrets.ORG_PAT, a stored token rather than GITHUB_TOKEN or an app token".to_string())
         );
     }
@@ -999,7 +1033,7 @@ jobs:
           prompt: ${{ contains(secrets.LIST, 'x') && 'a' || 'b' }}
 ",
         );
-        assert_eq!(found(long_lived_token, &source), None);
+        assert_eq!(found_long_lived(&source), None);
         assert_eq!(found(other_secret, &source), None);
     }
 

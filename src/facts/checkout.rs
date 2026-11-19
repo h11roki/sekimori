@@ -10,6 +10,7 @@ use crate::agent::{Agent, AgentStep, JobStep, is_root_action, job_steps};
 use crate::workflow::Workflow;
 
 pub(super) const CHECKOUT_ACTION: &str = "actions/checkout";
+const CHECKOUT_PATH_INPUT: &str = "path";
 const WORKSPACE_EXPRESSION: &str = "${{github.workspace}}";
 const BASE_REPOSITORY_EXPRESSION: &str = "${{github.repository}}";
 const BASE_REFERENCES: [&str; 8] = [
@@ -180,16 +181,27 @@ enum RootCheckout<'w> {
     Head(&'w str, &'w str),
 }
 
+pub(super) fn checkout_place(step: &UsesStep) -> Option<String> {
+    match lookup_in(&step.with, CHECKOUT_PATH_INPUT) {
+        Input::Missing => None,
+        Input::Text { value, .. } if is_workspace_root(value) => None,
+        Input::Text { value, .. } => Some(
+            normalized(value)
+                .replace(WORKSPACE_EXPRESSION, ".")
+                .split('/')
+                .filter(|component| !component.is_empty() && *component != ".")
+                .collect::<Vec<_>>()
+                .join("/"),
+        ),
+        Input::Unreadable => Some(String::new()),
+    }
+}
+
 fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
     if !is_root_action(&step.uses, CHECKOUT_ACTION) {
         return RootCheckout::Untouched;
     }
-    let into_root = match lookup_in(&step.with, "path") {
-        Input::Missing => true,
-        Input::Text { value, .. } => is_workspace_root(value),
-        Input::Unreadable => false,
-    };
-    if !into_root {
+    if checkout_place(step).is_some() {
         return RootCheckout::Untouched;
     }
     let text = |name| match lookup_in(&step.with, name) {
@@ -223,7 +235,7 @@ fn root_checkout(step: &UsesStep, trusted_upstream: bool) -> RootCheckout<'_> {
     }
 }
 
-pub(super) fn is_workspace_root(path: &str) -> bool {
+fn is_workspace_root(path: &str) -> bool {
     normalized(path)
         .replace(WORKSPACE_EXPRESSION, ".")
         .split('/')
