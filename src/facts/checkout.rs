@@ -181,19 +181,23 @@ enum RootCheckout<'w> {
     Head(&'w str, &'w str),
 }
 
-pub(super) fn checkout_place(step: &UsesStep) -> Option<String> {
+pub(super) fn checkout_place(step: &UsesStep) -> Option<Option<String>> {
     match lookup_in(&step.with, CHECKOUT_PATH_INPUT) {
         Input::Missing => None,
         Input::Text { value, .. } if is_workspace_root(value) => None,
-        Input::Text { value, .. } => Some(
-            normalized(value)
-                .replace(WORKSPACE_EXPRESSION, ".")
+        Input::Text { value, .. } => Some(Some(
+            value
                 .split('/')
-                .filter(|component| !component.is_empty() && *component != ".")
+                .map(str::trim)
+                .filter(|component| {
+                    !component.is_empty()
+                        && *component != "."
+                        && normalized(component) != WORKSPACE_EXPRESSION
+                })
                 .collect::<Vec<_>>()
                 .join("/"),
-        ),
-        Input::Unreadable => Some(String::new()),
+        )),
+        Input::Unreadable => Some(None),
     }
 }
 

@@ -47,7 +47,7 @@ const CLAUDE_CREDENTIAL_INPUTS: [&str; 2] = ["anthropic_api_key", "claude_code_o
 const GEMINI_CREDENTIAL_INPUTS: [&str; 2] = ["gemini_api_key", "google_api_key"];
 const LONG_LIVED: &str = "a stored token rather than GITHUB_TOKEN or an app token";
 const CHECKOUT_TOKEN_INPUT: &str = "token";
-const CHECKOUT_CREDENTIAL_INPUTS: [&str; 2] = [CHECKOUT_TOKEN_INPUT, "ssh-key"];
+const CHECKOUT_SSH_KEY_INPUT: &str = "ssh-key";
 const STORED_SSH_KEY: &str = "a stored SSH key";
 const PERSIST_CREDENTIALS_INPUT: &str = "persist-credentials";
 
@@ -203,7 +203,8 @@ fn persisted_checkout_credential<'w>(
     workflow: &'w Workflow,
     step: &AgentStep<'w>,
 ) -> Option<SecretUse<'w>> {
-    let mut kept: Vec<(Option<String>, Option<SecretUse<'w>>)> = Vec::new();
+    let mut tokens: Vec<(Option<String>, Option<SecretUse<'w>>)> = Vec::new();
+    let mut ssh_keys = Vec::new();
     for (index, route, earlier) in job_steps(step.job_id, step.job) {
         if index >= step.index {
             break;
@@ -222,48 +223,47 @@ fn persisted_checkout_credential<'w>(
             }
             Input::Unreadable => flag_in(&checkout.with, PERSIST_CREDENTIALS_INPUT) == Some(true),
         };
-        let checkout_env = resolved_secrets(
-            nearest_env(
-                workflow,
-                step.job_id,
-                step.job,
-                &checkout.shared.env,
-                &route,
-            ),
-            true,
-        );
-        let credential = CHECKOUT_CREDENTIAL_INPUTS
-            .iter()
-            .filter(|name| {
-                persisted
-                    && !(step.agent == Agent::ClaudeCode
-                        && place.is_none()
-                        && **name == CHECKOUT_TOKEN_INPUT)
+        let credential = |name: &str, kind: &str| {
+            if !persisted {
+                return None;
+            }
+            let Input::Text { key, value } = lookup_in(&checkout.with, name) else {
+                return None;
+            };
+            let checkout_env = resolved_secrets(
+                nearest_env(
+                    workflow,
+                    step.job_id,
+                    step.job,
+                    &checkout.shared.env,
+                    &route,
+                ),
+                true,
+            );
+            let secret = all_secrets(value, Some(&checkout_env))
+                .into_iter()
+                .find(|secret| secret != EVERY_SECRET)?;
+            Some(SecretUse {
+                setting: format!(
+                    "{} leaves {key} {secret} for git in the workspace, {kind}",
+                    checkout.uses.raw()
+                ),
+                route: route.with_keys([Component::from("with"), Component::from(key)]),
             })
-            .find_map(|name| {
-                let Input::Text { key, value } = lookup_in(&checkout.with, name) else {
-                    return None;
-                };
-                let secret = all_secrets(value, Some(&checkout_env))
-                    .into_iter()
-                    .find(|secret| secret != EVERY_SECRET)?;
-                let kind = if *name == CHECKOUT_TOKEN_INPUT {
-                    LONG_LIVED
-                } else {
-                    STORED_SSH_KEY
-                };
-                Some(SecretUse {
-                    setting: format!(
-                        "{} leaves {key} {secret} for git in the workspace, {kind}",
-                        checkout.uses.raw()
-                    ),
-                    route: route.with_keys([Component::from("with"), Component::from(key)]),
-                })
-            });
-        kept.retain(|(other, _)| *other != place);
-        kept.push((place, credential));
+        };
+        ssh_keys.extend(credential(CHECKOUT_SSH_KEY_INPUT, STORED_SSH_KEY));
+        let removed_by_agent = step.agent == Agent::ClaudeCode && place.is_none();
+        let token = (!removed_by_agent)
+            .then(|| credential(CHECKOUT_TOKEN_INPUT, LONG_LIVED))
+            .flatten();
+        let key = place.map(|place| place.unwrap_or_else(|| format!("\0{index}")));
+        tokens.retain(|(other, _)| *other != key);
+        tokens.push((key, token));
     }
-    kept.into_iter().find_map(|(_, credential)| credential)
+    tokens
+        .into_iter()
+        .find_map(|(_, token)| token)
+        .or_else(|| ssh_keys.into_iter().next())
 }
 
 pub fn other_secret<'w>(step: &AgentStep<'w>, env: &SecretEnv<'w>) -> Option<SecretUse<'w>> {
@@ -569,6 +569,19 @@ jobs:
             )),
             None
         );
+        for checkouts in [
+            checkout("          token: ${{ secrets.BOT_PAT }}\n          path: 2024")
+                + &checkout("          path: 2025\n          persist-credentials: false"),
+            checkout("          token: ${{ secrets.BOT_PAT }}\n          path: Tools")
+                + &checkout("          path: tools\n          persist-credentials: false"),
+            checkout("          ssh-key: ${{ secrets.DEPLOY_KEY }}")
+                + &checkout("          persist-credentials: false"),
+        ] {
+            assert!(
+                found_long_lived(&source(&checkouts, base)).is_some(),
+                "{checkouts}"
+            );
+        }
         let after = "on: issues
 jobs:
   agent:
