@@ -56,6 +56,7 @@ const INTERPRETERS: [&str; 24] = [
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
+const OPTION_EXEC_COMMANDS: [&str; 5] = ["find", "fd", "rg", "sed", "tar"];
 const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
@@ -553,6 +554,7 @@ fn command_reach(prefix: &str) -> Reach {
         _ => false,
     };
     let takes_any_code = WRAPPERS.contains(&name)
+        || OPTION_EXEC_COMMANDS.contains(&name)
         || (INTERPRETERS.contains(&name) && arguments.is_empty())
         || (PACKAGE_RUNNERS.contains(&name) && runs_anything(&arguments))
         || RUN_SUBCOMMANDS
@@ -1057,6 +1059,37 @@ jobs:
             );
         }
         assert_eq!(base(&allow("Bash(npm test:*),Read,Grep")), None);
+    }
+
+    #[test]
+    fn tools_that_run_commands_through_an_option_are_broad_when_allowed_by_prefix() {
+        for rule in [
+            "Bash(find:*)",
+            "Bash(find . -name:*)",
+            "Bash(fd *)",
+            "Bash(rg:*)",
+            "Bash(sed -n:*)",
+            "Bash(tar xzf:*)",
+        ] {
+            assert_eq!(
+                claude(&format!(
+                    "        with:\n          claude_args: --allowedTools \"{rule}\"\n"
+                ))
+                .as_deref(),
+                Some(format!("8: claude_args allows `{rule}` through --allowedTools").as_str()),
+                "{rule}"
+            );
+        }
+        assert_eq!(
+            base(
+                "        with:\n          claude_args: --allowedTools \"Bash(find . -name '*.rs')\"\n"
+            ),
+            None
+        );
+        assert!(
+            gemini("        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(find)\", \"read_file\"]}}'\n")
+                .is_some()
+        );
     }
 
     #[test]
