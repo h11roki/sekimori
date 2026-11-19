@@ -15,6 +15,8 @@
   - `tar`(GNU): `--to-command`、`--checkpoint-action=exec=`、`-I` と `--use-compress-program`
   - `sort`(GNU): `--compress-program`、`split`(GNU): `--filter`
   - `git grep`: `-O` と `--open-files-in-pager` で、ページャーとして任意のコマンドを動かす
+  - `rsync`: `-e` と `--rsh` で、つなぐためのシェルとして任意のコマンドを動かす
+  - `git fetch`、`pull`、`clone`、`ls-remote` の `--upload-pack`、`git push` の `--receive-pack`、`git difftool` の `-x` と `--extcmd`
 - Claude Code と Gemini CLI の前方一致の許可は、許した前置きの後ろに何を続けても通す。オプションは前置きの後ろのどこに置いてもよいので、`Bash(find . -name:*)` のように前置きを長くしても、`-exec` を後ろに足せる
 - 公開ワークフロー 2,044 件では、Claude の `Bash(...)` か Gemini の `run_shell_command(...)` でこれらを許すファイルが、`find` で 29、`sed` で 12、`rg` で 6、`tar` で 2 あった(重なりを含む)
 
@@ -28,9 +30,10 @@
 
 高橋さんが判断を任せ(2026-11-19 に「改善すすめて」)、Claude が 1 を選んだ。
 
-- `find`、`fd`、`rg`、`sed`、`tar`、`sort`、`split` と、`git grep` を前方一致で許す規則(`Bash(find:*)`、`Bash(sed -n:*)`、`Bash(git grep:*)`、Gemini の `run_shell_command(find)` など)は、それだけで広い道具とする。書き換えの有無は問わない
+- `find`、`fd`、`rg`、`sed`、`tar`、`sort`、`split`、`rsync` と、`git` の `grep`、`fetch`、`pull`、`clone`、`ls-remote`、`push`、`difftool` を前方一致で許す規則(`Bash(find:*)`、`Bash(sed -n:*)`、`Bash(git grep:*)`、Gemini の `run_shell_command(find)` など)は、それだけで広い道具とする。書き換えの有無は問わない
   - 別の名前で入る同じ道具も含める。Ubuntu の apt で入れた `fd` の `fdfind`、Homebrew の GNU の道具の `gfind`、`gsed`、`gtar`、`gsort`、`gsplit`、BSD の `bsdtar`
-- Claude の規則で `*` が途中にあるもの(`Bash(find * -print)`)は、最初の `*` までを前置きとする。`*` は何にでも当たるので、その後ろの文字は前置きの後ろに続けられるものを絞らない。この読み方は、この ADR の道具に限らず、全ての `Bash(...)` の許可に使う
+- Claude の規則で `*` が途中にあるもの(`Bash(find * -print)`)は、最初の `*` までを前置きとする。`*` は何にでも当たるので、その後ろの文字は前置きの後ろに続けられるものを絞らない。この読み方は、この ADR の道具に限らず、全ての `Bash(...)` の許可に使う。拒否の規則は、途中の `*` を前置きの終わりとしては読まない。`Bash(find * -exec*)` のような拒否は `find` の一部だけを拒むので、`find` 全体を拒んだとみなすと見逃しになる
+- `git` の下位コマンドは、`-C` や `-c` のような値を取る全体のオプションとその値を飛ばして探す(ADR 0043 の書き換えと同じ読み方)
 - 広い道具は任意のコマンドを動かせるので、ファイルの書き換えもできるとみなす(ADR 0043 の書き換えと同じ)。`agent-code-with-secrets` のような書き換えに頼る規則にも効く
 - 完全一致の規則(`Bash(find . -name src)`)は、後ろに足せないので数えない。`*` を含む規則は、どこに `*` があっても前方一致として読む
 - `sed` は ADR 0043 で書き換えのコマンドとしても数えている。広い道具になっても、書き換えの理由の書き方は変えない

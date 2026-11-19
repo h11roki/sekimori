@@ -56,11 +56,22 @@ const INTERPRETERS: [&str; 24] = [
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
-const OPTION_EXEC_COMMANDS: [&str; 14] = [
+const OPTION_EXEC_COMMANDS: [&str; 15] = [
     "find", "gfind", "fd", "fdfind", "rg", "sed", "gsed", "tar", "gtar", "bsdtar", "sort", "gsort",
-    "split", "gsplit",
+    "split", "gsplit", "rsync",
 ];
-const OPTION_EXEC_SUBCOMMANDS: [(&str, &str); 1] = [("git", "grep")];
+const OPTION_EXEC_SUBCOMMANDS: [(&str, &[&str]); 1] = [(
+    "git",
+    &[
+        "grep",
+        "fetch",
+        "pull",
+        "clone",
+        "ls-remote",
+        "push",
+        "difftool",
+    ],
+)];
 const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
@@ -561,7 +572,20 @@ fn command_reach(prefix: &str) -> Reach {
         || OPTION_EXEC_COMMANDS.contains(&name)
         || OPTION_EXEC_SUBCOMMANDS
             .iter()
-            .any(|(tool, subcommand)| *tool == name && arguments.first() == Some(subcommand))
+            .find(|(tool, _)| *tool == name)
+            .is_some_and(|(_, subcommands)| {
+                let mut words = rest.iter();
+                let subcommand = loop {
+                    match words.next() {
+                        Some(word) if OPTION_VALUE_FLAGS.contains(word) => {
+                            words.next();
+                        }
+                        Some(word) if word.starts_with('-') => {}
+                        other => break other,
+                    }
+                };
+                subcommand.is_some_and(|subcommand| subcommands.contains(subcommand))
+            })
         || (INTERPRETERS.contains(&name) && arguments.is_empty())
         || (PACKAGE_RUNNERS.contains(&name) && runs_anything(&arguments))
         || RUN_SUBCOMMANDS
@@ -1081,6 +1105,9 @@ jobs:
             "Bash(gsed -n:*)",
             "Bash(sort:*)",
             "Bash(git grep:*)",
+            "Bash(git -C repo grep:*)",
+            "Bash(git fetch:*)",
+            "Bash(rsync:*)",
             "Bash(find * -print)",
         ] {
             assert_eq!(
@@ -1180,18 +1207,18 @@ jobs:
     #[test]
     fn shell_commands_that_write_files_count_as_edits() {
         for writer in [
-            "Bash(sed -i:*)",
-            "Bash(sed -n:*)",
+            "Bash(tee -a:*)",
+            "Bash(mv:*)",
             "Bash(tee:*)",
             "Bash(cp:*)",
             "Bash(git apply:*)",
             "Bash(git -C . apply:*)",
             "Bash(git:*)",
-            "Bash(git pull:*)",
+            "Bash(git merge:*)",
             "Bash(gh pr:*)",
             "Bash(gh pr checkout:*)",
             "Bash(curl:*)",
-            "Bash(git clone:*)",
+            "Bash(git worktree:*)",
             "Bash(git --work-tree . apply:*)",
             "Bash(npm pkg:*)",
             "Bash(npm config:*)",
@@ -1213,20 +1240,20 @@ jobs:
             );
             assert_eq!(base(&with), None, "{reader}");
         }
-        let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"]}}'\n";
+        let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(tee -a)\"]}}'\n";
         assert!(gemini(settings).is_some());
-        let excluded = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"], \"exclude\": [\"run_shell_command(sed -i)\"]}}'\n";
+        let excluded = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(tee -a)\"], \"exclude\": [\"run_shell_command(tee -a)\"]}}'\n";
         assert_eq!(gemini(excluded), None);
         assert_eq!(
             gemini(&excluded.replace(
-                "\"exclude\": [\"run_shell_command(sed -i)\"]",
-                "\"exclude\": [\"run_shell_command(sed)\"]"
+                "\"exclude\": [\"run_shell_command(tee -a)\"]",
+                "\"exclude\": [\"run_shell_command(tee)\"]"
             )),
             None
         );
         assert_eq!(
             base(
-                "        with:\n          claude_args: --allowedTools \"Bash(sed -i:*),Bash(npm test:*)\" --disallowedTools \"Bash(sed:*)\"\n"
+                "        with:\n          claude_args: --allowedTools \"Bash(tee -a:*),Bash(npm test:*)\" --disallowedTools \"Bash(tee:*)\"\n"
             ),
             None
         );
