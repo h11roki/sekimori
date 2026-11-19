@@ -29,7 +29,7 @@ const CODEX_BROAD_INPUTS: [(&str, &str); 3] = [
 const GEMINI_SHELL_TOOLS: [&str; 2] = ["run_shell_command", "ShellTool"];
 const GEMINI_FILE_EDIT_TOOLS: [[&str; 2]; 2] =
     [["write_file", "WriteFileTool"], ["replace", "EditTool"]];
-const INTERPRETERS: [&str; 24] = [
+const INTERPRETERS: [&str; 27] = [
     "bash",
     "sh",
     "zsh",
@@ -51,11 +51,29 @@ const INTERPRETERS: [&str; 24] = [
     "php",
     "lua",
     "awk",
+    "gawk",
+    "mawk",
+    "nawk",
     "osascript",
     "eval",
     "exec",
 ];
 const PACKAGE_RUNNERS: [&str; 5] = ["npx", "pnpx", "bunx", "uvx", "pipx"];
+const OPTION_EXEC_COMMANDS: [&str; 17] = [
+    "find", "gfind", "fd", "fdfind", "rg", "sed", "gsed", "tar", "gtar", "bsdtar", "sort", "gsort",
+    "split", "gsplit", "rsync", "zip", "ssh",
+];
+const GIT: &str = "git";
+const GIT_OPTION_EXEC_SUBCOMMANDS: [&str; 8] = [
+    "grep",
+    "fetch",
+    "pull",
+    "clone",
+    "ls-remote",
+    "push",
+    "difftool",
+    "archive",
+];
 const RUN_SUBCOMMANDS: [(&str, &[&str]); 14] = [
     (
         "npm",
@@ -110,8 +128,8 @@ const PROJECT_CODE_TOOLS: [&str; 32] = [
     "rspec",
 ];
 const RELATIVE_PATH_PREFIXES: [&str; 2] = ["./", "../"];
-const FILE_WRITERS: [&str; 11] = [
-    "tee", "cp", "mv", "install", "rsync", "patch", "dd", "truncate", "sed", "curl", "wget",
+const FILE_WRITERS: [&str; 9] = [
+    "tee", "cp", "mv", "install", "patch", "dd", "truncate", "curl", "wget",
 ];
 const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
     (
@@ -121,10 +139,8 @@ const SUBCOMMAND_FILE_WRITERS: [(&str, &[&[&str]]); 5] = [
             &["am"],
             &["checkout"],
             &["switch"],
-            &["pull"],
             &["merge"],
             &["cherry-pick"],
-            &["clone"],
             &["reset"],
             &["restore"],
             &["stash"],
@@ -399,8 +415,8 @@ impl<'w> ClaudePermissions<'w> {
             return;
         };
         let prefix = pattern
-            .strip_suffix('*')
-            .map(|prefix| prefix.trim_end_matches([':', ' ']));
+            .split_once('*')
+            .map(|(prefix, _)| prefix.trim_end_matches([':', ' ']));
         if prefix.is_some_and(writes_files) {
             self.file_writers.push(tool.to_string());
         }
@@ -542,17 +558,18 @@ fn command_reach(prefix: &str) -> Reach {
         return Reach::AnyCommand;
     }
     let name = command_name(program);
-    let arguments: Vec<&str> = rest
-        .iter()
-        .copied()
-        .filter(|word| !word.starts_with('-'))
-        .collect();
+    let arguments = command_words(rest.iter().copied());
     let runs_anything = |arguments: &[&str]| match arguments {
         [] => true,
         [only] => INTERPRETERS.contains(&command_name(only)),
         _ => false,
     };
     let takes_any_code = WRAPPERS.contains(&name)
+        || OPTION_EXEC_COMMANDS.contains(&name)
+        || (name == GIT
+            && arguments
+                .first()
+                .is_some_and(|subcommand| GIT_OPTION_EXEC_SUBCOMMANDS.contains(subcommand)))
         || (INTERPRETERS.contains(&name) && arguments.is_empty())
         || (PACKAGE_RUNNERS.contains(&name) && runs_anything(&arguments))
         || RUN_SUBCOMMANDS
@@ -571,6 +588,18 @@ fn command_reach(prefix: &str) -> Reach {
     }
 }
 
+fn command_words<'a>(mut words: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut found = Vec::new();
+    while let Some(word) = words.next() {
+        if OPTION_VALUE_FLAGS.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            found.push(word);
+        }
+    }
+    found
+}
+
 fn writes_files(prefix: &str) -> bool {
     let mut words = prefix
         .split_whitespace()
@@ -585,14 +614,7 @@ fn writes_files(prefix: &str) -> bool {
     else {
         return FILE_WRITERS.contains(&name);
     };
-    let mut subcommands = Vec::new();
-    while let Some(word) = words.next() {
-        if OPTION_VALUE_FLAGS.contains(&word) {
-            words.next();
-        } else if !word.starts_with('-') {
-            subcommands.push(word);
-        }
-    }
+    let subcommands = command_words(words);
     writers
         .iter()
         .any(|writer| writer.starts_with(&subcommands) || subcommands.starts_with(writer))
@@ -1060,6 +1082,64 @@ jobs:
     }
 
     #[test]
+    fn tools_that_run_commands_through_an_option_are_broad_when_allowed_by_prefix() {
+        for rule in [
+            "Bash(find:*)",
+            "Bash(find . -name:*)",
+            "Bash(fd *)",
+            "Bash(rg:*)",
+            "Bash(sed -n:*)",
+            "Bash(tar xzf:*)",
+            "Bash(fdfind:*)",
+            "Bash(gsed -n:*)",
+            "Bash(sort:*)",
+            "Bash(git grep:*)",
+            "Bash(git -C repo grep:*)",
+            "Bash(git fetch:*)",
+            "Bash(rsync:*)",
+            "Bash(git -C repo:*)",
+            "Bash(git archive:*)",
+            "Bash(gawk:*)",
+            "Bash(find * -print)",
+        ] {
+            assert_eq!(
+                claude(&format!(
+                    "        with:\n          claude_args: --allowedTools \"{rule}\"\n"
+                ))
+                .as_deref(),
+                Some(format!("8: claude_args allows `{rule}` through --allowedTools").as_str()),
+                "{rule}"
+            );
+        }
+        assert_eq!(
+            claude(
+                "        with:\n          claude_args: --allowedTools \"Bash(find . -name src)\"\n"
+            ),
+            None
+        );
+        assert_eq!(
+            gemini("        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(find)\", \"read_file\"]}}'\n")
+                .as_deref(),
+            Some("8: settings allows `run_shell_command(find)` in tools.core")
+        );
+    }
+
+    #[test]
+    fn a_deny_with_a_wildcard_in_the_middle_does_not_deny_the_whole_command() {
+        assert_eq!(
+            claude("        with:\n          claude_args: --allowedTools \"Bash(find:*)\" --disallowedTools \"Bash(find * -exec*)\"\n")
+                .as_deref(),
+            Some("8: claude_args allows `Bash(find:*)` through --allowedTools")
+        );
+        assert_eq!(
+            claude(
+                "        with:\n          claude_args: --allowedTools \"Bash(find:*)\" --disallowedTools \"Bash(find:*)\"\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn gemini_build_commands_are_broad_with_file_edits() {
         let settings = |core: &str| {
             format!("        with:\n          settings: '{{\"tools\": {{\"core\": [{core}]}}}}'\n")
@@ -1134,18 +1214,18 @@ jobs:
     #[test]
     fn shell_commands_that_write_files_count_as_edits() {
         for writer in [
-            "Bash(sed -i:*)",
-            "Bash(sed -n:*)",
+            "Bash(tee -a:*)",
+            "Bash(mv:*)",
             "Bash(tee:*)",
             "Bash(cp:*)",
             "Bash(git apply:*)",
             "Bash(git -C . apply:*)",
             "Bash(git:*)",
-            "Bash(git pull:*)",
+            "Bash(git merge:*)",
             "Bash(gh pr:*)",
             "Bash(gh pr checkout:*)",
             "Bash(curl:*)",
-            "Bash(git clone:*)",
+            "Bash(git worktree:*)",
             "Bash(git --work-tree . apply:*)",
             "Bash(npm pkg:*)",
             "Bash(npm config:*)",
@@ -1167,20 +1247,20 @@ jobs:
             );
             assert_eq!(base(&with), None, "{reader}");
         }
-        let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"]}}'\n";
+        let settings = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(tee -a)\"]}}'\n";
         assert!(gemini(settings).is_some());
-        let excluded = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(sed -i)\"], \"exclude\": [\"run_shell_command(sed -i)\"]}}'\n";
+        let excluded = "        with:\n          settings: '{\"tools\": {\"core\": [\"run_shell_command(npm test)\", \"run_shell_command(tee -a)\"], \"exclude\": [\"run_shell_command(tee -a)\"]}}'\n";
         assert_eq!(gemini(excluded), None);
         assert_eq!(
             gemini(&excluded.replace(
-                "\"exclude\": [\"run_shell_command(sed -i)\"]",
-                "\"exclude\": [\"run_shell_command(sed)\"]"
+                "\"exclude\": [\"run_shell_command(tee -a)\"]",
+                "\"exclude\": [\"run_shell_command(tee)\"]"
             )),
             None
         );
         assert_eq!(
             base(
-                "        with:\n          claude_args: --allowedTools \"Bash(sed -i:*),Bash(npm test:*)\" --disallowedTools \"Bash(sed:*)\"\n"
+                "        with:\n          claude_args: --allowedTools \"Bash(tee -a:*),Bash(npm test:*)\" --disallowedTools \"Bash(tee:*)\"\n"
             ),
             None
         );
